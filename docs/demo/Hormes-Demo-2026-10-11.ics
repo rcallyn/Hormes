@@ -1,0 +1,134 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Hormes//Hypothetical demo day//EN
+CALSCALE:GREGORIAN
+X-WR-CALNAME:Hormes Demo
+X-WR-TIMEZONE:America/New_York
+BEGIN:VEVENT
+UID:CA6B3028-BB3A-40D6-B6E9-11790F7E71CB
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T130000Z
+DTEND:20261011T140000Z
+SUMMARY:Microeconomics class
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/class\nNext step: Capture the mock
+  lecture explicitly\; ask a silent written question while capture continue
+ s.\nSource: Class 10 - Exchange Economies.pptx
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:B8B29DDC-D834-422D-B095-FC4A3A57F380
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T150000Z
+DTEND:20261011T160000Z
+SUMMARY:Between-class review
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/review\nNext step: Review the save
+ d class material\; the four-question transition quiz uses the actual captu
+ red lecture.\nSource: Class 10 - Exchange Economies.pptx
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:1E753B93-6F84-43B5-85B4-7715B642AC22
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T160000Z
+DTEND:20261011T170000Z
+SUMMARY:Microeconomics - next lecture
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/class2\nNext step: Enter the next 
+ class after the actual four-question review\; keep its lecture separate.\n
+ Source: Class 10 - Exchange Economies.pptx
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:C3C0C415-7BAC-407C-8EFD-9633C7E986DB
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T170000Z
+DTEND:20261011T180000Z
+SUMMARY:Exchange economies - study
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/study\nNext step: Try the exchange
+ -economy problem on the board\; record any hint as assistance.\nSource: Cl
+ ass 10 - Exchange Economies.pptx
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:696D11C2-A9CE-4B0D-A177-4E7C3D9274D5
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T190000Z
+DTEND:20261011T193000Z
+SUMMARY:Exam preparation
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/exam\nNext step: Try a fresh probl
+ em independently and retain the application check for the submitted answer
+ .\nSource: Class 10 - Exchange Economies.pptx
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:30B09DC5-92ED-4B8C-9313-B16C4DCAD984
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T193000Z
+DTEND:20261011T200000Z
+SUMMARY:Build EvoSim
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/coding\nNext step: Resume the boun
+ ded EvoSim goal\; retain actual correctness tests and benchmark receipts.\
+ nSource: EvoSim task brief
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:57793C57-0771-48A3-97D2-D6FB07E07874
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T200000Z
+DTEND:20261011T210000Z
+SUMMARY:Hormes VC meeting
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/meeting\nNext step: Prepare from t
+ he synthetic pitch deck\; explicitly capture the mock meeting. Review the 
+ pitch-deck-only Gmail draft\; reconnect timing remains pending.\nSource: d
+ ocs/demo/vc/Hormes-deck-v1.pdf
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:32021790-26D0-4D2B-B4C2-E38AFDBE8DE9
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T210000Z
+DTEND:20261011T220000Z
+SUMMARY:Prepare groceries
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/grocery\nNext step: Use the explic
+ itly selected Apple Notes grocery list\; retain actual cart observations a
+ nd stop at human cart review.\nSource: User-selected grocery note
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+BEGIN:VEVENT
+UID:57861484-4C57-4966-8FF7-AA8BDD11422D
+DTSTAMP:20261011T221440Z
+DTSTART:20261011T230000Z
+DTEND:20261012T000000Z
+SUMMARY:Break
+DESCRIPTION:Hypothetical Hormes demo day. Planned scenario\, not a complete
+ d activity.\nHormes demo ID: 2026-10-11/break\nNext step: Save and fold th
+ e workspace\; keep the microphone closed and proactive offers quiet.\nSour
+ ce: Saved work
+CATEGORIES:HORMES DEMO
+STATUS:CONFIRMED
+TRANSP:TRANSPARENT
+END:VEVENT
+END:VCALENDAR

@@ -3,6 +3,9 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
+  "scripts": {
+    "test": "node --import tsx --import ../../scripts/test-preload.mjs --test 'src/**/*.test.ts'"
+  },
   "exports": {
     ".": "./src/index.ts"
   },
@@ -13,7 +16,9 @@
     "@hormes/daemon": "workspace:*",
     "@hormes/engine": "workspace:*",
     "@hormes/hands": "workspace:*",
+    "@hormes/install": "workspace:*",
     "@hormes/live": "workspace:*",
+    "@hormes/memory": "workspace:*",
     "@hormes/protocol": "workspace:*"
   }
 }
