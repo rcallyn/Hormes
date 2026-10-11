@@ -1,0 +1,693 @@
+import { AUTOMATION_GRACE_MS, type AutomationClauses, type AutomationKind, type AutomationWhen, type ClockTime, type Recurrence, type SystemEvent, type Weekday } from "@hormes/protocol";
+
+/**
+ * When an automation fires — the clock arithmetic, pure, so the CLI can parse a phrase
+ * without a daemon and the engine's tick() can ask "what is next" without a model.
+ *
+ *   parseWhen     User's phrase → AutomationWhen (pass 1: a time in digits or words, tomorrow, in N,
+ *                 weekdays / daily / nightly / mornings / named days at a time, every N h/min);
+ *                 monthly is refused
+ *   nextFire      the next instant a `when` fires after an instant
+ *   describe      a `when` in words, the phrase where one was kept
+ *   inQuiet       whether an instant is inside quiet hours (wraps midnight)
+ *   quietEnds     when the current quiet spell ends
+ *   inWindow      whether a row's window and days admit an instant
+ *   graceFor      how late a kind may still fire (the contract's table)
+ *   snoozeDefault the one Snooze press's minutes for a kind
+ *
+ * Every date is LOCAL: the Mac's clock, the zone the process runs in. A ClockTime is
+ * re-resolved on each date it is asked about, so a 02:30 on the night the clocks spring
+ * forward (no such minute) rolls to 03:00, and a 01:30 on the night they fall back (two
+ * such minutes) fires once, on the first.
+ */
+
+/** Sunday first, as `Date.getDay()` numbers them. */
+export const WEEKDAYS: readonly Weekday[] = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+const WEEKDAY_WORK: readonly Weekday[] = ["mon", "tue", "wed", "thu", "fri"];
+const WEEKDAY_END: readonly Weekday[] = ["sat", "sun"];
+const WEEKDAY_ALL: readonly Weekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+/** What a one-shot phrase must clear to count as "next": a time said at 07:00:00 for 07:00 is tomorrow's. */
+export const PARSE_LEAD_MS = 60_000;
+/** The shortest interval a phrase may set. */
+export const INTERVAL_MIN_MS = 60_000;
+
+const pad2 = (n: number): string => String(n).padStart(2, "0");
+
+/** The local wall clock of an instant as the contract's "HH:mm". */
+export function clockOf(ms: number): ClockTime {
+  const d = new Date(ms);
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}` as ClockTime;
+}
+
+/** The local weekday of an instant. */
+export function weekdayOf(ms: number): Weekday {
+  return WEEKDAYS[new Date(ms).getDay()] ?? "sun";
+}
+
+/** "HH:mm" → minutes since local midnight; undefined for a malformed string. */
+function minutesOf(t: ClockTime): number | undefined {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(t);
+  if (!m) return undefined;
+  const hh = Number(m[1]);
+  const mm = Number(m[2]);
+  if (hh > 23 || mm > 59) return undefined;
+  return hh * 60 + mm;
+}
+
+/** Local midnight of the instant's date, `plusDays` later. */
+function dayStart(ms: number, plusDays = 0): Date {
+  const d = new Date(ms);
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate() + plusDays, 0, 0, 0, 0);
+}
+
+/**
+ * The instant of a ClockTime on a local date. A minute the clocks skip (02:30 on the
+ * spring-forward night: the Date lands at 03:30) rolls to the first minute after the gap
+ * (03:00); a minute that happens twice resolves to its first occurrence (the ECMAScript rule).
+ */
+export function atClock(day: Date, t: ClockTime): number {
+  const mins = minutesOf(t) ?? 0;
+  const hh = Math.floor(mins / 60);
+  const mm = mins % 60;
+  const d = new Date(day.getFullYear(), day.getMonth(), day.getDate(), hh, mm, 0, 0);
+  if (d.getHours() === hh && d.getMinutes() === mm) return d.getTime();
+  // Skipped: walk forward minute by minute from the asked time until the clock reads a real minute.
+  let probe = d.getTime() - 60 * 60_000;
+  for (let i = 0; i < 180; i++) {
+    probe += 60_000;
+    const p = new Date(probe);
+    const read = p.getHours() * 60 + p.getMinutes();
+    if (read > mins || p.getDate() !== day.getDate()) return probe;
+  }
+  return d.getTime();
+}
+
+// ------------------------------------------------------------------ parsing ---
+
+export type ParsedWhen = AutomationWhen | { readonly error: string };
+
+/** Number words as digits, so every branch below reads one form: "twelve" → 12, "forty five" → 45, "ninety" → 90. */
+const NUMBER_WORDS: Readonly<Record<string, number>> = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19,
+};
+const TENS_WORDS: Readonly<Record<string, number>> = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+const DAY_WORDS: Readonly<Record<string, Weekday>> = {
+  mon: "mon", monday: "mon", mondays: "mon", tue: "tue", tues: "tue", tuesday: "tue", tuesdays: "tue", wed: "wed", weds: "wed", wednesday: "wed", wednesdays: "wed",
+  thu: "thu", thur: "thu", thurs: "thu", thursday: "thu", thursdays: "thu", fri: "fri", friday: "fri", fridays: "fri", sat: "sat", saturday: "sat", saturdays: "sat", sun: "sun", sunday: "sun", sundays: "sun",
+};
+const UNIT_MS: Readonly<Record<string, number>> = {
+  s: 1_000, sec: 1_000, secs: 1_000, second: 1_000, seconds: 1_000,
+  m: 60_000, min: 60_000, mins: 60_000, minute: 60_000, minutes: 60_000,
+  h: 3_600_000, hr: 3_600_000, hrs: 3_600_000, hour: 3_600_000, hours: 3_600_000,
+};
+const SKIP_WORDS = new Set(["at", "on", "in", "and", "the", "a", "an", "o'clock", "oclock", "please", "alarm", "for", "me", "wake", "up", "this"]);
+type Part = "morning" | "evening" | "night";
+/** The part of the day a word names; the plural (and "nightly", and "every" before one) makes it a daily recurrence. */
+const PART_WORDS: Readonly<Record<string, { readonly part: Part; readonly daily: boolean }>> = {
+  morning: { part: "morning", daily: false }, mornings: { part: "morning", daily: true },
+  evening: { part: "evening", daily: false }, evenings: { part: "evening", daily: true },
+  night: { part: "night", daily: false }, nights: { part: "night", daily: true }, nightly: { part: "night", daily: true },
+};
+/** The hours a part of the day holds: a time the part cannot move (am/pm said, or written the 24-hour way) must be one of them. */
+const PART_HOURS: Readonly<Record<Part, (hh: number) => boolean>> = {
+  morning: (hh) => hh <= 11,
+  evening: (hh) => hh >= 12 || hh === 0,
+  night: (hh) => hh >= 18 || hh <= 5,
+};
+/**
+ * The last of the night's small hours a bare hour reaches: one, two or three at night (or tonight) is a.m. Four and five are
+ * either side of dawn, so "every night at five" is refused and "tonight at five" keeps the evening's 17:00.
+ */
+const SMALL_HOURS_LAST = 3;
+/** The minutes a bare number may stand for before "to" or "before": "5 to 9" is 08:55, "9 to 5" is a range. "N minutes to H" takes any. */
+const MINUTES_TO: ReadonlySet<number> = new Set([5, 10, 20, 25]);
+const MINUTE_WORDS: ReadonlySet<string> = new Set(["minute", "minutes", "min", "mins"]);
+const NOT_YET = /\b(monthly|month|months|1st|2nd|3rd|\d+th|first|second|third|fourth|last|year|yearly|annually)\b/;
+const err = (error: string): { readonly error: string } => ({ error });
+
+interface Clock {
+  readonly hh: number;
+  readonly mm: number;
+  /** A colon form, an am/pm, noon or midnight: the hour is what it says. Otherwise "seven" may mean 19:00. */
+  readonly exact: boolean;
+  /** am/pm, noon or midnight was said: no part of the day moves it. */
+  readonly said: boolean;
+  /** The hour was written the 24-hour way ("07:10", "0:15", "19:00"): no part of the day moves it either. */
+  readonly h24: boolean;
+}
+
+/** "twelve minutes" → "12 minutes", "seven forty five" → "7 45", "seven oh five" stays "7 oh 5" for the clock to read. */
+function digits(p: string): string {
+  const words = p.split(" ");
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? "";
+    const tens = TENS_WORDS[w];
+    if (tens !== undefined) {
+      const unit = NUMBER_WORDS[words[i + 1] ?? ""];
+      if (unit !== undefined && unit >= 1 && unit <= 9) {
+        out.push(String(tens + unit));
+        i++;
+      } else out.push(String(tens));
+      continue;
+    }
+    const n = NUMBER_WORDS[w];
+    out.push(n !== undefined ? String(n) : w);
+  }
+  return out.join(" ");
+}
+
+/** A duration phrase: "12 minutes", "2 h", "1 h 30 min", "an hour", "half an hour", "an hour and a half", "2 and a half hours". */
+function parseDuration(text: string): number | undefined {
+  const t = text
+    .trim()
+    .replace(/\ban?\b/g, "1")
+    .replace(/\bhalf 1 (hour|hr|h)\b/, "30 min")
+    .replace(/(\d+(?:\.\d+)?) and 1 half ([a-z]+)/, (_, n: string, u: string) => `${Number(n) + 0.5} ${u}`)
+    .replace(/(\d+(?:\.\d+)?) ([a-z]+) and 1 half\b/, (_, n: string, u: string) => `${Number(n) + 0.5} ${u}`);
+  let total = 0;
+  let rest = t;
+  for (let guard = 0; guard < 4 && rest; guard++) {
+    const m = /^(\d+(?:\.\d+)?)\s*([a-z]+)(?:\s+(?:and\s+)?|$)/.exec(rest);
+    if (!m) return undefined;
+    const unit = UNIT_MS[m[2] ?? ""];
+    if (unit === undefined) return undefined;
+    total += Number(m[1]) * unit;
+    rest = rest.slice(m[0].length);
+  }
+  return rest ? undefined : total;
+}
+
+const meridian = (w: string | undefined): "am" | "pm" | undefined => (w === "am" || w === "a.m." ? "am" : w === "pm" || w === "p.m." ? "pm" : undefined);
+
+/** An hour and its minutes with an am/pm said or not; undefined past 23:59. `written` is the hour as said: "07", "0" or "19" is a 24-hour hour. */
+function clockOf24(hh: number, mm: number, ap: "am" | "pm" | undefined, exact: boolean, written = String(hh)): Clock | undefined {
+  let h = hh;
+  if (ap === "pm" && h < 12) h += 12;
+  if (ap === "am" && h === 12) h = 0;
+  if (h > 23 || mm > 59) return undefined;
+  const h24 = /^0\d$/.test(written) || Number(written) === 0 || Number(written) >= 13;
+  return { hh: h, mm, exact: exact || ap !== undefined, said: ap !== undefined, h24 };
+}
+
+/** One token: "7", "7:10", "7.10", "07:10", "7am", "7pm", "noon", "midnight"; `next` may be a trailing am/pm word. */
+function parseClock(tok: string, next: string | undefined): { readonly clock: Clock; readonly used: number } | undefined {
+  if (tok === "noon") return { clock: { hh: 12, mm: 0, exact: true, said: true, h24: false }, used: 1 };
+  if (tok === "midnight") return { clock: { hh: 0, mm: 0, exact: true, said: true, h24: false }, used: 1 };
+  const r = /^(\d{1,2})(?:[:.](\d{2}))?(am|pm|a\.m\.|p\.m\.)?$/.exec(tok);
+  if (!r) return undefined;
+  const own = meridian(r[3]);
+  const ap = own ?? meridian(next);
+  const clock = clockOf24(Number(r[1]), r[2] === undefined ? 0 : Number(r[2]), ap, r[2] !== undefined, r[1]);
+  return clock ? { clock, used: !own && ap ? 2 : 1 } : undefined;
+}
+
+/**
+ * A clock at words[i], over one to five words: a token parseClock reads; a bare hour and its minutes
+ * ("7 10" from "seven ten", "7 oh 5", "7 45 pm"); or a relative one ("half past 7", "quarter to 8",
+ * "10 past 7", "20 to 9", "13 minutes to 8"). The two-word and relative forms keep the bare hour's 12-hour
+ * twin. A bare number before "to" or "before" that no clock says ("9 to 5", "7 to 9") is a range: `range`
+ * holds the words, for the caller to refuse.
+ */
+function readClock(words: readonly string[], i: number): { readonly clock: Clock; readonly used: number } | { readonly range: string } | undefined {
+  const w = words[i] ?? "";
+  // "10 minutes to 8": the unit word sits between the count and the direction.
+  const unit = /^\d{1,2}$/.test(w) && MINUTE_WORDS.has(words[i + 1] ?? "") ? 1 : 0;
+  const toward = words[i + 1 + unit];
+  const rel = w === "half" ? 30 : w === "quarter" ? 15 : /^\d{1,2}$/.test(w) ? Number(w) : undefined;
+  const hour = /^(\d{1,2})(am|pm|a\.m\.|p\.m\.)?$/.exec(words[i + 2 + unit] ?? "");
+  if (rel !== undefined && rel >= 1 && rel <= 59 && hour && (toward === "past" || toward === "after" || toward === "to" || toward === "before")) {
+    const own = meridian(hour[2]);
+    const ap = own ?? meridian(words[i + 3 + unit]);
+    const back = toward === "to" || toward === "before";
+    const hh = Number(hour[1]);
+    if (back && w === "half") return undefined;
+    if (back && unit === 0 && /^\d/.test(w) && !MINUTES_TO.has(rel)) return { range: `${w} ${toward} ${hour[0]}` };
+    const clock = clockOf24(back ? (hh + 23) % 24 : hh, back ? 60 - rel : rel, ap, false, hour[1]);
+    return clock ? { clock, used: 3 + unit + (!own && ap ? 1 : 0) } : undefined;
+  }
+  const one = parseClock(w, words[i + 1]);
+  if (!one || one.used !== 1 || !/^\d{1,2}$/.test(w)) return one;
+  // "7 10" · "7 oh 5": the bare hour's minutes follow it as their own word.
+  let j = i + 1;
+  let mm: number | undefined;
+  if (words[j] === "oh" && /^\d$/.test(words[j + 1] ?? "")) {
+    mm = Number(words[j + 1]);
+    j += 2;
+  } else if (/^\d{2}$/.test(words[j] ?? "")) {
+    mm = Number(words[j]);
+    j += 1;
+  }
+  if (mm === undefined || mm > 59) return one;
+  const ap = meridian(words[j]);
+  const clock = clockOf24(Number(w), mm, ap, false, w);
+  return clock ? { clock, used: j - i + (ap ? 1 : 0) } : one;
+}
+
+/**
+ * A part of the day settles a 12-hour clock: every part's 12 is midnight's hour; the morning keeps 1–11; the evening's 1–11
+ * are 13–23; the night keeps its small hours 1–3 (two at night is 02:00) and makes 6–11 into 18–23. Four and five at night are
+ * either side of dawn: the caller refuses them first (unclearAtNight). A clock the part cannot move (am/pm said, or a 24-hour
+ * hour) must already be in the part: '07:10' and 'evening' is undefined, for the caller to refuse.
+ */
+function inPart(c: Clock, part: Part): Clock | undefined {
+  if (c.said || c.h24) return PART_HOURS[part](c.hh) ? c : undefined;
+  const hh = c.hh === 12 ? 0 : part === "morning" ? c.hh : part === "evening" ? (c.hh < 12 ? c.hh + 12 : c.hh) : c.hh >= 6 && c.hh < 12 ? c.hh + 12 : c.hh;
+  return { ...c, hh, exact: true };
+}
+
+/** A bare four or five at night: 04:00 or 16:00, 05:00 or 17:00. The refusal names both; undefined for any other clock. */
+function unclearAtNight(c: Clock): string | undefined {
+  if (c.said || c.h24 || c.hh <= SMALL_HOURS_LAST || c.hh >= 6) return undefined;
+  const said = c.mm ? `${c.hh}:${pad2(c.mm)}` : String(c.hh);
+  return `${said} at night could be ${clockTime(c)} or ${clockTime({ ...c, hh: c.hh + 12 })}; say which`;
+}
+
+/**
+ * Tonight settles a bare hour the way it always has, as the evening's (four is 16:00, eleven is 23:00), except the night's
+ * own hours: twelve is midnight and one to three are the small hours after it. An am/pm or a 24-hour hour is what it says.
+ */
+function tonight(c: Clock): Clock {
+  if (c.said || c.h24) return c;
+  const hh = c.hh === 12 ? 0 : c.hh <= SMALL_HOURS_LAST ? c.hh : c.hh < 12 ? c.hh + 12 : c.hh;
+  return { ...c, hh, exact: true };
+}
+
+/** Each day one later: the small hours of Saturday night are Sunday's. */
+function dayAfter(days: ReadonlySet<Weekday>): Set<Weekday> {
+  return new Set([...days].map((d) => WEEKDAYS[(WEEKDAYS.indexOf(d) + 1) % 7] ?? d));
+}
+
+function clockTime(c: Pick<Clock, "hh" | "mm">): ClockTime {
+  return `${pad2(c.hh)}:${pad2(c.mm)}` as ClockTime;
+}
+
+/** The recurrence's phrase, normalised: "weekdays 09:00" · "daily 18:00" · "weekends 10:30" · "mon,wed 07:10". */
+function weeklyPhrase(days: readonly Weekday[], at: ClockTime): string {
+  const set = new Set(days);
+  const same = (want: readonly Weekday[]): boolean => want.length === set.size && want.every((d) => set.has(d));
+  if (same(WEEKDAY_ALL)) return `daily ${at}`;
+  if (same(WEEKDAY_WORK)) return `weekdays ${at}`;
+  if (same(WEEKDAY_END)) return `weekends ${at}`;
+  return `${WEEKDAY_ALL.filter((d) => set.has(d)).join(",")} ${at}`;
+}
+
+/** "every 2 h" · "every 45 min" · "every 90 s". */
+function intervalPhrase(everyMs: number): string {
+  return `every ${durationWords(everyMs)}`;
+}
+
+/** "2 h" · "45 min" · "1 h 30 min" · "1 min 30 s" · "45 s" — hours, minutes and seconds, each only when non-zero. */
+function durationWords(ms: number): string {
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  const parts: string[] = [];
+  if (h) parts.push(`${h} h`);
+  if (m) parts.push(`${m} min`);
+  if (s) parts.push(`${s} s`);
+  return parts.length ? parts.join(" ") : "0 s";
+}
+
+/** A timer of `ms`, or why not. */
+function timer(ms: number): ParsedWhen {
+  return ms < 1_000 ? err("a timer needs at least a second") : { kind: "in", ms: Math.round(ms) };
+}
+
+/**
+ * User's phrase → when it fires: "7:10" · "at seven" · "seven ten" · "7.10" · "half past seven" ·
+ * "quarter to eight" · "tomorrow 07:10" · "tomorrow morning at 7" · "in 12 minutes" · "twelve minutes" ·
+ * "in an hour and a half" · "weekdays 09:00" · "daily 18:00" · "nightly 23:00" · "every night at
+ * eleven" · "every night at two" · "mornings at 7" · "weekends 10:30" · "mon,wed 07:10" · "every 2 h" ·
+ * "every 45 min". Number words are read as digits. A bare hour with no am/pm ("at seven") is the next
+ * 07:00 or 19:00 at least PARSE_LEAD_MS away; a morning, an evening or a night word settles it (two at
+ * night is 02:00; four or five at night is refused, it could be either), and "this morning" or "this
+ * evening" is today's; tonight keeps the evening's reading (five is 17:00) but for twelve and one to
+ * three, the small hours after it; a named day's night runs into the next day ("saturday night at 1" is
+ * Sunday 01:00); a colon form is the hour it says, today if still ahead, else tomorrow. Monthly phrases
+ * are pass 2: "not yet — say the date". Words it does not know are named in the error, never guessed;
+ * a range ("9 to 5") and a count ("every 2 nights") are refused, never read as a clock.
+ */
+export function parseWhen(phrase: string, now: number): ParsedWhen {
+  const p = digits(
+    phrase
+      .trim()
+      .toLowerCase()
+      .replace(/[,;]+/g, " ")
+      .replace(/&/g, " and ")
+      .replace(/(?<=[a-z])-(?=[a-z])/g, " ")
+      .replace(/\s+/g, " "),
+  );
+  if (!p) return err("say when: a time, 'in 12 minutes', 'weekdays 09:00' or 'every 2 h'");
+  if (NOT_YET.test(p)) return err("not yet — say the date");
+
+  const inM = /^in (.+)$/.exec(p);
+  if (inM) {
+    const ms = parseDuration(inM[1] ?? "");
+    if (ms === undefined) return err(`didn't catch the duration in "${phrase.trim()}"; say "in 12 minutes" or "in 2 hours"`);
+    return timer(ms);
+  }
+
+  const everyM = /^every (\d+(?:\.\d+)?|an?|half an?) ?([a-z]+)(.*)$/.exec(p);
+  if (everyM && UNIT_MS[everyM[2] ?? ""] !== undefined) {
+    const ms = parseDuration(`${everyM[1]} ${everyM[2]}${everyM[3] ?? ""}`);
+    if (ms === undefined) return err(`didn't catch the interval in "${phrase.trim()}"; say "every 2 h" or "every 45 min"`);
+    if (ms < INTERVAL_MIN_MS) return err("an interval needs at least a minute");
+    return { kind: "every", every: { kind: "interval", everyMs: Math.round(ms), anchorAt: now }, phrase: intervalPhrase(Math.round(ms)) };
+  }
+
+  // A duration said on its own ("twelve minutes", "an hour and a half") is a timer.
+  const bare = parseDuration(p);
+  if (bare !== undefined) return timer(bare);
+
+  const words = p.split(" ");
+  const days = new Set<Weekday>();
+  let clock: Clock | undefined;
+  let date: "today" | "tonight" | "tomorrow" | undefined;
+  let part: Part | undefined;
+  let partWord = "";
+  let every = false;
+  let daily = false;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i] ?? "";
+    if (w === "every" || w === "each") {
+      every = true;
+      continue;
+    }
+    if (SKIP_WORDS.has(w)) continue;
+    if (w === "tomorrow") {
+      date = "tomorrow";
+      continue;
+    }
+    if (w === "today") {
+      date = "today";
+      continue;
+    }
+    if (w === "tonight") {
+      date = "tonight";
+      continue;
+    }
+    const named = PART_WORDS[w];
+    if (named) {
+      part = named.part;
+      partWord = w;
+      if (named.daily || every) daily = true;
+      // "this morning" and "this evening" are today's: a time already gone is refused, never moved to tomorrow.
+      else if (words[i - 1] === "this" && !date) date = "today";
+      continue;
+    }
+    if (w === "weekdays" || w === "weekday") {
+      for (const d of WEEKDAY_WORK) days.add(d);
+      continue;
+    }
+    if (w === "weekends" || w === "weekend") {
+      for (const d of WEEKDAY_END) days.add(d);
+      continue;
+    }
+    if (w === "daily" || w === "everyday" || w === "day" || w === "days") {
+      for (const d of WEEKDAY_ALL) days.add(d);
+      continue;
+    }
+    const day = DAY_WORDS[w];
+    if (day) {
+      days.add(day);
+      continue;
+    }
+    const c = readClock(words, i);
+    if (c && "range" in c) return err(`"${c.range}" is a range, not a time; say one time`);
+    if (c) {
+      // A count is not a clock: "every 2 nights", "every 3 mornings", "every 2 days" and a bare "every 9" are not schedules yet,
+      // never 02:00 daily. "every 9 on weekdays" says the hour.
+      const next = words[i + 1];
+      const afterEvery = (words[i - 1] === "every" || words[i - 1] === "each") && (next === undefined || !SKIP_WORDS.has(next));
+      if (c.used === 1 && /^\d+$/.test(w) && (afterEvery || PART_WORDS[next ?? ""]?.daily === true)) {
+        const said = [...(afterEvery ? [words[i - 1]] : []), w, ...(next ? [next] : [])].join(" ");
+        return err(`"${said}" is a count, not a time; say one, like "daily 23:00" or "every 2 h"`);
+      }
+      if (clock) return err(`two times in "${phrase.trim()}"; say one`);
+      clock = c.clock;
+      i += c.used - 1;
+      continue;
+    }
+    return err(`didn't catch "${w}" in "${phrase.trim()}"`);
+  }
+  // "every" with a time and no day ("every 7am", "every 7:10") is every day's.
+  if ((daily || (every && !date)) && days.size === 0) for (const d of WEEKDAY_ALL) days.add(d);
+  if (!clock) return err(days.size ? "say a time too: 'weekdays 09:00'" : `didn't catch a time in "${phrase.trim()}"`);
+  if (part) {
+    const unclear = part === "night" ? unclearAtNight(clock) : undefined;
+    if (unclear) return err(unclear);
+    const settled = inPart(clock, part);
+    if (!settled) return err(`${clockTime(clock)} and '${partWord}' don't go together; say one`);
+    clock = settled;
+  } else if (date === "tonight") {
+    clock = tonight(clock);
+  }
+
+  if (days.size) {
+    if (date) return err("a day of the week and 'tomorrow' don't go together; say one");
+    const at = clockTime(clock);
+    // A named day's evening or night runs into the next morning: "saturday night at midnight" is Sunday 00:00, and
+    // "friday night at 2" is Saturday 02:00. The phrase names the day it rings.
+    const on = (part === "evening" || part === "night") && clock.hh < 6 ? dayAfter(days) : days;
+    const list = WEEKDAY_ALL.filter((d) => on.has(d));
+    return { kind: "every", every: { kind: "weekly", days: list, at }, phrase: weeklyPhrase(list, at) };
+  }
+
+  const lead = now + PARSE_LEAD_MS;
+  // The small hours of a named day's evening or night belong to the morning after it: "tomorrow night at 2" said on a Monday
+  // is Wednesday 02:00, and "tonight at midnight" is the midnight ahead, not the one gone.
+  const after = date !== undefined && (date === "tonight" || part === "evening" || part === "night") && clock.hh < 6 ? 1 : 0;
+  if (date === "tomorrow") return { kind: "at", at: atClock(dayStart(now, 1 + after), clockTime(clock)) };
+  if (date === "today" || date === "tonight") {
+    // A bare hour on a named day has its 12-hour twin too: "today at nine" said at 14:00 is 21:00. Tonight and a part of the
+    // day settled the hour above. An exact time ("today 07:10", "tonight 7am") is what it says.
+    const twin = !clock.exact && clock.hh <= 12;
+    const clocks: ClockTime[] = twin ? [clockTime(clock), clockTime({ ...clock, hh: (clock.hh + 12) % 24 })] : [clockTime(clock)];
+    let best: number | undefined;
+    for (const t of clocks) {
+      const at = atClock(dayStart(now, after), t);
+      if (at >= lead && (best === undefined || at < best)) best = at;
+    }
+    return best !== undefined ? { kind: "at", at: best } : err(`${clocks[clocks.length - 1] ?? clockTime(clock)} has passed today`);
+  }
+  // No date: the next occurrence at least a minute away — of the hour said, or (no am/pm, a bare hour) its 12-hour twin too.
+  const clocks: ClockTime[] = clock.exact || clock.hh > 12 ? [clockTime(clock)] : [clockTime(clock), clockTime({ ...clock, hh: (clock.hh + 12) % 24 })];
+  let best: number | undefined;
+  for (const plus of [0, 1]) {
+    for (const t of clocks) {
+      const at = atClock(dayStart(now, plus), t);
+      if (at >= lead && (best === undefined || at < best)) best = at;
+    }
+  }
+  return best === undefined ? err(`didn't find a next ${clockTime(clock)}`) : { kind: "at", at: best };
+}
+
+// ---------------------------------------------------------------- next fire ---
+
+function nextWeekly(r: Extract<Recurrence, { kind: "weekly" }>, after: number): number | undefined {
+  if (r.days.length === 0) return undefined;
+  const want = new Set(r.days);
+  for (let plus = 0; plus <= 8; plus++) {
+    const day = dayStart(after, plus);
+    if (!want.has(WEEKDAYS[day.getDay()] ?? "sun")) continue;
+    const at = atClock(day, r.at);
+    if (at > after) return at;
+  }
+  return undefined;
+}
+
+function nextInterval(r: Extract<Recurrence, { kind: "interval" }>, after: number): number | undefined {
+  if (!(r.everyMs > 0)) return undefined;
+  if (r.anchorAt > after) return r.anchorAt;
+  const k = Math.floor((after - r.anchorAt) / r.everyMs) + 1;
+  return r.anchorAt + k * r.everyMs;
+}
+
+/** The `nth` weekday of a local month (nth -1 = the last); undefined when the month lacks it. */
+function nthWeekday(year: number, month: number, nth: 1 | 2 | 3 | 4 | -1, weekday: Weekday): Date | undefined {
+  const idx = WEEKDAYS.indexOf(weekday);
+  if (nth === -1) {
+    const last = new Date(year, month + 1, 0);
+    const back = (last.getDay() - idx + 7) % 7;
+    return new Date(year, month, last.getDate() - back);
+  }
+  const first = new Date(year, month, 1);
+  const forward = (idx - first.getDay() + 7) % 7;
+  const d = new Date(year, month, 1 + forward + (nth - 1) * 7);
+  return d.getMonth() === month ? d : undefined;
+}
+
+function nextMonthly(r: Extract<Recurrence, { kind: "monthly" }>, after: number): number | undefined {
+  const base = new Date(after);
+  for (let plus = 0; plus <= 13; plus++) {
+    const day = nthWeekday(base.getFullYear(), base.getMonth() + plus, r.nth, r.weekday);
+    if (!day) continue;
+    const at = atClock(day, r.at);
+    if (at > after) return at;
+  }
+  return undefined;
+}
+
+function nextMonthday(r: Extract<Recurrence, { kind: "monthday" }>, after: number): number | undefined {
+  if (!(r.day >= 1 && r.day <= 31)) return undefined;
+  const base = new Date(after);
+  for (let plus = 0; plus <= 13; plus++) {
+    const d = new Date(base.getFullYear(), base.getMonth() + plus, r.day);
+    if (d.getDate() !== r.day) continue; // the month is shorter than `day`
+    const at = atClock(d, r.at);
+    if (at > after) return at;
+  }
+  return undefined;
+}
+
+/**
+ * The next instant `when` fires strictly after `after`: `at` once, `in` at createdAt + ms (once),
+ * `every` by its recurrence (a weekly walks ≤ 8 days, an interval is anchorAt + k·everyMs), `on`
+ * never (a watcher waits for its signal). Undefined = nothing ahead.
+ */
+export function nextFire(when: AutomationWhen, after: number, createdAt: number): number | undefined {
+  switch (when.kind) {
+    case "at":
+      return when.at > after ? when.at : undefined;
+    case "in": {
+      const at = createdAt + when.ms;
+      return at > after ? at : undefined;
+    }
+    case "every":
+      return nextRecurrence(when.every, after);
+    case "on":
+      return undefined;
+  }
+}
+
+function nextRecurrence(r: Recurrence, after: number): number | undefined {
+  switch (r.kind) {
+    case "weekly":
+      return nextWeekly(r, after);
+    case "interval":
+      return nextInterval(r, after);
+    case "monthly":
+      return nextMonthly(r, after);
+    case "monthday":
+      return nextMonthday(r, after);
+  }
+}
+
+// ----------------------------------------------------------------- describe ---
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DAY_NAMES: Readonly<Record<Weekday, string>> = { mon: "Mon", tue: "Tue", wed: "Wed", thu: "Thu", fri: "Fri", sat: "Sat", sun: "Sun" };
+
+/** A local instant in words: "07:10 · Tue 15 Sep". */
+export function describeInstant(ms: number): string {
+  const d = new Date(ms);
+  return `${clockOf(ms)} · ${DAY_NAMES[weekdayOf(ms)]} ${d.getDate()} ${MONTHS[d.getMonth()] ?? ""}`;
+}
+
+/** A system event in words: "when a file lands in ~/Downloads (*.pdf)". */
+export function describeEvent(e: SystemEvent): string {
+  switch (e.kind) {
+    case "folder.file":
+      return `when a file lands in ${e.path}${e.glob ? ` (${e.glob})` : ""}`;
+    case "download.done":
+      return `when a download finishes${e.glob ? ` (${e.glob})` : ""}`;
+    case "app.launch":
+      return `when ${e.app} launches`;
+    case "app.quit":
+      return `when ${e.app} quits`;
+    case "mac.wake":
+      return "when the Mac wakes";
+    case "screen.unlock":
+      return "when the screen unlocks";
+    case "display.connected":
+      return "when a display connects";
+    case "display.disconnected":
+      return "when a display disconnects";
+    case "recipe.red":
+      return `when recipe ${e.recipe} goes red (checked every ${e.everySeconds} s)`;
+    case "agent.status":
+      return `when ${e.agent ?? "an agent"} is ${e.status}`;
+    default:
+      return "when a signal this build does not know arrives";
+  }
+}
+
+/**
+ * A `when` in words. A recurrence set from a phrase keeps that phrase, normalised
+ * ("weekdays 09:00", "every 2 h"), so `parseWhen(describe(w), now)` gives `w` back.
+ */
+export function describe(when: AutomationWhen): string {
+  switch (when.kind) {
+    case "at":
+      return describeInstant(when.at);
+    case "in":
+      return `in ${durationWords(when.ms)}`;
+    case "every":
+      return when.phrase || describeRecurrence(when.every);
+    case "on":
+      return describeEvent(when.on);
+  }
+}
+
+function describeRecurrence(r: Recurrence): string {
+  switch (r.kind) {
+    case "weekly":
+      return weeklyPhrase(r.days, r.at);
+    case "interval":
+      return intervalPhrase(r.everyMs);
+    case "monthly":
+      return `the ${r.nth === -1 ? "last" : ["", "first", "second", "third", "fourth"][r.nth] ?? ""} ${DAY_NAMES[r.weekday]} of the month ${r.at}`;
+    case "monthday":
+      return `the ${r.day}${ordinal(r.day)} of the month ${r.at}`;
+  }
+}
+
+function ordinal(n: number): string {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return "th";
+  return ["th", "st", "nd", "rd"][n % 10] ?? "th";
+}
+
+// ------------------------------------------------------- quiet hours, window ---
+
+type Span = { readonly from: ClockTime; readonly to: ClockTime };
+
+/** Whether the instant's local minute lies in [from, to), wrapping midnight when to ≤ from; an empty span admits nothing. */
+function inSpan(span: Span, now: number): boolean {
+  const from = minutesOf(span.from);
+  const to = minutesOf(span.to);
+  if (from === undefined || to === undefined || from === to) return false;
+  const d = new Date(now);
+  const m = d.getHours() * 60 + d.getMinutes();
+  return from < to ? m >= from && m < to : m >= from || m < to;
+}
+
+/** Whether `now` is inside quiet hours; no quiet hours set = never. */
+export function inQuiet(q: Span | undefined, now: number): boolean {
+  return q !== undefined && inSpan(q, now);
+}
+
+/** When the quiet spell `now` sits in ends (the `to` clock, today or tomorrow); undefined when `now` is not quiet. */
+export function quietEnds(q: Span | undefined, now: number): number | undefined {
+  if (!inQuiet(q, now) || q === undefined) return undefined;
+  const today = atClock(dayStart(now), q.to);
+  return today > now ? today : atClock(dayStart(now, 1), q.to);
+}
+
+/** Whether a row's clauses admit `now`: inside its `window` (wraps midnight) and on one of its `days`; no clause = always. */
+export function inWindow(clauses: Pick<AutomationClauses, "window" | "days">, now: number): boolean {
+  if (clauses.days && !clauses.days.includes(weekdayOf(now))) return false;
+  return clauses.window === undefined || inSpan(clauses.window, now);
+}
+
+/** How late a one-shot of this kind may still fire after the daemon comes back; routines and watchers never fire late. */
+export function graceFor(kind: AutomationKind): number {
+  return AUTOMATION_GRACE_MS[kind];
+}
+
+/** The island's one Snooze press: timers snooze 5 minutes, everything else Settings.automations.snoozeMinutes. */
+export function snoozeDefault(kind: AutomationKind, snoozeMinutes: number): number {
+  return kind === "timer" ? 5 : snoozeMinutes;
+}
