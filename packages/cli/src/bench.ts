@@ -6,17 +6,18 @@ import { join } from "node:path";
 import { REPO_ROOT, readConfig, type HormesConfig } from "@hormes/core";
 import type { LiveSession } from "@hormes/live";
 import { parseReflex, type Brain, type BrainResult, type BrainSink, type BrainTask, type DelegationTimingsExtra, type ToolRunner } from "@hormes/brain";
-import type { NativeHands } from "@hormes/hands";
+import type { HelloPermissions, NativeHands } from "@hormes/hands";
 import { Engine, type EngineOptions } from "@hormes/engine";
+import { KeywordEmbedder, RulesDecider, RulesExtractor } from "@hormes/memory";
 import { THREAD_TERMINAL, type Delegation, type Snapshot } from "@hormes/protocol";
 
 /**
- * `pnpm hormes bench` — the tool path measured, not asserted (REDESIGN §11).
+ * `pnpm hormes bench` — the tool path measured, not asserted (benchmark harness).
  *
  * Drives a real Engine with a stand-in Live session (no socket, no billing) and
  * either a stand-in brain (default: it calls frontmost_app, a quick screenshot and
  * one harmless mouse_move to where the pointer already is) or the real Codex
- * brain (`--codex`: one tiny turn on Kevin's ChatGPT login). The hands are the
+ * brain (`--codex`: one tiny turn on User's ChatGPT login). The hands are the
  * built Swift helper when it is there, or a fake (`--fake-hands`). Measures:
  *
  *   tool round trip          runner.run("frontmost_app") through the helper
@@ -28,15 +29,15 @@ import { THREAD_TERMINAL, type Delegation, type Snapshot } from "@hormes/protoco
  *   reflex                   "hormes, screenshot this.": utterance end → the reflex's tool is ISSUED to
  *                            the helper (prefired: the quiet window plus Hormes's own path — what
  *                            Hormes controls), and tool issued → done (the shot itself)
- *   ear                      the 250 ms path (REDESIGN §12): synthetic on-device partials for ten grammar
+ *   ear                      the 250 ms path (reflex implementation): synthetic on-device partials for ten grammar
  *                            phrases → the moment the acting op is issued to the helper (dispatch) and the
  *                            moment it answers (ack), as a partial (the 120 ms stability window applies)
  *                            and as a final (immediate). With the real helper the acting ops are redirected
- *                            to a harmless cursor read so the bench never scrolls or types on Kevin's Mac;
+ *                            to a harmless cursor read so the bench never scrolls or types on User's Mac;
  *                            the round trip is still the real one. p95 to dispatch over 250 ms with the
  *                            real helper fails the bench (exit 1) unless --no-gate.
  *   browser                  the helper's Apple-event path to a running browser (url, tabs), reads only
- *   stop                     stopEverything() wall time with a delegation the brain is holding
+ *   stop                     the interrupt command's wall time with a delegation the brain is holding
  *   read during a type       a frontmost_app through the runner while the ACTING helper is held for 1.5 s
  *                            (a `wait` on it stands in for a long `type`): with the reads on their own
  *                            helper (SplitHands) it answers in milliseconds; on one serial helper it waits
@@ -54,7 +55,7 @@ import { THREAD_TERMINAL, type Delegation, type Snapshot } from "@hormes/protoco
  *                            the Swift duck probe (apps/mac/Scripts/duck-probe.sh) on synthetic 100 ms tap
  *                            buffers: speech onset (the first hot 10 ms slice's capture time) → the player's
  *                            gain at −20 dB; then the restores — a cough (or a partial made of Hormes's own
- *                            words) back at 700 ms, a confirmed barge-in back once Kevin stops, and speech
+ *                            words) back at 700 ms, a confirmed barge-in back once User stops, and speech
  *                            nobody confirmed held to 1.5 s while the mic stays hot. Live's transcript is
  *                            modelled (+900 ms from onset; DUCK_PROBE_LIVE_MS), not measured: no session is
  *                            opened. Not on this engine's path; in the table so the human-feel numbers sit
@@ -63,10 +64,17 @@ import { THREAD_TERMINAL, type Delegation, type Snapshot } from "@hormes/protoco
  * and prints one table with medians, p90 and the targets. The numbers depend on
  * the machine's load and on what is on the display (a busy 1280-px shot is an
  * 800 KB PNG); the header prints the load average so a run can be read in context.
+ *
+ * It spends nothing (W2-7). `benchEngine` builds its Engine, and `bench --brain`'s
+ * (bench-brain.ts): a constant key, never the user's, and nothing sends it. Live is a
+ * stand-in, the voice key probe is off, and memory runs on keywords and rules in the
+ * bench's temp state dir. It never reads the Dock. With fake hands the helper's path
+ * does not exist and the permission read is answered in process, so the real helper
+ * never starts. `duck: false` (`--no-duck`) skips the Swift duck probe.
  */
 
 /** One measurement. `unit` is "ms" for every timing row; a "count" row (brain generations spent) is a tally, never read as a latency. */
-interface Sample {
+export interface Sample {
   readonly metric: string;
   readonly value: number;
   readonly unit: SampleUnit;
@@ -197,7 +205,7 @@ interface BrainState {
   mode: "act" | "split" | "answer";
   /** Every handle() is one model generation. */
   generations: number;
-  /** What `thread_start` / `worker_start` answered, for the log. */
+  /** What `thread_start` answered, for the log. */
   splitResults: string[];
 }
 
@@ -250,7 +258,7 @@ interface DuckProbeReport {
   readonly samples?: readonly number[];
   readonly unconfirmedRestoreMs?: readonly number[];
   readonly confirmedReleaseMs?: readonly number[];
-  /** Kevin's last word → unity, for a confirmed barge-in (the quiet hold, the poll, the ramp). */
+  /** User's last word → unity, for a confirmed barge-in (the quiet hold, the poll, the ramp). */
   readonly speechEndToUnityMs?: readonly number[];
   /** Duck → unity when nothing confirmed but the mic stayed hot (held to 1.5 s, then the ramp). */
   readonly heldRestoreMs?: readonly number[];
@@ -300,11 +308,24 @@ export async function runDuckProbe(runs: number, timeoutMs = 180_000): Promise<{
   });
 }
 
-function percentile(values: readonly number[], p: number): number {
+/**
+ * The p-th percentile by nearest rank: the ⌈p/100 · n⌉-th smallest sample, no interpolation, so it is always one of the
+ * samples (p90 of ten is the 9th, p95 of ten the 10th). p50 of an even n is the lower middle value, so it is not the
+ * median: use `median`. NaN for no samples. `bench --brain` and `ledger --speed` read these two through bench-brain.ts.
+ */
+export function percentile(values: readonly number[], p: number): number {
   if (values.length === 0) return Number.NaN;
   const sorted = [...values].sort((a, b) => a - b);
   const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
   return sorted[idx] ?? Number.NaN;
+}
+
+/** The median: the middle sample of an odd n, the mean of the two middle samples of an even n. NaN for no samples. */
+export function median(values: readonly number[]): number {
+  if (values.length === 0) return Number.NaN;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = sorted.length >> 1;
+  return sorted.length % 2 === 1 ? (sorted[mid] ?? Number.NaN) : ((sorted[mid - 1] ?? Number.NaN) + (sorted[mid] ?? Number.NaN)) / 2;
 }
 
 export interface BenchOptions {
@@ -312,9 +333,9 @@ export interface BenchOptions {
   readonly codex: boolean;
   readonly fakeHands: boolean;
   readonly json: boolean;
-  /** Exit non-zero when the ear's p95 to dispatch is over 250 ms with the real helper (default true). */
+  /** Exit non-zero when an ear row's p95 to dispatch is over its target (250 / 580 ms) with the real helper (default true; `earGate`). */
   readonly gate?: boolean;
-  /** Run the Mac app's duck probe (builds and runs a Swift harness; default true). A test turns it off. */
+  /** Run the Mac app's duck probe (builds and runs a Swift harness; default true). `--no-duck` turns it off, and so does a test. */
   readonly duck?: boolean;
   /** Where the lines go (default console.log); a test captures them. */
   readonly print?: (line: string) => void;
@@ -349,18 +370,110 @@ export const EAR_CAREFUL_MS = 450;
  */
 export const EAR_CAREFUL_DISPATCH_TARGET_MS = EAR_CAREFUL_MS + (EAR_DISPATCH_TARGET_MS - EAR_STABLE_MS);
 
+/** The rows the ear gate judges, each at p95 against its own target. The acting-call row is judged at p95 too, but it is not the ear's. */
+export const EAR_GATE_METRICS: readonly string[] = ["ear: partial → dispatch", "ear: careful partial → dispatch", "ear: final → dispatch"];
+
+export interface EarGate {
+  readonly verdict: "ok" | "FAIL" | "not judged (fake hands)";
+  /** What `pnpm hormes bench` exits with: 1 on a FAIL unless `--no-gate`. */
+  readonly exitCode: 0 | 1;
+}
+
+/**
+ * The ear gate (README: the bench exits 1 over 250 / 580 ms). With the real helper, every
+ * ear dispatch row must be there and its p95 at or under its target: 250 ms for finals and
+ * prefire partials, 580 ms for careful partials. A missing row fails, since an ear that
+ * never dispatched is not fast. Fake hands are not judged. `gate: false` is `--no-gate`:
+ * the verdict still prints, and the exit is 0.
+ */
+export function earGate(rows: readonly BenchRow[], o: { readonly realHelper: boolean; readonly gate: boolean }): EarGate {
+  if (!o.realHelper) return { verdict: "not judged (fake hands)", exitCode: 0 };
+  const pass = EAR_GATE_METRICS.every((metric) => {
+    const row = rows.find((r) => r.metric === metric);
+    return row !== undefined && row.p95 <= (row.target ?? EAR_DISPATCH_TARGET_MS);
+  });
+  return { verdict: pass ? "ok" : "FAIL", exitCode: pass || !o.gate ? 0 : 1 };
+}
+
+/** The key the bench's Engine carries. A wake wants one; nothing the bench runs sends it. Never the user's. */
+export const BENCH_OPENAI_KEY = "sk-bench-never-used";
+
+/**
+ * The bench's config: the user's settings with every secret and server URL taken out, as the
+ * tests' world() builds its own. The stand-in Live, the voice probe being off and memory on
+ * keywords mean the constant key rides nothing. With fake hands the helper's path is one that
+ * does not exist, so nothing can start the real helper.
+ *
+ * `brainKeys` keeps the user's brain keys and server URL. Only `bench --brain --allow-api-spend`
+ * without Codex passes it: the user chose to run the auto brain on API dollars, and that brain
+ * needs its key. Memory and the voice probe still send nothing (`benchEngine`).
+ */
+export function benchConfig(base: HormesConfig, dir: string, o: { readonly codex: boolean; readonly fakeHands: boolean; readonly brainKeys?: boolean }): HormesConfig {
+  const stateDir = join(dir, "state");
+  return {
+    ...base,
+    geminiApiKey: undefined,
+    ...(o.brainKeys
+      ? { openaiApiKey: base.openaiApiKey || BENCH_OPENAI_KEY }
+      : { openaiApiKey: BENCH_OPENAI_KEY, anthropicApiKey: undefined, brainApiKey: undefined, brainBaseUrl: undefined }),
+    brain: o.codex ? "codex" : "auto",
+    stateDir,
+    socketPath: join(stateDir, "j.sock"),
+    ...(o.fakeHands ? { handsBin: join(dir, "no-hands") } : {}),
+  };
+}
+
+/** The Dock read's shell (`defaults export`, `lsappinfo list`) answers "not found": the bench measures the tool path, never the Dock. */
+const NO_SHELL: NonNullable<EngineOptions["exec"]> = () => ({ code: 127, stdout: "", stderr: "the bench runs no shell" });
+
+/** What the fake helper's `--permissions` says: everything granted, read in process. */
+const FAKE_GRANTS: HelloPermissions = { accessibility: true, screenRecording: true, inputMonitoring: true, fullDiskAccess: true };
+
+/** What a bench chooses for its Engine; `benchEngine` adds the seams that keep it off the network and off the Mac. */
+export type BenchEngineOptions = Omit<EngineOptions, "connectors" | "memory" | "exec" | "probePermissions"> & { readonly config: HormesConfig };
+
+/**
+ * The Engine both benches run on (`bench`, and `bench --brain` in bench-brain.ts), off the
+ * network and off the Mac:
+ * - No connectors.
+ * - Memory on keywords and rules in the temp state dir: no embedding, no extractor call, no
+ *   model list.
+ * - No Dock shell.
+ * - With in-process hands (`hands` given), the permission read answered in process, so the
+ *   helper's `--permissions` never runs.
+ * - The voice probe off. It would check the config's key with api.openai.com, and the
+ *   bench's Live is a stand-in.
+ */
+export function benchEngine(o: BenchEngineOptions): Engine {
+  const engine = new Engine({
+    ...o,
+    connectors: [],
+    memory: { embedder: new KeywordEmbedder(), extractor: new RulesExtractor(), decider: new RulesDecider() },
+    exec: NO_SHELL,
+    ...(o.hands ? { probePermissions: async () => FAKE_GRANTS } : {}),
+  });
+  // Once W2-1's EngineOptions `probe: false` lands, pass that instead.
+  engine.probeSetup = async () => engine.snapshot().setup;
+  // This harness injects an OpenAI-wire stand-in. Select its provider explicitly
+  // in the isolated bench state, regardless of the application's voice default.
+  engine.updateSettings({ voiceProvider: "openai" }, { quiet: true });
+  return engine;
+}
+
+/**
+ * The table's answer for the Spotify thread ("Spotify is thinking — 0 seconds in"). The split's
+ * own lines name Spotify too ("Slack and Spotify alongside.") and land in the same second, so
+ * a bare /spotify/i timed them instead (PERF-7).
+ */
+const SPOTIFY_STATUS_LINE = /^Spotify is/;
+
 export async function bench(opts: BenchOptions): Promise<BenchResult> {
   const print = opts.print ?? ((line: string): void => console.log(line));
   const base = readConfig();
   const dir = mkdtempSync(join(tmpdir(), "jh-bench-"));
   const useFakeHands = opts.fakeHands || !existsSync(base.handsBin);
-  const config: HormesConfig = {
-    ...base,
-    openaiApiKey: base.openaiApiKey || "sk-bench-never-used",
-    brain: opts.codex ? "codex" : "auto",
-    stateDir: join(dir, "state"),
-    socketPath: join(dir, "state", "j.sock"),
-  };
+  const config = benchConfig(base, dir, { codex: opts.codex, fakeHands: useFakeHands });
+  const duck = opts.duck ?? true;
   const live = new FakeLive();
   let engine: Engine;
   const brainState: BrainState = { hold: false, held: undefined, mode: "act", generations: 0, splitResults: [] };
@@ -368,8 +481,8 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
   // A spawned thread's brain: attaches its lane and holds until the thread is stopped, so two
   // threads stay live for the status and targeted-stop rows without a model.
   const threadBrains: { id: string; stopped: boolean }[] = [];
-  const makeWorkerBrain: NonNullable<EngineOptions["makeWorkerBrain"]> = (spec) => {
-    const rec = { id: spec.workerId, stopped: false };
+  const makeThreadBrain: NonNullable<EngineOptions["makeThreadBrain"]> = (spec) => {
+    const rec = { id: spec.threadId, stopped: false };
     threadBrains.push(rec);
     return {
       kind: "bench-thread",
@@ -389,8 +502,8 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
       },
     };
   };
-  // Two fake helpers, as the real pool has two processes: the acting one and the reading one.
-  engine = new Engine({ config, connectors: [], ...(brain ? { brain } : {}), makeLive: () => live as unknown as LiveSession, ...(useFakeHands ? { hands: new FakeHands(), backgroundHands: new FakeHands() } : {}), ...(opts.codex ? {} : { makeWorkerBrain }) });
+  // With fake hands, two in-process helpers, as the real pool has two processes: the acting one and the reading one.
+  engine = benchEngine({ config, ...(brain ? { brain } : {}), makeLive: () => live as unknown as LiveSession, ...(useFakeHands ? { hands: new FakeHands(), backgroundHands: new FakeHands() } : {}), ...(opts.codex ? {} : { makeThreadBrain }) });
   /** For the JSON: what the thread rows saw. */
   const extras: Record<string, unknown> = {};
   const samples: Sample[] = [];
@@ -402,11 +515,11 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
   };
 
   const load = loadavg().map((v) => v.toFixed(1)).join(" ");
-  log(`\n  bench: ${opts.runs} run(s); hands: ${useFakeHands ? "fake (in-process)" : `Swift helper at ${base.handsBin}`}; brain: ${opts.codex ? "real Codex (one tiny turn per run — this uses Kevin's ChatGPT login)" : "stand-in"}; load average ${load}`);
+  log(`\n  bench: ${opts.runs} run(s); hands: ${useFakeHands ? "fake (in-process)" : `Swift helper at ${base.handsBin}`}; brain: ${opts.codex ? "real Codex (one tiny turn per run, on your ChatGPT login)" : "stand-in"}; load average ${load}`);
   const t0 = Date.now();
   await engine.start();
   await engine.ready();
-  log(`  engine ready in ${Date.now() - t0} ms; brain: ${engine.brainInfo.kind} — ${engine.brainInfo.detail}`);
+  log(`  engine ready in ${Date.now() - t0} ms; brain: ${engine.brainInfo.kind} (${engine.brainInfo.detail})`);
   if (opts.codex && engine.brainInfo.kind !== "codex") {
     console.error(`  Codex is not available (${engine.brainInfo.detail}); run without --codex for the stand-in`);
     await engine.stop();
@@ -464,7 +577,7 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
       add("delegation → first commentary", rel(t.firstCommentaryAt));
       add("delegation → done", rel(t.doneAt));
       if (t.toolRoundTripMs) for (const ms of t.toolRoundTripMs) add("tool round trip (in delegation)", ms);
-      log(`  run ${i}: ${d.status} in ${rel(t.doneAt)} ms — eyes ${t.eyesMs ?? "-"} ms, first tool @${rel(t.firstToolAt)}, first action @${rel(t.firstActionAt)}, said @${rel(t.firstCommentaryAt)}${d.summary ? ` — "${d.summary.slice(0, 80)}"` : ""}`);
+      log(`  run ${i}: ${d.status} in ${rel(t.doneAt)} ms, eyes ${t.eyesMs ?? "-"} ms, first tool @${rel(t.firstToolAt)}, first action @${rel(t.firstActionAt)}, said @${rel(t.firstCommentaryAt)}${d.summary ? ` ("${d.summary.slice(0, 80)}")` : ""}`);
       await new Promise((r) => setTimeout(r, 50));
     }
 
@@ -515,7 +628,7 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
     }
 
     // The ear: synthetic on-device partials. The acting op is redirected to a harmless
-    // cursor read on the real helper (the bench must never scroll or type on Kevin's Mac);
+    // cursor read on the real helper (the bench must never scroll or type on User's Mac);
     // the round trip is still a real one. Dispatch is the moment the acting op is written
     // to the helper; ack is its answer.
     {
@@ -618,7 +731,7 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
         await engine.command({ type: "interrupt" });
         add("stop: command → everything stopped", performance.now() - a);
         if (i === 0) log(`  stop: the delegation was ${running ? "running (the brain held it)" : "NOT running"} when the stop arrived`);
-        // Kevin speaks: the gate lifts so the next run's speech is not muted.
+        // User speaks: the gate lifts so the next run's speech is not muted.
         live.emit("inputTranscript", " ok", live.tick() - 100, live.tick());
         await new Promise((r) => setTimeout(r, 30));
       }
@@ -626,7 +739,7 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
     }
 
     // Read during a type: hold the ACTING helper with a `wait` (harmless on the real helper —
-    // no `type` lands on Kevin's Mac) and ask for the front app through the runner meanwhile.
+    // no `type` lands on User's Mac) and ask for the front app through the runner meanwhile.
     // With the reads routed to their own helper the answer comes back in milliseconds.
     {
       const acting = engine.hands as unknown as { request: (op: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<unknown> };
@@ -663,12 +776,10 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
     // Threads: two stand-in threads live, then "what is spotify doing" as a delegation (the
     // table should answer with 0 brain generations, the running turn untouched) and a
     // thread.stop for one of them (only it stops). Skipped when the engine cannot start a
-    // thread here (an older engine, or thread_start refused).
+    // thread here (thread_start refused).
     if (!opts.codex) {
       const liveThreads = (snap: Snapshot): { id: string; name: string; status: string }[] =>
-        snap.threads
-          ? snap.threads.filter((t) => t.id !== "main" && !THREAD_TERMINAL.has(t.status)).map((t) => ({ id: t.id, name: t.name, status: t.status }))
-          : (snap.workers ?? []).filter((w) => !["done", "failed", "cancelled"].includes(w.status)).map((w) => ({ id: w.id, name: w.name, status: w.status }));
+        snap.threads.filter((t) => t.id !== "main" && !THREAD_TERMINAL.has(t.status)).map((t) => ({ id: t.id, name: t.name, status: t.status }));
       brainState.mode = "split";
       const splitAt = live.nextUtterance();
       live.emit("inputTranscript", " hormes tell ben on slack i'm late and put on focus on spotify", splitAt - 1500, splitAt);
@@ -677,11 +788,11 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
       while (Date.now() < deadline && liveThreads(engine.snapshot()).length < 2) await new Promise((r) => setTimeout(r, 20));
       const before = liveThreads(engine.snapshot());
       brainState.mode = "answer";
-      extras["threads"] = { live: before.length, names: before.map((t) => t.name), source: engine.snapshot().threads ? "snapshot.threads" : "snapshot.workers", splitResults: brainState.splitResults };
+      extras["threads"] = { live: before.length, names: before.map((t) => t.name), splitResults: brainState.splitResults };
       if (before.length < 2) {
-        log(`  threads: could not get two live threads (${before.map((t) => `${t.name}:${t.status}`).join(", ") || "none"}); ${brainState.splitResults.join(" | ") || "no thread_start answer"} — status reflex and targeted stop not measured`);
+        log(`  threads: could not get two live threads (${before.map((t) => `${t.name}:${t.status}`).join(", ") || "none"}); ${brainState.splitResults.join(" | ") || "no thread_start answer"}, so the status reflex and targeted stop were not measured`);
       } else {
-        log(`  threads: ${before.map((t) => `${t.name} ${t.status} (${t.id})`).join(", ")} live${engine.snapshot().threads ? " (snapshot.threads)" : " (snapshot.workers — an older engine)"}`);
+        log(`  threads: ${before.map((t) => `${t.name} ${t.status} (${t.id})`).join(", ")} live`);
         // Status reflex: the spoken line's time and the generations it cost.
         const gensBefore = brainState.generations;
         const linesBefore = live.commentary.length;
@@ -690,8 +801,8 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
         live.emit("inputTranscript", " hormes what is spotify doing", askAt - 900, askAt);
         live.emit("delegation", "bench_status", "client", askAt);
         const until = Date.now() + 5000;
-        while (Date.now() < until && !live.commentary.slice(linesBefore).some((c) => /spotify/i.test(c.text))) await new Promise((r) => setTimeout(r, 10));
-        const line = live.commentary.slice(linesBefore).find((c) => /spotify/i.test(c.text));
+        while (Date.now() < until && !live.commentary.slice(linesBefore).some((c) => SPOTIFY_STATUS_LINE.test(c.text))) await new Promise((r) => setTimeout(r, 10));
+        const line = live.commentary.slice(linesBefore).find((c) => SPOTIFY_STATUS_LINE.test(c.text));
         const generations = brainState.generations - gensBefore;
         if (line) add("status reflex: delegation → spoken status line", line.at - asked);
         // A tally, not a timing: the table marks the row (count) and the JSON row says unit "count".
@@ -699,11 +810,11 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
         extras["statusReflex"] = { generations, lineMs: line ? Math.round(line.at - asked) : null, line: line?.text ?? null, stillLive: liveThreads(engine.snapshot()).length };
         log(`  status reflex: ${generations} brain generation(s); ${line ? `"${line.text.slice(0, 80)}" after ${Math.round(line.at - asked)} ms` : "no Spotify line within 5 s"}; ${liveThreads(engine.snapshot()).length} thread(s) still live`);
         await new Promise((r) => setTimeout(r, 100));
-        // Targeted stop: one of the two, by id, through the thread command (the worker alias for an older engine).
+        // Targeted stop: one of the two, by id, through thread.stop.
         const target = liveThreads(engine.snapshot()).find((t) => /slack/i.test(t.name)) ?? liveThreads(engine.snapshot())[0];
         if (target) {
           const a = performance.now();
-          await engine.command(engine.snapshot().threads ? { type: "thread.stop", threadId: target.id } : { type: "worker.stop", workerId: target.id });
+          await engine.command({ type: "thread.stop", threadId: target.id });
           const stopBy = Date.now() + 2000;
           while (Date.now() < stopBy && liveThreads(engine.snapshot()).some((t) => t.id === target.id)) await new Promise((r) => setTimeout(r, 5));
           const after = liveThreads(engine.snapshot());
@@ -721,15 +832,16 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
 
     // Barge-in → duck: the Mac app's gate on synthetic tap buffers (nothing is played or
     // recorded; the microphone ranking it prints is read-only). See the header.
-    if (!opts.codex && (opts.duck ?? true)) {
+    if (!opts.codex && !duck) log("  barge-in: not measured (--no-duck)");
+    if (!opts.codex && duck) {
       const probe = await runDuckProbe(opts.runs);
       for (const ms of probe.report.samples ?? []) add("barge-in: speech onset → −20 dB (duck probe)", ms);
       for (const ms of probe.report.unconfirmedRestoreMs ?? []) add("barge-in: cough / echo words, unconfirmed → back to unity", ms);
-      for (const ms of probe.report.speechEndToUnityMs ?? []) add("barge-in: confirmed, Kevin's last word → back to unity", ms);
+      for (const ms of probe.report.speechEndToUnityMs ?? []) add("barge-in: confirmed, the user's last word → back to unity", ms);
       for (const ms of probe.report.heldRestoreMs ?? []) add("barge-in: no confirmation, still speaking → back to unity", ms);
       if (probe.note) log(`  barge-in: ${probe.note}`);
       else {
-        const med = (v: readonly number[] | undefined): string => (v && v.length ? `${percentile(v, 50).toFixed(0)} ms` : "—");
+        const med = (v: readonly number[] | undefined): string => (v && v.length ? `${median(v).toFixed(0)} ms` : "(no sample)");
         log(`  barge-in: probe ok; confirmed by Live's transcript ${med(probe.report.liveConfirmMs)} after the duck (modelled at +${probe.report.liveModelledMs ?? "?"} ms from onset), by the ear's words ${med(probe.report.earConfirmMs)}; ${probe.report.refusedEchoPartials ?? 0} partial(s) of Hormes's own words refused as confirmation`);
         if (probe.report.ranked?.length) log(`  barge-in: mic ranking on this Mac (auto): ${probe.report.ranked.join(" › ")}`);
       }
@@ -737,14 +849,36 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
   } finally {
     await Promise.race([engine.stop(), new Promise((r) => setTimeout(r, 8000))]);
   }
+  return benchReport(samples, extras, { codex: opts.codex, realHelper: !useFakeHands, gate: opts.gate ?? true, json: opts.json, print, brain: opts.codex ? engine.brainInfo.detail : "stand-in", load, dir });
+}
 
-  // The table.
+/** How a run was made, for `benchReport`'s verdict and footer. */
+export interface BenchRun {
+  readonly codex: boolean;
+  /** The Swift helper answered. Fake hands are never judged. */
+  readonly realHelper: boolean;
+  /** false is `--no-gate`: the verdict still prints, and the exit is 0. */
+  readonly gate: boolean;
+  readonly json: boolean;
+  readonly print: (line: string) => void;
+  /** The brain line: Codex's detail, or "stand-in". */
+  readonly brain: string;
+  readonly load: string;
+  readonly dir: string;
+}
+
+/**
+ * The table from a run's samples, and what bench() returns. Rows get their targets, the ear
+ * gate judges them, and `ok` is what `pnpm hormes bench` exits on (main.ts: false is exit 1).
+ * Prints the JSON or the table; both read the one result.
+ */
+export function benchReport(samples: readonly Sample[], extras: Readonly<Record<string, unknown>>, run: BenchRun): BenchResult {
   const targets: Record<string, number> = {
     "tool round trip (frontmost_app)": 80,
     "tool round trip (in delegation)": 80,
     "quick screenshot (2000 px / 1.1 MP)": 120,
     "eyes: pre-warm shot": 120,
-    "delegation → first action": opts.codex ? 1200 : 300,
+    "delegation → first action": run.codex ? 1200 : 300,
     "reflex: utterance end → tool issued (prefired)": 300,
     "ear: partial → dispatch": EAR_DISPATCH_TARGET_MS,
     "ear: careful partial → dispatch": EAR_CAREFUL_DISPATCH_TARGET_MS,
@@ -764,7 +898,7 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
     // 60 ms of speech energy + the rest of the 100 ms tap buffer it lands in + the 12 ms gain steps.
     "barge-in: speech onset → −20 dB (duck probe)": DUCK_TARGET_MS,
     // 250 ms quiet hold + the 50 ms poll + the tap's 100 ms delivery + the 300 ms ramp.
-    "barge-in: confirmed, Kevin's last word → back to unity": DUCK_RELEASE_TARGET_MS,
+    "barge-in: confirmed, the user's last word → back to unity": DUCK_RELEASE_TARGET_MS,
   };
   /** The ear rows are judged at p95 (the 250 ms promise is for every command, not the typical one), the acting-call row too (its settle is the cost); the rest at the median. */
   const judgedAtP95 = new Set(["ear: partial → dispatch", "ear: careful partial → dispatch", "ear: final → dispatch", "acting call incl. observation (mouse_move in place)"]);
@@ -772,18 +906,18 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
   const rows: BenchRow[] = metrics.map((metric) => {
     const mine = samples.filter((s) => s.metric === metric);
     const values = mine.map((s) => s.value);
-    const median = percentile(values, 50);
+    const mid = median(values);
     const p95 = percentile(values, 95);
     const target = targets[metric];
-    return { metric, unit: mine[0]?.unit ?? "ms", n: values.length, median, p90: percentile(values, 90), p95, max: Math.max(...values), target, pass: target === undefined ? undefined : (judgedAtP95.has(metric) ? p95 : median) <= target };
+    return { metric, unit: mine[0]?.unit ?? "ms", n: values.length, median: mid, p90: percentile(values, 90), p95, max: Math.max(...values), target, pass: target === undefined ? undefined : (judgedAtP95.has(metric) ? p95 : mid) <= target };
   });
-  // The gate: with the real helper, the ear's p95 to dispatch must be under each row's target
-  // (250 ms for finals and prefire partials; the careful window plus the same allowance for the rest).
-  const earRows = rows.filter((r) => judgedAtP95.has(r.metric));
-  const gateFailed = (opts.gate ?? true) && !useFakeHands && (earRows.length === 0 || earRows.some((r) => !(r.p95 <= (r.target ?? EAR_DISPATCH_TARGET_MS))));
-  if (opts.json) {
-    print(JSON.stringify({ hands: useFakeHands ? "fake" : "helper", brain: opts.codex ? engine.brainInfo.detail : "stand-in", rows, earGate: useFakeHands ? "not judged (fake hands)" : gateFailed ? "FAIL" : "ok", ...extras }, null, 2));
-    return { ok: !gateFailed, rows, extras };
+  const gate = earGate(rows, { realHelper: run.realHelper, gate: run.gate });
+  // One result for both outputs: the JSON and the table can never disagree on the exit.
+  const result: BenchResult = { ok: gate.exitCode === 0, rows, extras };
+  const print = run.print;
+  if (run.json) {
+    print(JSON.stringify({ hands: run.realHelper ? "helper" : "fake", brain: run.brain, rows, earGate: gate.verdict, ...extras }, null, 2));
+    return result;
   }
   const pad = (s: string, n: number): string => s.padEnd(n);
   const num = (v: number): string => (Number.isFinite(v) ? String(Math.round(v)) : "-").padStart(7);
@@ -792,8 +926,8 @@ export async function bench(opts: BenchOptions): Promise<BenchResult> {
     // Every column is ms, except on a (count) row, where the same columns are tallies.
     print(`  ${pad(r.metric, 46)}${String(r.n).padStart(4)}${num(r.median)} ${num(r.p90)} ${num(r.p95)} ${num(r.max)} ${r.target === undefined ? "       -" : num(r.target)}  ${r.pass === undefined ? "" : r.pass ? "ok" : "MISS"}${judgedAtP95.has(r.metric) ? " (p95)" : ""}${r.unit === "count" ? " (count, not ms)" : ""}`);
   }
-  print(`\n  hands: ${useFakeHands ? "fake" : "Swift helper"}; brain: ${opts.codex ? engine.brainInfo.detail : "stand-in"}; load average ${load}; state dir ${dir}`);
-  if (useFakeHands) print(`  ear gate: not judged with fake hands (run without --fake-hands for the real ${EAR_DISPATCH_TARGET_MS} ms check)\n`);
-  else print(`  ear gate: p95 partial→dispatch and final→dispatch ≤ ${EAR_DISPATCH_TARGET_MS} ms, careful partial→dispatch ≤ ${EAR_CAREFUL_DISPATCH_TARGET_MS} ms (its ${EAR_CAREFUL_MS} ms window is by design) with the real helper — ${gateFailed ? "FAIL" : "ok"}\n`);
-  return { ok: !gateFailed, rows, extras };
+  print(`\n  hands: ${run.realHelper ? "Swift helper" : "fake"}; brain: ${run.brain}; load average ${run.load}; state dir ${run.dir}`);
+  if (!run.realHelper) print(`  ear gate: not judged with fake hands (run without --fake-hands for the real ${EAR_DISPATCH_TARGET_MS} ms check)\n`);
+  else print(`  ear gate: p95 partial→dispatch and final→dispatch ≤ ${EAR_DISPATCH_TARGET_MS} ms, careful partial→dispatch ≤ ${EAR_CAREFUL_DISPATCH_TARGET_MS} ms (its ${EAR_CAREFUL_MS} ms window is by design) with the real helper: ${gate.verdict}${gate.verdict === "FAIL" && gate.exitCode === 0 ? " (--no-gate, so the exit is 0)" : ""}\n`);
+  return result;
 }

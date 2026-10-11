@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { Thread, Worker } from "@hormes/protocol";
-import { resolveThread, threadGlyph, threadsLines, workersFallbackLines } from "../threads-cli.ts";
+import type { Thread } from "@hormes/protocol";
+import { resolveThread, threadGlyph, threadsLines } from "../threads-cli.ts";
 
 /**
  * `hormes cmd thread.stop <id|name>` and the `threads N (M live)` block of `hormes status`,
@@ -28,7 +28,7 @@ const thread = (over: Partial<Thread> & Pick<Thread, "id" | "name" | "status">):
 const table: Thread[] = [
   thread({ id: "main", name: "Hormes", status: "idle", lane: "voice" }),
   thread({ id: "t_1", name: "Slack", status: "acting", lane: "screen", steps: 4, detail: "click_element Send · ok", apps: ["Slack"] }),
-  thread({ id: "t_2", name: "Spotify", status: "waiting-kevin", steps: 1, question: "play Focus on the living-room speaker?" }),
+  thread({ id: "t_2", name: "Spotify", status: "waiting-user", steps: 1, question: "play Focus on the living-room speaker?" }),
   thread({ id: "t_0", name: "slack", status: "done", steps: 3, doneAt: 5, detail: "sent" }),
 ];
 
@@ -53,7 +53,7 @@ test("resolveThread: 'main' and a t_… id pass through when the table does not 
 
 test("threadGlyph: the settled statuses draw as the Console does; everything busy is a spinner", () => {
   assert.deepEqual(
-    (["done", "failed", "stopped", "waiting-kevin", "paused", "idle", "acting", "thinking", "queued", "starting", "waiting-screen"] as const).map(threadGlyph),
+    (["done", "failed", "stopped", "waiting-user", "paused", "idle", "acting", "thinking", "queued", "starting", "waiting-screen"] as const).map(threadGlyph),
     ["✔", "✘", "–", "?", "‖", "·", "⟳", "⟳", "⟳", "⟳", "⟳"],
   );
 });
@@ -61,20 +61,10 @@ test("threadGlyph: the settled statuses draw as the Console does; everything bus
 test("threadsLines: `threads N (M live)` then one row per thread — glyph, name, status, lane, steps, id, the question it asks else its detail", () => {
   assert.deepEqual(threadsLines(table), [
     "  threads    4 (3 live)",
-    "    · Hormes          idle           voice      0 steps · main",
+    "    · Hormes           idle           voice      0 steps · main",
     "    ⟳ Slack            acting         screen     4 steps · t_1 · click_element Send · ok",
-    "    ? Spotify          waiting-kevin  background 1 step · t_2 · asks: play Focus on the living-room speaker?",
+    "    ? Spotify          waiting-user   background 1 step · t_2 · asks: play Focus on the living-room speaker?",
     "    ✔ slack            done           background 3 steps · t_0 · sent",
   ]);
   assert.deepEqual(threadsLines([]), ["  threads    0 (0 live)"]);
-});
-
-test("workersFallbackLines: an older daemon's workers list, said so", () => {
-  const w = (over: Partial<Worker> & Pick<Worker, "id" | "name" | "status">): Worker => ({ delegationId: "d_1", lane: "background", task: "", startedAt: 0, steps: 0, ...over });
-  assert.deepEqual(workersFallbackLines([]), ["  workers    0 (an older daemon: no thread table)"]);
-  assert.deepEqual(workersFallbackLines([w({ id: "w_1", name: "Slack", status: "working", steps: 1 }), w({ id: "w_0", name: "Spotify", status: "done", steps: 2, detail: "played" })]), [
-    "  workers    2 (1 running) (an older daemon: no thread table)",
-    "    ⟳ Slack            working                background 1 step · w_1",
-    "    ✔ Spotify          done                   background 2 steps · w_0 · played",
-  ]);
 });

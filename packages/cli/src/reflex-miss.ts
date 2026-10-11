@@ -1,24 +1,23 @@
 import type { Ledger } from "@hormes/core";
-import { normalizeUtterance, parseReflex } from "@hormes/brain";
+import { FILLER_HEAD, normalizeUtterance, parseReflex } from "@hormes/brain";
 import type { LedgerRow } from "@hormes/protocol";
 import { recentDays } from "./ledger-speed.ts";
 
 /**
- * `pnpm hormes reflex-miss [--days N]` — the commands Kevin said that the grammar did
+ * `pnpm hormes reflex-miss [--days N]` — the commands User said that the grammar did
  * not catch, grouped so the grammar can grow from his real misses instead of guesses.
  *
- * The speed reader found 0 of 119 production requests parsing as a reflex: Kevin's
+ * The speed reader found 0 of 119 production requests parsing as a reflex: User's
  * utterances open with fillers ("um", "yeah,", "[chuckle]") and end in long clauses.
  * So this miner strips the fillers the ear strips, takes the LAST clause, keeps the
  * short ones (≤ 8 words: a reflex is a one-step command), drops what the grammar
  * already parses, and groups the rest by their head verb with counts and a few
- * examples. It prints Kevin's own words back to Kevin, in his terminal, from his ledger
+ * examples. It prints User's own words back to User, in his terminal, from his ledger
  * — nothing leaves the machine. Every row later added to the grammar must be
  * idempotent or reversible and never a destructive verb (packages/brain/src/reflex.ts).
  */
 
-/** Words the recogniser hears at the start of a command that are not part of it (the ear's set plus the speed reader's finds), and bracketed tags. Not "right": "right click save" is a command. */
-const FILLER_HEAD = /^(?:(?:um+|uh+|erm|hmm+|so|like|okay|ok|alright|all right|hey|yeah|yes|yep|oh|awesome|great|nice|cool|well|basically|actually|and|then|now)[,.!\s]+)+/i;
+/** Bracketed recogniser tags ("[chuckle]"); the filler words are the ear's own FILLER_HEAD. */
 const TAGS = /\[[^\]]{1,24}\]/g;
 
 /** The utterance without its fillers and tags, whitespace collapsed. */
@@ -66,11 +65,11 @@ export interface MineOptions {
   readonly examples?: number;
 }
 
-/** Candidate clauses from the rows: Kevin's heard finals and the delegations' requests. */
+/** Candidate clauses from the rows: User's heard finals and the delegations' requests. */
 export function candidates(rows: readonly LedgerRow[]): { text: string; source: Miss["source"] }[] {
   const out: { text: string; source: Miss["source"] }[] = [];
   for (const row of rows) {
-    if (row.type === "heard" && row.item.speaker === "kevin" && row.item.final) out.push({ text: row.item.text, source: "heard" });
+    if (row.type === "heard" && row.item.speaker === "user" && row.item.final) out.push({ text: row.item.text, source: "heard" });
     else if (row.type === "delegation.created" && row.delegation.request) out.push({ text: row.delegation.request, source: "request" });
   }
   return out;

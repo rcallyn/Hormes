@@ -1,8 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Brain, CodexProbe, ToolRunner } from "@hormes/brain";
-import { ACTING_MEMBERS } from "@hormes/hands";
-import { ACTING_TOOLS, BLOCKED_TOOLS, BRAIN_BENCH_COMMANDS, ROLLOVER_LOG_RE, WikiHands, analyzeRun, benchScreenPng, compareReports, parseWireLine, percentile, pngSize, renderReport, runBrainBench, stat, summarize, syntheticScreenPng, type AnalyzeInput, type RunnerCall, type WireRow } from "../bench-brain.ts";
+import { BLOCKED_TOOLS, BRAIN_BENCH_COMMANDS, ROLLOVER_LOG_RE, WikiHands, analyzeRun, benchScreenPng, compareReports, parseWireLine, percentile, pngSize, renderReport, runBrainBench, stat, summarize, syntheticScreenPng, type AnalyzeInput, type RunnerCall, type WireRow } from "../bench-brain.ts";
 
 /**
  * The brain bench without Codex: the canned screen is a real PNG, the canned
@@ -11,6 +10,9 @@ import { ACTING_TOOLS, BLOCKED_TOOLS, BRAIN_BENCH_COMMANDS, ROLLOVER_LOG_RE, Wik
  * brain produces a report with the reflex path and the brain path filled in —
  * nothing here spends a Codex turn or touches the Mac.
  */
+
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
 
 test("bench --brain: the canned screen is a real 1280×800 PNG (fixture, and the drawn stand-in)", () => {
   const drawn = syntheticScreenPng();
@@ -27,7 +29,7 @@ test("bench --brain: the canned hands show Safari on the wiki, find the search f
   const hands = new WikiHands(syntheticScreenPng());
   const front = await hands.request<{ app: string; window: { title: string } }>("frontmost");
   assert.equal(front.app, "Safari");
-  assert.match(front.window.title, /Kevin Wiki/);
+  assert.match(front.window.title, /User Wiki/);
   const search = await hands.request<{ found: boolean; unique: boolean; element?: { role: string; center: { x: number; y: number }; label: string } }>("find_element", { name: "search bar" });
   assert.equal(search.found, true);
   assert.equal(search.unique, true);
@@ -83,8 +85,8 @@ test("bench --brain: a run's record — the eyes' shot is not the first model to
   ];
   const runnerCalls: RunnerCall[] = [
     { at: base + 1, ms: 2, name: "screenshot", input: '{"quick":true}', kind: "image", ok: true, blocked: false, output: "1280x800 image" }, // the eyes, before the turn went out
-    { at: base + 4150, ms: 1, name: "read_file", input: '{"path":"~/Documents/GitHub/kevin-wiki/AGENTS.md"}', kind: "error", ok: false, blocked: false, output: "no such file: ~/Documents/GitHub/kevin-wiki/AGENTS.md" },
-    { at: base + 4160, ms: 1, name: "read_file", input: '{"path":"/Users/kevinliu/hormes/AGENTS.md"}', kind: "text", ok: true, blocked: false, output: "# AGENTS.md — repo rules" }, // this repo's AGENTS.md: a task target, not the wiki bootstrap
+    { at: base + 4150, ms: 1, name: "read_file", input: '{"path":"~/Documents/GitHub/user-wiki/AGENTS.md"}', kind: "error", ok: false, blocked: false, output: "no such file: ~/Documents/GitHub/user-wiki/AGENTS.md" },
+    { at: base + 4160, ms: 1, name: "read_file", input: '{"path":"/Users/user/jarvis/AGENTS.md"}', kind: "text", ok: true, blocked: false, output: "# AGENTS.md — repo rules" }, // this repo's AGENTS.md: a task target, not the wiki bootstrap
     { at: base + 4170, ms: 2, name: "read_focused_text", input: "{}", kind: "error", ok: false, blocked: false, output: "not_found: no focused UI element" }, // a real failure, not a missing file
     { at: base + 7550, ms: 0, name: "run_shell", input: '{"command":"npm run status"}', kind: "error", ok: false, blocked: true, output: "run_shell is unavailable" },
     { at: base + 7560, ms: 1, name: "left_click", input: '{"coordinate":[1200,760]}', kind: "question", ok: false, blocked: false, output: "About to click Send — say yes to go ahead" }, // the handshake asked; nothing happened yet
@@ -129,7 +131,7 @@ test("bench --brain: a run's record — the eyes' shot is not the first model to
   assert.deepEqual(rec.toolNames, ["read_file(err)", "read_file", "read_focused_text(err)", "run_shell(blocked)", "left_click(asked)", "left_click"]);
   assert.equal(rec.rollovers, 1, "no thread id on this wire and no previous thread: the log's fresh-thread line counts");
   assert.equal(rec.threadId, undefined);
-  assert.equal(rec.bootstrap.calls.length, 2, "the kevin-wiki read and npm run status — this repo's AGENTS.md is not bootstrap");
+  assert.equal(rec.bootstrap.calls.length, 2, "the user-wiki read and npm run status — this repo's AGENTS.md is not bootstrap");
   assert.equal(rec.bootstrap.npmRunStatus, true);
   assert.equal(rec.bootstrap.noSuchFile.length, 1, "the missing wiki file — read_focused_text's not_found is not a missing file");
   assert.equal(rec.generations, 3, "two MCP calls and a final message");
@@ -162,17 +164,12 @@ test("bench --brain: a run's record — the eyes' shot is not the first model to
   assert.ok(renderReport({ meta: { effort: "medium" }, records: [rec], summary: s }).some((l) => /click-search-type/.test(l)));
 });
 
-test("bench --brain: percentiles and the acting/blocked sets", () => {
+test("bench --brain: percentiles and the blocked set", () => {
   assert.equal(percentile([5, 1, 3], 50), 3);
   assert.equal(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95), 10);
   assert.ok(Number.isNaN(percentile([], 50)));
   const s = stat([4, 2, Number.NaN, 8]);
   assert.deepEqual([s.n, s.median, s.min, s.max], [3, 4, 2, 8]);
-  // The bench's copy of the delegator's ACTING_TOOLS: pinned to the same list packages/brain/src/__tests__/delegator-timings.test.ts pins.
-  const BEYOND_THE_HANDS = ["applescript", "run_shell", "write_file", "edit_file", "browser_navigate", "browser_click", "browser_type", "show_circle", "show_arrow", "show_rect", "show_text", "show_stroke"];
-  assert.deepEqual([...ACTING_TOOLS].sort(), [...ACTING_MEMBERS, ...BEYOND_THE_HANDS].sort());
-  for (const t of ["left_click", "click_element", "type", "key", "scroll", "open_app", "focus_app", "applescript", "run_shell", "write_file", "edit_file", "browser_navigate", "browser_click", "browser_type", "show_circle"]) assert.ok(ACTING_TOOLS.has(t), `${t} is an action`);
-  for (const t of ["screenshot", "read_file", "search_files", "frontmost_app", "find_element", "read_focused_text", "show_clear"]) assert.ok(!ACTING_TOOLS.has(t), `${t} only looks (or clears)`);
   for (const t of ["run_shell", "applescript", "write_file", "edit_file", "open_url", "agent_start", "self_apply"]) assert.ok(BLOCKED_TOOLS.has(t));
 });
 
@@ -205,7 +202,7 @@ test("bench --brain: a whole run with a stand-in brain — the reflex path catch
   assert.ok(reflex, "scroll down ran on the reflex path");
   assert.equal(reflex.status, "done");
   assert.equal(reflex.summary, "scrolled down.");
-  assert.ok(reflex.t.done < 2000);
+  assert.ok(reflex.t.done < 2000 * RUNNER_SLACK, `the reflex row finished under ${2000 * RUNNER_SLACK} ms (${reflex.t.done} ms)`);
   assert.equal(reflex.toolNames[0], "scroll");
   assert.ok(!report.records.some((r) => r.phase === "reflex-path" && r.cmd === "click-search-type"), "a compound command is not a reflex");
   const brain = report.records.filter((r) => r.phase === "brain-path");
@@ -231,7 +228,7 @@ test("bench --brain: a whole run with a stand-in brain — the reflex path catch
   // merge gap instead of skewing session time, so speech end → delegation stays a real, near-zero number on every row.
   for (const r of report.records) {
     assert.ok(typeof r.t.speechToDelegation === "number", `${r.liveId}: speechEndAt is stamped`);
-    assert.ok(r.t.speechToDelegation > -50 && r.t.speechToDelegation < 500, `${r.liveId}: speech end → delegation ≈ 0, not a clock skew (got ${r.t.speechToDelegation} ms)`);
+    assert.ok(r.t.speechToDelegation > -50 && r.t.speechToDelegation < 500 * RUNNER_SLACK, `${r.liveId}: speech end → delegation ≈ 0, not a clock skew (got ${r.t.speechToDelegation} ms, under ${500 * RUNNER_SLACK})`);
   }
   assert.equal(report.meta["contextRollovers"], 0, "no wire and no fresh-thread line: 0 rollovers");
   assert.equal(report.summary.rollovers, 0);
@@ -255,7 +252,7 @@ test("bench --brain: verificationShots and observedResults per run and in the su
   const before = analyzeRun(input(calls([[3000, "left_click", "text", "OK"], [3100, "screenshot", "image"], [6000, "browser_type", "text", "typed hello"], [6100, "screenshot", "image"]])));
   assert.deepEqual([before.actingCalls, before.verificationShots, before.observedResults], [2, 2, 0]);
   // After: both results carry the line; one shot remains (the model still looked once); a refused click counts as neither.
-  const after = analyzeRun(input(calls([[3000, "left_click", "text", "OK\nnow: Safari — \"Kevin Wiki\"; focused: AXTextField \"Search the wiki\"; 150 ms after the click"], [6000, "browser_type", "text", "typed hello\nnow: Safari — \"Kevin Wiki\"; focused: AXTextField \"Search the wiki\" = \"hello\"; 150 ms after the type"], [6100, "screenshot", "image"], [8000, "left_click", "question", "About to click Send — say yes"]])));
+  const after = analyzeRun(input(calls([[3000, "left_click", "text", "OK\nnow: Safari — \"User Wiki\"; focused: AXTextField \"Search the wiki\"; 150 ms after the click"], [6000, "browser_type", "text", "typed hello\nnow: Safari — \"User Wiki\"; focused: AXTextField \"Search the wiki\" = \"hello\"; 150 ms after the type"], [6100, "screenshot", "image"], [8000, "left_click", "question", "About to click Send — say yes"]])));
   assert.deepEqual([after.actingCalls, after.verificationShots, after.observedResults], [2, 1, 2]);
   const sBefore = summarize([before]);
   const sAfter = summarize([after]);

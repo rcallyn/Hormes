@@ -1,7 +1,8 @@
 import type { Ledger } from "@hormes/core";
+import { ACTING_TOOLS } from "@hormes/brain";
 import { READ_ONLY_TOOLS, YES_PATTERN } from "@hormes/hands";
 import type { Delegation, DelegationStep, LedgerRow } from "@hormes/protocol";
-import { ACTING_TOOLS, percentile, stat, type Stat } from "./bench-brain.ts";
+import { percentile, stat, type Stat } from "./bench-brain.ts";
 
 /**
  * `pnpm hormes ledger --speed [--days N]` — where a day's time went, from the ledger.
@@ -11,7 +12,7 @@ import { ACTING_TOOLS, percentile, stat, type Stat } from "./bench-brain.ts";
  * the brain takes to verify an action (45 % of acting steps were followed by one on
  * 09-12), SplitHands should hold read-only round trips under 80 ms, and the generation
  * after a screenshot should stop being the slowest kind. Everything here is counted
- * from `delegation.*` rows only — never from the words Kevin said (the requests are
+ * from `delegation.*` rows only — never from the words User said (the requests are
  * classified, not printed). Pure analysis over rows; `ledgerSpeed` is the reader.
  */
 
@@ -24,7 +25,7 @@ export interface SpeedReport {
   readonly finished: number;
   /** Acting steps (ACTING_TOOLS, ok) and how many were followed by a screenshot or zoom as the very next tool step. */
   readonly acting: { readonly steps: number; readonly thenShot: number; readonly shotShare: number };
-  /** Acting steps whose recorded output carries an observation line (`now: …`). */
+  /** Acting steps the observer's line (`now: …`) followed: the lane runner records it as a note after the step (PERF-5). */
   readonly observed: { readonly steps: number; readonly withLine: number; readonly share: number };
   /** Requests that are a bare yes: each costs a generation today (the confirmation re-call). */
   readonly yesDelegations: number;
@@ -34,9 +35,15 @@ export interface SpeedReport {
   readonly gaps: { readonly afterShot: Stat; readonly afterAction: Stat; readonly other: Stat };
   /** Per-step tool round trips by tool class. */
   readonly roundTrip: { readonly readOnly: Stat; readonly acting: Stat; readonly other: Stat };
-  /** delegatedAt → firstActionAt, and speechEndAt → firstActionAt, ms. */
+  /** delegatedAt → firstActionAt, and speechEndAt → firstActionAt, ms. A negative interval is left out of both. */
   readonly firstActionMs: Stat;
   readonly speechToActionMs: Stat;
+  /**
+   * The negative intervals left out: an action stamped before its delegation, or a speech end stamped after the action
+   * (Live's session timeline drifting from the wall clock, in rows written before PERF-6). A clock that disagrees with
+   * itself is not a latency.
+   */
+  readonly negative: { readonly firstAction: number; readonly speechToAction: number };
   /** Spawned threads: how many started, ended, and their steps/seconds. */
   readonly threads: { readonly started: number; readonly ended: number; readonly seconds: Stat; readonly steps: Stat };
 }
@@ -51,7 +58,26 @@ const isShot = (s: DelegationStep): boolean => s.kind === "screenshot" || s.tool
 const isActing = (s: DelegationStep): boolean => s.kind === "tool" && s.tool !== undefined && ACTING_TOOLS.has(s.tool.name) && s.tool.ok;
 /** Steps the model issued: tools and shots, not its thinking, commentary or the runner's notes. */
 const isToolStep = (s: DelegationStep): boolean => (s.kind === "tool" || s.kind === "screenshot") && s.tool !== undefined;
-const hasObservation = (s: DelegationStep): boolean => typeof s.tool?.output === "string" && /(^|\n)now: /.test(s.tool.output);
+/** The lane runner's note after an acting step: the observer's line, as the model read it at the end of the result. */
+const isObservation = (s: DelegationStep): boolean => s.kind === "note" && /^now:/.test(s.text ?? "");
+
+/**
+ * The acting steps a `now:` note followed. The note comes after its own step, so each note is
+ * paired with the oldest acting step before it that has none yet: the count is exact, though two
+ * calls observed at once may swap notes.
+ */
+function observedSteps(steps: readonly DelegationStep[]): Set<DelegationStep> {
+  const pending: DelegationStep[] = [];
+  const observed = new Set<DelegationStep>();
+  for (const s of steps) {
+    if (isActing(s)) pending.push(s);
+    else if (isObservation(s)) {
+      const step = pending.shift();
+      if (step) observed.add(step);
+    }
+  }
+  return observed;
+}
 
 /** The per-step tool class: read-only, acting, or the rest (shell, web, files, agents). */
 export function toolClass(name: string): "readOnly" | "acting" | "other" {
@@ -84,11 +110,18 @@ export function analyzeSpeed(rows: readonly LedgerRow[], days: readonly string[]
   const roundTrip = { readOnly: [] as number[], acting: [] as number[], other: [] as number[] };
   const firstAction: number[] = [];
   const speechToAction: number[] = [];
+  const negative = { firstAction: 0, speechToAction: 0 };
+  /** One interval into its samples, or into the count of the negative ones left out. */
+  const interval = (into: number[], ms: number, which: keyof typeof negative): void => {
+    if (ms < 0) negative[which]++;
+    else into.push(ms);
+  };
   let finished = 0;
 
   for (const t of turns.values()) {
     if (t.finished) finished++;
     if (YES_PATTERN.test(t.delegation.request) && t.delegation.request.trim().split(/\s+/).length <= 3) yes++;
+    const observed = observedSteps(t.steps);
     const tools = t.steps.filter(isToolStep).sort((a, b) => a.at - b.at);
     // The eyes' pre-warm shot lands before the brain's first step; the first MODEL tool is the first that is not it.
     const model = tools.filter((s, i) => !(i === 0 && isShot(s) && (s.text ?? "").includes("looking")));
@@ -99,7 +132,7 @@ export function analyzeSpeed(rows: readonly LedgerRow[], days: readonly string[]
       if (s.tool) roundTrip[toolClass(s.tool.name)].push(s.tool.ms);
       if (isActing(s)) {
         actingSteps++;
-        if (hasObservation(s)) withLine++;
+        if (observed.has(s)) withLine++;
         const next = model[i + 1];
         if (next && isShot(next)) thenShot++;
       }
@@ -111,8 +144,8 @@ export function analyzeSpeed(rows: readonly LedgerRow[], days: readonly string[]
     }
     const tm = (t.finished?.timings ?? t.delegation.timings) as { delegatedAt: number; firstActionAt?: number; speechEndAt?: number };
     if (tm.firstActionAt !== undefined) {
-      firstAction.push(tm.firstActionAt - tm.delegatedAt);
-      if (tm.speechEndAt !== undefined) speechToAction.push(tm.firstActionAt - tm.speechEndAt);
+      interval(firstAction, tm.firstActionAt - tm.delegatedAt, "firstAction");
+      if (tm.speechEndAt !== undefined) interval(speechToAction, tm.firstActionAt - tm.speechEndAt, "speechToAction");
     }
   }
 
@@ -128,6 +161,7 @@ export function analyzeSpeed(rows: readonly LedgerRow[], days: readonly string[]
     roundTrip: { readOnly: stat(roundTrip.readOnly), acting: stat(roundTrip.acting), other: stat(roundTrip.other) },
     firstActionMs: stat(firstAction),
     speechToActionMs: stat(speechToAction),
+    negative,
     threads: { started: threadStarted.size, ended: threadEnded.length, seconds: stat(threadEnded.map((t) => t.seconds * 1000)), steps: stat(threadEnded.map((t) => t.steps)) },
   };
 }
@@ -148,16 +182,17 @@ export function ledgerSpeed(ledger: Ledger, days: number): SpeedReport {
 const ms = (v: number): string => (Number.isFinite(v) ? String(Math.round(v)) : "-");
 const sec = (v: number): string => (Number.isFinite(v) ? (v / 1000).toFixed(1) : "-");
 const pct = (v: number): string => `${Math.round(v * 100)} %`;
-const cell = (s: Stat): string => (s.n ? `median ${ms(s.median)} ms · p95 ${ms(s.p95)} ms (n=${s.n})` : "—");
+const cell = (s: Stat): string => (s.n ? `median ${ms(s.median)} ms · p95 ${ms(s.p95)} ms (n=${s.n})` : "n=0");
 
 /** The report as lines, with the targets the levers were built to. */
 export function renderSpeed(r: SpeedReport): string[] {
   const out: string[] = [];
   out.push(`  speed over ${r.days.length ? r.days.join(", ") : "the given rows"}: ${r.delegations} delegation${r.delegations === 1 ? "" : "s"} (${r.finished} finished)`);
-  out.push(`  acting step → screenshot next   ${r.acting.thenShot}/${r.acting.steps} (${pct(r.acting.shotShare)})   target ≤ 15 % — the observation line makes the verifying shot unnecessary`);
+  out.push(`  acting step → screenshot next   ${r.acting.thenShot}/${r.acting.steps} (${pct(r.acting.shotShare)})   target ≤ 15 % (the observation line makes the verifying shot unnecessary)`);
   out.push(`  acting results with a now: line ${r.observed.withLine}/${r.observed.steps} (${pct(r.observed.share)})   target ≥ 95 % with Settings.observe on`);
   out.push(`  bare-yes delegations            ${r.yesDelegations} (each costs a generation today)`);
-  out.push(`  first action after delegation   ${cell(r.firstActionMs)}   after speech end ${cell(r.speechToActionMs)}`);
+  const left = r.negative.firstAction || r.negative.speechToAction ? `   left out: ${r.negative.firstAction} negative after delegation, ${r.negative.speechToAction} negative after speech end` : "";
+  out.push(`  first action after delegation   ${cell(r.firstActionMs)}   after speech end ${cell(r.speechToActionMs)}${left}`);
   out.push(`  generation gap after a shot     ${cell(r.gaps.afterShot)}`);
   out.push(`  generation gap after an action  ${cell(r.gaps.afterAction)}`);
   out.push(`  generation gap otherwise        ${cell(r.gaps.other)}`);

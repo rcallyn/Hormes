@@ -1,10 +1,12 @@
 #!/usr/bin/env tsx
 import { execFileSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { userInfo } from "node:os";
 import { join } from "node:path";
 import { REPO_ROOT } from "@hormes/core";
-import { HORMES_BUNDLE_ID, compareTrees, defaultExec, performInstall, probeTarget, runHygiene, type InstallIO } from "@hormes/cli/install";
+import { HORMES_BUNDLE_ID, LSREGISTER, LSREGISTER_TIMEOUT_MS, compareTrees, defaultExec, performInstall, probeTarget, runHygiene, type InstallIO } from "@hormes/install";
 import { ICON_SOURCES, staleAgainst } from "./icon-render.ts";
+import { chooseIdentity, identityLine, identityNames, type IdentityChoice } from "./sign-identity.ts";
 
 /**
  * Package the native macOS app: build/Hormes.app.
@@ -15,6 +17,17 @@ import { ICON_SOURCES, staleAgainst } from "./icon-render.ts";
  * can have: a Dock icon and a stable TCC identity for the microphone, screen
  * recording and accessibility grants (the helper inherits it because the app is its
  * responsible process).
+ *
+ * HORMES_BUILD_ONLY=1 stops after the stage bundle is signed and `codesign --verify
+ * --strict` passes: the stage is unregistered from LaunchServices (`lsregister -u` on that
+ * exact path, so it never launches as a second Hormes), the summary names it and nothing
+ * under /Applications is read or written (no snapshot, rsync, install verification, parity,
+ * inode check, hygiene or relink). CI runs the icon, the release build and the signing this
+ * way; so can a dry run.
+ * HORMES_SIGN_IDENTITY pins the signing identity (`-` = ad-hoc); without it the order is
+ * scripts/sign-identity.ts's, and the pick is printed before the first codesign call. An
+ * ad-hoc pick that was not pinned never installs over a copy an identity signed (every grant
+ * would reset); `-` does.
  */
 
 const OUT = join(REPO_ROOT, "build");
@@ -25,6 +38,8 @@ const INSTALLED = "/Applications/Hormes.app";
 const LINK = join(OUT, "Hormes.app");
 const MAC = join(REPO_ROOT, "apps", "mac");
 const RESOURCES_SRC = join(MAC, "Resources");
+/** The palette's sound files (docs/AUDIO.md § The sounds): staged into Contents/Resources/Sounds. */
+const SOUNDS_SRC = join(RESOURCES_SRC, "Sounds");
 
 function run(cmd: string, args: readonly string[], opts: { cwd?: string; quiet?: boolean } = {}): string {
   console.log(`[build-mac] ${cmd} ${args.join(" ")}`);
@@ -70,6 +85,7 @@ function iconIsStale(file: string): boolean {
 
 need(join(RESOURCES_SRC, "Info.plist"), "apps/mac/Resources/Info.plist is part of the repo");
 need(join(RESOURCES_SRC, "entitlements.plist"), "apps/mac/Resources/entitlements.plist is part of the repo");
+need(SOUNDS_SRC, "apps/mac/Resources/Sounds is part of the repo");
 
 // 2. Build the Swift package.
 run("swift", ["build", "-c", "release", "--package-path", MAC]);
@@ -90,8 +106,20 @@ chmodSync(join(macos, "Hormes"), 0o755);
 copyFileSync(hands, join(macos, "hormes-hands"));
 chmodSync(join(macos, "hormes-hands"), 0o755);
 copyFileSync(icns, join(resources, "Hormes.icns"));
+run("pnpm", ["--filter", "@hormes/workspace", "build"]);
+cpSync(join(REPO_ROOT, "build/workspace"), join(resources, "Workspace"), { recursive: true });
 copyFileSync(join(RESOURCES_SRC, "Info.plist"), join(contents, "Info.plist"));
 writeFileSync(join(contents, "PkgInfo"), "APPL????");
+// The sounds, before signing (the seal covers every resource). Every *.caf goes; apps/mac/Scripts/earcon-check.sh
+// pins that the names the app can ask for are all there and decode (`--bundle build/stage/Hormes.app` checks this copy).
+const soundsDir = join(resources, "Sounds");
+mkdirSync(soundsDir, { recursive: true });
+const sounds = readdirSync(SOUNDS_SRC).filter((f) => f.endsWith(".caf")).sort();
+if (sounds.length === 0) {
+  console.error(`[build-mac] ${SOUNDS_SRC} holds no .caf; the app would play nothing`);
+  process.exit(1);
+}
+for (const f of sounds) copyFileSync(join(SOUNDS_SRC, f), join(soundsDir, f));
 
 const manifest = {
   repo: REPO_ROOT,
@@ -105,25 +133,28 @@ writeFileSync(join(resources, "hormes.json"), `${JSON.stringify(manifest, null, 
 // 4. Sign: helper first, then the app. Any real identity (Apple-issued or a local
 // self-signed certificate) gives the bundle a designated requirement that survives
 // rebuilds, so TCC keeps the microphone/screen/accessibility grants. Ad-hoc signing
-// keys them to the code hash, which changes every build.
-function pickIdentity(): string | undefined {
+// keys them to the code hash, which changes every build. The order (pinned → Apple
+// Development → Developer ID → a name for this app → a Code Signing name → the first
+// listed → ad-hoc) is chooseIdentity's, pinned by scripts/__tests__/sign-identity.test.ts;
+// the pick is printed before anything is signed. It used to fall to whatever certificate
+// the keychain listed first, and said so only in the summary after signing.
+function pickIdentity(): IdentityChoice {
   const pinned = process.env["HORMES_SIGN_IDENTITY"];
-  if (pinned) return pinned === "-" ? undefined : pinned;
-  try {
-    const out = execFileSync("security", ["find-identity", "-v", "-p", "codesigning"], { encoding: "utf8" });
-    const names = [...out.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").filter(Boolean);
-    return (
-      names.find((n) => n.startsWith("Apple Development")) ??
-      names.find((n) => n.startsWith("Developer ID Application")) ??
-      names[0]
-    );
-  } catch {
-    return undefined;
+  let names: string[] = [];
+  if (!pinned) {
+    try {
+      names = identityNames(execFileSync("security", ["find-identity", "-v", "-p", "codesigning"], { encoding: "utf8" }));
+    } catch {
+      // no keychain to ask (a headless runner): ad-hoc
+    }
   }
+  return chooseIdentity(names, pinned);
 }
 
 const entitlements = join(RESOURCES_SRC, "entitlements.plist");
-const identity = pickIdentity();
+const chosen = pickIdentity();
+const identity = chosen.identity;
+console.log(identityLine(chosen));
 const sign = identity ?? "-";
 // Timestamps only make sense for Apple-issued certificates (and need the network).
 const appleIssued = identity !== undefined && /^(Apple Development|Developer ID Application)/.test(identity);
@@ -131,11 +162,38 @@ const common = identity ? ["--force", ...(appleIssued ? ["--timestamp"] : []), "
 run("codesign", [...common, "--sign", sign, join(macos, "hormes-hands")]);
 run("codesign", [...common, "--entitlements", entitlements, "--sign", sign, APP]);
 run("codesign", ["--verify", "--strict", "--verbose=1", APP]);
+const signedLine = identity ?? "ad-hoc (TCC grants reset on every rebuild; create a code-signing certificate in Keychain Access or set HORMES_SIGN_IDENTITY)";
+
+// HORMES_BUILD_ONLY=1: the signed, verified stage is the product. Nothing below runs —
+// no snapshot, rsync, install verification, parity, inode check, hygiene or relink — and
+// nothing under /Applications is read or written. CI exercises icon → release build →
+// sign → verify this way (check.yml, ad-hoc); a dry run on a Mac with an install uses it too.
+if (process.env["HORMES_BUILD_ONLY"] === "1") {
+  const stagedSize = statSync(join(macos, "Hormes")).size;
+  // The stage is a second com.hormes.app bundle on disk, and LaunchServices has held a
+  // record for it before (packages/install's stale rule names build/stage): with one, `open -a
+  // Hormes` can pick the stage and start a second instance beside /Applications'. Unregister
+  // this exact path after the verify — the database only, the stage stays; never
+  // /Applications/Hormes.app. A path never registered fails -u harmlessly, as does a runner
+  // without LaunchServices.
+  const unregistered = defaultExec(LSREGISTER, ["-u", APP], { timeoutMs: LSREGISTER_TIMEOUT_MS });
+  console.log(`
+  built      ${APP} (HORMES_BUILD_ONLY=1: signed and verified, not installed)
+  binary     ${(stagedSize / (1024 * 1024)).toFixed(1)} MiB
+  sounds     ${sounds.length} in Contents/Resources/Sounds
+  signed     ${signedLine}
+  launch     ${unregistered.code === 0 ? "the stage unregistered from LaunchServices" : `the stage was not registered (lsregister -u exit ${unregistered.code})`}; only /Applications/Hormes.app launches
+`);
+  process.exit(0);
+}
 
 // 5. Install IN PLACE. Exactly one launchable Hormes exists on this Mac — /Applications —
 // so the Dock, LaunchServices' recents and TCC never see two identities. Its directory
 // is never recreated: the Dock's pinned tile keeps a bookmark keyed on that directory's
-// inode, and rm + cp gave it a new one every build (that was the second Dock tile).
+// inode, and rm + cp gave it a new one every build (the first cause of a second Dock
+// tile; the second was hormes-hands checking in as a Foreground app from the same
+// bundle — fixed in the helper's main.swift with setActivationPolicy(.prohibited), and
+// named by the one-Hormes line below when a helper still does).
 // rsync renames each changed file over the old name (never --inplace: the running app
 // keeps its mapped, signed Mach-O), --delete-after drops what the stage no longer has,
 // and it is the INSTALLED copy that is verified. build/Hormes.app stays a symlink to it.
@@ -169,7 +227,18 @@ const io: InstallIO = {
   compare: compareTrees,
   warn: (line) => console.warn(`[build-mac] ${line}`),
 };
-const outcome = performInstall({ stage: APP, installed: INSTALLED, ...(PREVIOUS !== undefined ? { previous: PREVIOUS } : {}), link: LINK, cleanup: join(OUT, "stage"), bundleId: HORMES_BUNDLE_ID, uid: process.getuid?.() ?? -1 }, io);
+/** The account's short name for the not-writable line of a first install; userInfo throws on an account with no passwd entry, and the uid stands in then. */
+function accountName(): string | undefined {
+  try {
+    return userInfo().username || undefined;
+  } catch {
+    return undefined;
+  }
+}
+const user = accountName();
+// An ad-hoc stage nobody asked for (no identity listed) is refused over an identity-signed install; a pinned `-` is not.
+const signing = identity !== undefined ? "identity" : chosen.how === "pinned" ? "adhoc-pinned" : "adhoc";
+const outcome = performInstall({ stage: APP, installed: INSTALLED, ...(PREVIOUS !== undefined ? { previous: PREVIOUS } : {}), link: LINK, cleanup: join(OUT, "stage"), bundleId: HORMES_BUNDLE_ID, uid: process.getuid?.() ?? -1, ...(user !== undefined ? { user } : {}), signing }, io);
 if (!outcome.ok) {
   console.error(`[build-mac] ${outcome.what}`);
   for (const l of outcome.lines) console.error(`           ${l}`);
@@ -190,12 +259,13 @@ const size = statSync(join(INSTALLED, "Contents", "MacOS", "Hormes")).size;
 console.log(`
   built      ${INSTALLED}
   binary     ${(size / (1024 * 1024)).toFixed(1)} MiB
+  sounds     ${sounds.length} in Contents/Resources/Sounds
   daemon     ${manifest.node} ${manifest.tsx} ${manifest.daemon}
-  signed     ${identity ?? "ad-hoc (TCC grants reset on every rebuild; create a code-signing certificate in Keychain Access or set HORMES_SIGN_IDENTITY)"}
+  signed     ${signedLine}
 
   ${installNote}
   ${oneHormes}
   link:      build/Hormes.app → ${INSTALLED}${outcome.rollback ? `\n  ${outcome.rollback}` : ""}
-  run:       open -a Hormes
+  run:       open --env HORMES_AUTO_WAKE=0 -a Hormes --args --install-permissions
   logs:      tail -f ~/.hormes/daemon.log
 `);

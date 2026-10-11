@@ -39,7 +39,9 @@ function fixture(): LedgerRow[] {
   rows.push(
     ...delegation("d1", T0, "hormes click the save button", [
       step(T0 + 100, "screenshot", { text: "looking", ms: 90 }),
-      step(T0 + 4200, "left_click", { ms: 60, output: "OK\nnow: Finder — \"Desktop\"; focused: AXButton \"Save\"; 150 ms after the click" }),
+      step(T0 + 4200, "left_click", { ms: 60, output: "OK" }),
+      // The lane runner's note after the click: the observer's line, as the model read it (PERF-5).
+      { id: `s${++stepSeq}`, at: T0 + 4380, kind: "note", text: "now: Finder — \"Desktop\"; focused: AXButton \"Save\"; 150 ms after the click" },
       step(T0 + 9500, "screenshot", { ms: 120 }),
       step(T0 + 14000, "left_click", { ms: 70, output: "OK" }),
     ], { firstActionAt: T0 + 4200, speechEndAt: T0 - 400 }),
@@ -69,7 +71,7 @@ test("ledger --speed: the counters come out as worked by hand", () => {
   assert.equal(r.delegations, 3);
   assert.equal(r.finished, 3);
   // Acting steps (the delegator's ACTING_TOOLS: the hands' acting members, shell, files, browser, overlays): d1's two clicks, d2's click, d3's shell = 4;
-  // d1's first click is followed by a screenshot; only it carries a now: line.
+  // d1's first click is followed by a screenshot; only it has a now: note after it.
   assert.deepEqual(r.acting, { steps: 4, thenShot: 1, shotShare: 0.25 });
   assert.deepEqual(r.observed, { steps: 4, withLine: 1, share: 0.25 });
   assert.equal(r.yesDelegations, 1);
@@ -79,12 +81,12 @@ test("ledger --speed: the counters come out as worked by hand", () => {
   assert.deepEqual([r.gaps.afterAction.n, r.gaps.afterAction.median], [1, 5300]);
   assert.deepEqual([r.gaps.afterShot.n, r.gaps.afterShot.median], [1, 4500]);
   assert.deepEqual([r.gaps.other.n, r.gaps.other.median], [1, 4200]);
-  // Round trips by class: read-only = d1's verification shot 120, d2's focused text 12, d3's frontmost 8 (the eyes' shot is excluded); acting = 60, 70, 55 and the shell's 1200 (nearest-rank median of four = the second); other = none here.
+  // Round trips by class: read-only = d1's verification shot 120, d2's focused text 12, d3's frontmost 8 (the eyes' shot is excluded); acting = 60, 70, 55 and the shell's 1200 (the median of four is the mean of the middle two, 60 and 70); other = none here.
   assert.deepEqual([r.roundTrip.readOnly.n, r.roundTrip.readOnly.median, r.roundTrip.readOnly.p95], [3, 12, 120]);
-  assert.deepEqual([r.roundTrip.acting.n, r.roundTrip.acting.median, r.roundTrip.acting.p95], [4, 60, 1200]);
+  assert.deepEqual([r.roundTrip.acting.n, r.roundTrip.acting.median, r.roundTrip.acting.p95], [4, 65, 1200]);
   assert.equal(r.roundTrip.other.n, 0);
-  // First action: d1 4200, d2 3900 → median 3900 (nearest rank of two); speech end → action only where speechEndAt is stamped (d1: 4600).
-  assert.deepEqual([r.firstActionMs.n, r.firstActionMs.median], [2, 3900]);
+  // First action: d1 4200, d2 3900 → median 4050 (the mean of the two); speech end → action only where speechEndAt is stamped (d1: 4600).
+  assert.deepEqual([r.firstActionMs.n, r.firstActionMs.median], [2, 4050]);
   assert.deepEqual([r.speechToActionMs.n, r.speechToActionMs.median], [1, 4600]);
   assert.deepEqual([r.threads.started, r.threads.ended, r.threads.seconds.median, r.threads.steps.median], [1, 1, 12_000, 4]);
   const lines = renderSpeed(r);
@@ -106,7 +108,7 @@ test("ledger --speed: an empty day renders dashes and no thread line noise; the 
   assert.deepEqual(["left_click", "type", "applescript", "browser_navigate", "run_shell"].map(toolClass), ["acting", "acting", "acting", "acting", "acting"]);
   assert.equal(toolClass("show_circle"), "readOnly", "the overlays are read-only to the toolset (no hands) though they stamp firstActionAt — the toolset's class wins for round trips");
   assert.equal(toolClass("web_fetch"), "readOnly", "reads of the web are read-only to the toolset");
-  assert.deepEqual(["agent_send", "speak_progress", "worker_start"].map(toolClass), ["other", "other", "other"]);
+  assert.deepEqual(["agent_send", "speak_progress", "thread_start"].map(toolClass), ["other", "other", "other"]);
 });
 
 test("ledger --speed --days N reads the last N day files of a ledger, oldest first", () => {

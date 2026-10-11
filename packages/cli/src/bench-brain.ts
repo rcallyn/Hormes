@@ -7,14 +7,15 @@ import { fileURLToPath } from "node:url";
 import { deflateSync } from "node:zlib";
 import { readConfig, replaceDefaultSink, setLogLevel, type HormesConfig, type LogLevel } from "@hormes/core";
 import type { LiveSession } from "@hormes/live";
-import { CodexBrain, parseReflex, probeCodex, type Brain, type BrainResult, type BrainSink, type BrainTask, type CodexProbe, type DelegationTimingsExtra, type RunOutcome, type ToolRunner } from "@hormes/brain";
-import { ACTING_MEMBERS, type NativeHands } from "@hormes/hands";
-import { Engine } from "@hormes/engine";
+import { ACTING_TOOLS, CodexBrain, parseReflex, probeCodex, type Brain, type BrainResult, type BrainSink, type BrainTask, type CodexProbe, type DelegationTimingsExtra, type RunOutcome, type ToolRunner } from "@hormes/brain";
+import type { NativeHands } from "@hormes/hands";
+import type { Engine } from "@hormes/engine";
 import type { Delegation, DelegationStep, Effort } from "@hormes/protocol";
+import { benchConfig, benchEngine, median, percentile } from "./bench.ts";
 
 /**
  * `pnpm hormes bench --brain` — the representative-command benchmark
- * (docs/LATENCY.md). Five things Kevin says most, run through a real Engine and
+ * (docs/LATENCY.md). Five things User says most, run through a real Engine and
  * the REAL brain (`auto`, which is Codex on this Mac: the resident app-server,
  * one thread across delegations, one turn per delegation, exactly as the product
  * runs it) with a stand-in Live session and canned hands:
@@ -27,7 +28,7 @@ import type { Delegation, DelegationStep, Effort } from "@hormes/protocol";
  *
  * Two phases. First the product path with reflexes ON: the commands the grammar
  * catches (open safari, scroll down) never reach the brain and finish in
- * milliseconds — those rows show what Kevin gets. Then the brain path with
+ * milliseconds — those rows show what User gets. Then the brain path with
  * reflexes OFF: every command N times (default 2) on the model, sequentially, so
  * the model-path numbers are comparable run to run. `--no-reflex` skips the first
  * phase (brain path only).
@@ -38,7 +39,7 @@ import type { Delegation, DelegationStep, Effort } from "@hormes/protocol";
  * file write, a browser action — that returned ok), → done; the model steps
  * (MCP tool calls + Codex shell commands + a final message, each one generation;
  * reasoning items as a cross-check), the tool calls by name, context rollovers,
- * wiki-bootstrap calls (kevin-wiki / AGENTS.md / `npm run status`), no-such-file
+ * wiki-bootstrap calls (user-wiki / AGENTS.md / `npm run status`), no-such-file
  * errors, the first words. Then medians and p95 per command and overall, the tool
  * counts, and the gaps between consecutive model steps (the per-generation cost).
  *
@@ -49,10 +50,14 @@ import type { Delegation, DelegationStep, Effort } from "@hormes/protocol";
  * non-hands tool that could act (run_shell, applescript, write_file, edit_file,
  * open_url, clipboard_*, agent_*, self_*) is answered with an error at the
  * ToolRunner. Read-only file and web tools run for real. The Codex turns run on
- * Kevin's ChatGPT login: the run costs his ChatGPT plan, not dollars — the header
- * says so. When Codex is not signed in the bench REFUSES to run: the engine's
- * `auto` would pick the next brain (Claude Code, then the API keys) and spend real
- * dollars on ten screenshot-carrying turns; `--allow-api-spend` is the override.
+ * User's ChatGPT login: the run costs his ChatGPT plan, not dollars — the header
+ * says so. Nothing else spends: the Engine is bench.ts's `benchEngine` over
+ * `benchConfig` (a constant key, memory on keywords, the voice probe off, no
+ * helper process, no Dock read). When Codex is not signed in the bench REFUSES
+ * to run: the engine's `auto` would pick the next brain (Claude Code, then the
+ * API keys) and spend real dollars on ten screenshot-carrying turns;
+ * `--allow-api-spend` is the override, and only then does the brain keep the
+ * user's keys.
  * `--effort low|medium` overrides the brain's effort for the run (one flag for an
  * A/B); `--json` prints everything as JSON; `--out FILE` writes it.
  *
@@ -116,24 +121,13 @@ export const BRAIN_BENCH_COMMANDS: readonly BenchCommand[] = [
 export const BLOCKED_TOOLS: ReadonlySet<string> = new Set(["run_shell", "applescript", "write_file", "edit_file", "open_url", "clipboard_write", "clipboard_read", "agent_send", "agent_start", "self_edit", "self_check", "self_review", "self_apply", "self_discard"]);
 
 /**
- * What counts as a visible action for "delegation → first action": the hands'
- * acting members, the tools that act on the Mac without the hands, and the
- * overlays Kevin sees drawn on his screen (the analysts' "first visible action",
- * which the BEFORE numbers in docs/LATENCY.md use, counted show_* the same way;
- * `show_clear` removes, it does not show). The same set the Delegator stamps
- * `firstActionAt` with (packages/brain/src/delegator.ts) — a copy, because the
- * brain's index does not export it; both tests pin the two to this list.
- */
-export const ACTING_TOOLS: ReadonlySet<string> = new Set([...ACTING_MEMBERS, "applescript", "run_shell", "write_file", "edit_file", "browser_navigate", "browser_click", "browser_type", "show_circle", "show_arrow", "show_rect", "show_text", "show_stroke"]);
-
-/**
- * Kevin's global ~/.codex/AGENTS.md bootstrap, as it shows up in tool inputs and
+ * User's global ~/.codex/AGENTS.md bootstrap, as it shows up in tool inputs and
  * shell commands: the stale wiki root under Documents/GitHub, ~/.codex/AGENTS.md
  * itself, the "Start" list's pages, `npm run status`. A search of the real wiki
- * (~/repos/Kevin-Wiki-v3) is the task, not bootstrap, and is not matched; nor is
+ * (~/repos/User-Wiki-v3) is the task, not bootstrap, and is not matched; nor is
  * any other AGENTS.md (this repo's, or the one the canned page mentions).
  */
-export const BOOTSTRAP_RE = /Documents\/GitHub\/kevin-wiki|\.codex\/AGENTS\.md|agent-operations-hub|slash-command-index|capability-routing|SKILL-RESOLVER|npm run status/i;
+export const BOOTSTRAP_RE = /Documents\/GitHub\/user-wiki|\.codex\/AGENTS\.md|agent-operations-hub|slash-command-index|capability-routing|SKILL-RESOLVER|npm run status/i;
 /** A file tool's "the path does not exist" — not `read_focused_text`'s "not_found: no focused UI element". */
 export const NO_SUCH_FILE_RE = /no such file|ENOENT|does not exist/i;
 /** The tools whose errors NO_SUCH_FILE_RE is read on. */
@@ -319,9 +313,9 @@ interface AxNode {
   readonly pressable?: boolean;
 }
 
-const WIKI_TITLE = "Kevin Wiki — Index";
-const WIKI_URL = "https://wiki.kevin.local/wiki/index";
-const WIKI_TEXT = "Kevin Wiki\nSearch the wiki\nIndex Design Engineering Productivity Personal Projects Log\nIndex\nThis wiki holds Kevin's notes on design, engineering and the tools he runs.\nStart with Design for the visual canon, Engineering for repo rules, Log for the day's changes.\nPages are Markdown under wiki/; the agent index lives in AGENTS.md.\nRecently changed\n- Design system tokens\n- Agent operations hub\n- Slash command index\nKevin Wiki · 718 pages · last built today";
+const WIKI_TITLE = "User Wiki — Index";
+const WIKI_URL = "https://wiki.user.local/wiki/index";
+const WIKI_TEXT = "User Wiki\nSearch the wiki\nIndex Design Engineering Productivity Personal Projects Log\nIndex\nThis wiki holds User's notes on design, engineering and the tools he runs.\nStart with Design for the visual canon, Engineering for repo rules, Log for the day's changes.\nPages are Markdown under wiki/; the agent index lives in AGENTS.md.\nRecently changed\n- Design system tokens\n- Agent operations hub\n- Slash command index\nUser Wiki · 718 pages · last built today";
 const DISPLAY = { id: 1, x: 0, y: 0, w: 1280, h: 800, scale: 1, main: true };
 const SEARCH_FIELD: AxNode = { i: 6, depth: 3, role: "AXTextField", subrole: "AXSearchField", title: "Search the wiki", description: "Search the wiki", x: 780, y: 130, w: 400, h: 36, pressable: true };
 const ADDRESS_FIELD: AxNode = { i: 2, depth: 2, role: "AXTextField", title: "Address and Search", description: "Smart Search Field", x: 340, y: 44, w: 600, h: 34, pressable: true };
@@ -332,11 +326,11 @@ const AX_NODES: readonly AxNode[] = [
   ADDRESS_FIELD,
   { i: 3, depth: 1, role: "AXWebArea", title: WIKI_TITLE, x: 0, y: 118, w: 1280, h: 682 },
   { i: 4, depth: 2, role: "AXGroup", description: "header", x: 0, y: 118, w: 1280, h: 60 },
-  { i: 5, depth: 3, role: "AXHeading", title: "Kevin Wiki", x: 40, y: 134, w: 130, h: 30 },
+  { i: 5, depth: 3, role: "AXHeading", title: "User Wiki", x: 40, y: 134, w: 130, h: 30 },
   SEARCH_FIELD,
   ...SIDEBAR.map((t, k): AxNode => ({ i: 7 + k, depth: 3, role: "AXLink", title: t, x: 32, y: 210 + k * 40, w: 120, h: 22, pressable: true })),
   { i: 14, depth: 3, role: "AXHeading", title: "Index", x: 300, y: 205, w: 90, h: 34 },
-  { i: 15, depth: 3, role: "AXStaticText", title: "This wiki holds Kevin's notes on design, engineering and the tools he runs.", x: 300, y: 270, w: 560, h: 20 },
+  { i: 15, depth: 3, role: "AXStaticText", title: "This wiki holds User's notes on design, engineering and the tools he runs.", x: 300, y: 270, w: 560, h: 20 },
 ];
 const SEARCHY = /search|find|query|address|url|omni|smart/i;
 
@@ -765,12 +759,8 @@ export function analyzeRun(input: AnalyzeInput): RunRecord {
 
 // ------------------------------------------------------------------ statistics
 
-export function percentile(values: readonly number[], p: number): number {
-  if (values.length === 0) return Number.NaN;
-  const sorted = [...values].sort((a, b) => a - b);
-  const idx = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1));
-  return sorted[idx] ?? Number.NaN;
-}
+/** bench.ts's helpers: percentiles by nearest rank, and the true median (the mean of the two middle values for an even n). Re-exported for ledger-speed.ts and the tests. */
+export { median, percentile };
 
 export interface Stat {
   readonly n: number;
@@ -782,7 +772,7 @@ export interface Stat {
 
 export function stat(values: readonly number[]): Stat {
   const xs = values.filter((v) => Number.isFinite(v));
-  return { n: xs.length, median: percentile(xs, 50), p95: percentile(xs, 95), min: xs.length ? Math.min(...xs) : Number.NaN, max: xs.length ? Math.max(...xs) : Number.NaN };
+  return { n: xs.length, median: median(xs), p95: percentile(xs, 95), min: xs.length ? Math.min(...xs) : Number.NaN, max: xs.length ? Math.max(...xs) : Number.NaN };
 }
 
 export const METRICS = ["firstThinking", "firstModelTool", "firstAction", "firstCommentary", "done"] as const;
@@ -879,25 +869,34 @@ export interface CompareReport {
   readonly verificationShare: { readonly before: number | undefined; readonly after: number };
 }
 
-/** This report against an older one: per-command median deltas of the first action, done and the model steps, plus the two headline shares. Pure. */
+/**
+ * This report against an older one: per-command median deltas of the first action, done and the model steps, plus the
+ * two headline shares. Pure. The baseline is summarized again from its own records, the way this run was: a report
+ * saved before C4-medians holds nearest-rank medians (the lower middle of an even n), so its saved summary reads faster
+ * than its own samples do and every delta would lean slower. A report without records is read as saved.
+ */
 export function compareReports(current: BrainBenchReport, baseline: BrainBenchReport, baselinePath: string): CompareReport {
-  const before = new Map(baseline.summary.brainPath.perCommand.map((c) => [c.cmd, c]));
+  // Older reports predate some summary fields; read what is there.
+  const saved = baseline.summary as Partial<BenchSummary>;
+  const again = baseline.records?.length ? summarize(baseline.records) : undefined;
+  const base = again?.brainPath ?? baseline.summary.brainPath;
+  const before = new Map(base.perCommand.map((c) => [c.cmd, c]));
   const delta = (a: number | undefined, b: number | undefined): number | undefined => (a === undefined || b === undefined || !Number.isFinite(a) || !Number.isFinite(b) ? undefined : a - b);
   const rows: CompareRow[] = [...current.summary.brainPath.perCommand, current.summary.brainPath.overall].map((c) => {
-    const b = c.cmd === "all" ? baseline.summary.brainPath.overall : before.get(c.cmd);
+    const b = c.cmd === "all" ? base.overall : before.get(c.cmd);
     const firstActionMs = delta(c.metrics.firstAction.median, b?.metrics.firstAction.median);
     const doneMs = delta(c.metrics.done.median, b?.metrics.done.median);
     const generations = delta(c.generations.median, b?.generations.median);
     return { cmd: c.cmd, ...(firstActionMs !== undefined ? { firstActionMs } : {}), ...(doneMs !== undefined ? { doneMs } : {}), ...(generations !== undefined ? { generations } : {}) };
   });
-  // Older reports predate these fields; read what is there.
-  const bs = baseline.summary as Partial<BenchSummary>;
+  // Records older than the verification counters sum to NaN acting calls: no share was counted then, so read the saved one (none).
+  const shotsCounted = again !== undefined && Number.isFinite(again.verificationShots.acting);
   return {
     baseline: baselinePath,
     ...(typeof baseline.meta["startedAt"] === "string" ? { baselineStartedAt: baseline.meta["startedAt"] } : {}),
     rows,
-    generationsP95: { before: bs.generationsPerCommand?.p95 ?? baseline.summary.brainPath.overall.generations.p95, after: current.summary.generationsPerCommand.p95 },
-    verificationShare: { before: bs.verificationShots?.share, after: current.summary.verificationShots.share },
+    generationsP95: { before: again?.generationsPerCommand.p95 ?? saved.generationsPerCommand?.p95 ?? base.overall.generations.p95, after: current.summary.generationsPerCommand.p95 },
+    verificationShare: { before: shotsCounted ? again.verificationShots.share : saved.verificationShots?.share, after: current.summary.verificationShots.share },
   };
 }
 
@@ -942,17 +941,13 @@ export async function runBrainBench(opts: BrainBenchOptions): Promise<BrainBench
   const probe = standIn ? undefined : (opts.probe ?? (await probeCodex({ bin: base.codexBin })));
   const useCodex = probe !== undefined && probe.bin !== undefined && probe.signedIn;
   if (!standIn && !useCodex && !opts.allowApiSpend) {
-    throw new Error(`Codex is not available (${probe?.detail ?? "no probe"}); bench --brain runs on Kevin's ChatGPT plan only — the auto brain would spend API dollars. Pass --allow-api-spend to run on it anyway.`);
+    throw new Error(`Codex is not available (${probe?.detail ?? "no probe"}); bench --brain runs on your ChatGPT plan only, since the auto brain would spend API dollars. Pass --allow-api-spend to run on it anyway.`);
   }
   const dir = mkdtempSync(join(tmpdir(), "jh-bb-"));
-  const config: HormesConfig = {
-    ...base,
-    openaiApiKey: base.openaiApiKey || "sk-bench-never-used",
-    brain: "auto",
-    brainEffort: effort,
-    stateDir: join(dir, "state"),
-    socketPath: join(dir, "state", "j.sock"),
-  };
+  // The user's keys stay out (bench.ts `benchConfig`): Codex runs on its own login, a stand-in on
+  // nothing. Only --allow-api-spend without Codex keeps the brain's keys, since that brain needs one.
+  // The hands are in process, so the helper's path is one that does not exist.
+  const config: HormesConfig = { ...benchConfig(base, dir, { codex: false, fakeHands: true, brainKeys: !standIn && !useCodex }), brainEffort: effort };
 
   // Every log line, timestamped: per-run windows (rollovers, the delegator's own line) come from here.
   // Info lines stay off stdout (the JSON report goes there); warnings and errors still reach stderr.
@@ -982,7 +977,8 @@ export async function runBrainBench(opts: BrainBenchOptions): Promise<BrainBench
         (useCodex
           ? lazyBrain("codex", () => new CodexBrain({ runner: engine.runner, probe, stateDir: config.stateDir, socketPath: config.socketPath, ...(base.brainModel.trim() ? { model: base.brainModel.trim() } : {}), effort, spawnImpl: teeSpawn(wire, say) }))
           : undefined));
-  engine = new Engine({ config, connectors: [], ...(brain ? { brain } : {}), makeLive: () => live as unknown as LiveSession, hands });
+  // The bench's Engine (bench.ts): memory on keywords, no Dock shell, the permission read and the voice probe off the network.
+  engine = benchEngine({ config, ...(brain ? { brain } : {}), makeLive: () => live as unknown as LiveSession, hands });
   if (useCodex) codexDetail = probe.detail;
 
   // Every runner call recorded; the tools that could act outside the canned hands answered with an error.
@@ -1008,7 +1004,7 @@ export async function runBrainBench(opts: BrainBenchOptions): Promise<BrainBench
 
   const load = loadavg().map((v) => v.toFixed(1)).join(" ");
   say(`bench --brain: ${runs} run(s) per command on the brain path${opts.noReflex ? " (reflexes off throughout)" : ", after the reflex path"}; effort ${effort}; load average ${load}`);
-  say(`brain: ${opts.brain ? `stand-in (${brain?.kind ?? "?"})` : useCodex ? "REAL Codex through the product's resident app-server — the turns run on Kevin's ChatGPT login and cost his ChatGPT plan, not dollars" : `auto (Codex is not available here: ${probe?.detail ?? "?"}) — --allow-api-spend given: the turns cost REAL API DOLLARS on whatever brain auto picks`}`);
+  say(`brain: ${opts.brain ? `stand-in (${brain?.kind ?? "?"})` : useCodex ? "REAL Codex through the product's resident app-server, so the turns run on your ChatGPT login and cost your ChatGPT plan, not dollars" : `auto (Codex is not available here: ${probe?.detail ?? "?"}); --allow-api-spend given, so the turns cost REAL API DOLLARS on whatever brain auto picks`}`);
   say(`hands: canned (Safari in front on ${WIKI_TITLE}; screen ${screen.source === FIXTURE_PNG ? "fixture" : screen.source}, ${pngSize(screen.png).width}x${pngSize(screen.png).height}); Live: stand-in (no socket, no billing); nothing on this Mac is touched; blocked tools: ${[...BLOCKED_TOOLS].join(", ")}`);
 
   const meta: Record<string, unknown> = {
@@ -1022,21 +1018,21 @@ export async function runBrainBench(opts: BrainBenchOptions): Promise<BrainBench
     screen: screen.source,
     blockedTools: [...BLOCKED_TOOLS],
     stateDir: config.stateDir,
-    costs: opts.brain ? "nothing (stand-in brain)" : useCodex ? "Kevin's ChatGPT plan (Codex turns); no API dollars" : "REAL API DOLLARS on the brain auto picked (--allow-api-spend)",
+    costs: opts.brain ? "nothing (stand-in brain)" : useCodex ? "your ChatGPT plan (Codex turns); no API dollars" : "REAL API DOLLARS on the brain auto picked (--allow-api-spend)",
   };
 
   const records: RunRecord[] = [];
   const t0 = Date.now();
   await engine.start();
   await engine.ready();
-  say(`engine ready in ${Date.now() - t0} ms; brain: ${engine.brainInfo.kind} — ${engine.brainInfo.detail}`);
+  say(`engine ready in ${Date.now() - t0} ms; brain: ${engine.brainInfo.kind} (${engine.brainInfo.detail})`);
   meta["brainKind"] = engine.brainInfo.kind;
   meta["brainDetailAtReady"] = engine.brainInfo.detail;
   // The second gate, after the engine chose: only Codex (or a stand-in) runs without --allow-api-spend,
   // whatever the probe said a moment ago.
   if (!standIn && !opts.allowApiSpend && (engine.brainInfo.kind !== "codex" || !engine.brainInfo.ready)) {
     await Promise.race([engine.stop(), new Promise((r) => setTimeout(r, 8000))]);
-    throw new Error(`Codex is not available (${engine.brainInfo.detail}; probe: ${codexDetail || probe?.detail || "?"}); bench --brain runs on Kevin's ChatGPT plan only — pass --allow-api-spend to run on the ${engine.brainInfo.kind} brain (API dollars).`);
+    throw new Error(`Codex is not available (${engine.brainInfo.detail}; probe: ${codexDetail || probe?.detail || "?"}); bench --brain runs on your ChatGPT plan only. Pass --allow-api-spend to run on the ${engine.brainInfo.kind} brain (API dollars).`);
   }
   // The thread the last turn went out on: the start thread first; a run whose turn/start names another is a rollover.
   let lastThreadId: string | undefined;
@@ -1109,8 +1105,8 @@ export async function runBrainBench(opts: BrainBenchOptions): Promise<BrainBench
       const rec = analyzeRun({ phase, cmd, run, liveId, delegation: d, timedOut, t0: start, t1: end, wire: wire.slice(wireBefore), runnerCalls: runnerCalls.slice(callsBefore), logLines: logLines.slice(logBefore).filter((l) => l.scope !== "bench"), commentary: live.commentary.slice(commentaryBefore), prevThreadId: lastThreadId });
       if (rec.threadId !== undefined) lastThreadId = rec.threadId;
       const f = (v: number | undefined): string => (v === undefined ? "-" : String(Math.round(v)));
-      if (rec.delegationRequest !== undefined && rec.delegationRequest !== cmd.text) say(`  ${liveId}: WARNING the delegation carried "${rec.delegationRequest}" — utterances merged; the row is not this command alone`);
-      say(`  ${liveId}: ${rec.status}${timedOut ? " (timed out)" : ""} in ${f(rec.t.done)} ms — thinking@${f(rec.t.firstThinking)} tool@${f(rec.t.firstModelTool)} action@${f(rec.t.firstAction)} said@${f(rec.t.firstCommentary)}; ${rec.generations} model step(s), ${rec.toolCount} tool call(s): ${rec.toolNames.join(", ") || "-"}${rec.rollovers ? `; ${rec.rollovers} rollover(s)` : ""}${rec.bootstrap.calls.length ? `; bootstrap×${rec.bootstrap.calls.length}` : ""}${rec.bootstrap.noSuchFile.length ? `; no-such-file×${rec.bootstrap.noSuchFile.length}` : ""}${rec.summary ? ` — "${rec.summary.slice(0, 100)}"` : ""}`);
+      if (rec.delegationRequest !== undefined && rec.delegationRequest !== cmd.text) say(`  ${liveId}: WARNING the delegation carried "${rec.delegationRequest}", so utterances merged and the row is not this command alone`);
+      say(`  ${liveId}: ${rec.status}${timedOut ? " (timed out)" : ""} in ${f(rec.t.done)} ms, thinking@${f(rec.t.firstThinking)} tool@${f(rec.t.firstModelTool)} action@${f(rec.t.firstAction)} said@${f(rec.t.firstCommentary)}; ${rec.generations} model step(s), ${rec.toolCount} tool call(s): ${rec.toolNames.join(", ") || "-"}${rec.rollovers ? `; ${rec.rollovers} rollover(s)` : ""}${rec.bootstrap.calls.length ? `; bootstrap×${rec.bootstrap.calls.length}` : ""}${rec.bootstrap.noSuchFile.length ? `; no-such-file×${rec.bootstrap.noSuchFile.length}` : ""}${rec.summary ? ` ("${rec.summary.slice(0, 100)}")` : ""}`);
       return rec;
     };
 
@@ -1173,7 +1169,7 @@ export function renderReport(report: BrainBenchReport): string[] {
   const pad = (s: string, n: number): string => s.padEnd(n);
   const cell = (s: Stat): string => `${sec(s.median).padStart(6)} /${sec(s.p95).padStart(6)}`;
   out.push("");
-  out.push(`  brain path — seconds after the delegation, median / p95 (n runs per command); "1st action" is the first acting tool that returned ok`);
+  out.push(`  brain path: seconds after the delegation, median / p95 (n runs per command); "1st action" is the first acting tool that returned ok`);
   out.push(`  ${pad("command", 20)}${"n".padStart(3)}  ${pad("1st thinking", 15)}${pad("1st tool", 15)}${pad("1st action", 15)}${pad("done", 15)}${pad("steps", 8)}tools`);
   for (const c of [...summary.brainPath.perCommand, summary.brainPath.overall]) {
     const m = c.metrics;
@@ -1181,11 +1177,11 @@ export function renderReport(report: BrainBenchReport): string[] {
   }
   const g = summary.generationGapMs;
   out.push("");
-  out.push(`  model step gap (>${GENERATION_GAP_MIN_MS} ms between consecutive model events): median ${sec(g.median)} s, p95 ${sec(g.p95)} s, max ${sec(g.max)} s (n=${g.n}) — the per-generation cost`);
+  out.push(`  model step gap (>${GENERATION_GAP_MIN_MS} ms between consecutive model events): median ${sec(g.median)} s, p95 ${sec(g.p95)} s, max ${sec(g.max)} s (n=${g.n}), the per-generation cost`);
   out.push(`  tool round trip inside the runner: median ${ms(summary.toolRoundTripMs.median)} ms, p95 ${ms(summary.toolRoundTripMs.p95)} ms (n=${summary.toolRoundTripMs.n})`);
   out.push(`  context rollovers ${summary.rollovers}; wiki-bootstrap calls ${summary.bootstrapCalls}; npm run status in ${summary.npmRunStatusRuns} run(s); no-such-file errors ${summary.noSuchFile}; narration before the first tool in ${summary.narrationFirst} run(s); timed out ${summary.timedOut}`);
   const pctOf = (v: number): string => `${Math.round(v * 100)} %`;
-  out.push(`  generations per command: median ${ms(summary.generationsPerCommand.median)}, p95 ${ms(summary.generationsPerCommand.p95)} (target p95 ≤ 4); acting calls followed by a verifying shot ${summary.verificationShots.shots}/${summary.verificationShots.acting} (${pctOf(summary.verificationShots.share)}, target ≤ 15 %); acting results carrying a now: line ${summary.observedResults.withLine}/${summary.observedResults.acting} (${pctOf(summary.observedResults.share)}; observe ${meta["observe"] === false ? "OFF — the A/B" : "on"})`);
+  out.push(`  generations per command: median ${ms(summary.generationsPerCommand.median)}, p95 ${ms(summary.generationsPerCommand.p95)} (target p95 ≤ 4); acting calls followed by a verifying shot ${summary.verificationShots.shots}/${summary.verificationShots.acting} (${pctOf(summary.verificationShots.share)}, target ≤ 15 %); acting results carrying a now: line ${summary.observedResults.withLine}/${summary.observedResults.acting} (${pctOf(summary.observedResults.share)}; observe ${meta["observe"] === false ? "OFF, the A/B" : "on"})`);
   if (report.compare) {
     const c = report.compare;
     out.push("");
@@ -1195,11 +1191,11 @@ export function renderReport(report: BrainBenchReport): string[] {
     for (const r of c.rows) out.push(`  ${pad(r.cmd, 20)}${pad(signed(r.firstActionMs, "s"), 14)}${pad(signed(r.doneMs, "s"), 14)}${signed(r.generations, "")}`);
     out.push(`  generations p95 ${ms(c.generationsP95.before)} → ${ms(c.generationsP95.after)}; verifying-shot share ${c.verificationShare.before === undefined ? "-" : pctOf(c.verificationShare.before)} → ${pctOf(c.verificationShare.after)}`);
   }
-  if (summary.speechToDelegationMs.n) out.push(`  speech end → delegation: median ${ms(summary.speechToDelegationMs.median)} ms (n=${summary.speechToDelegationMs.n}) — the stand-in Live delegates the moment the utterance ends, so ≈ 0 here; on the real path this is Live's own transcription and decision time (the ledger has it)`);
+  if (summary.speechToDelegationMs.n) out.push(`  speech end → delegation: median ${ms(summary.speechToDelegationMs.median)} ms (n=${summary.speechToDelegationMs.n}), ≈ 0 here because the stand-in Live delegates the moment the utterance ends; on the real path this is Live's own transcription and decision time (the ledger has it)`);
   if (summary.reflexPath.length) {
     out.push("");
-    out.push("  reflex path (reflexes on; the product path for these — no model turn)");
-    for (const r of summary.reflexPath) out.push(`  ${pad(r.cmd, 20)} ${r.status.padEnd(8)} done in ${ms(r.doneMs)} ms${r.firstActionMs !== undefined ? `, action@${ms(r.firstActionMs)} ms` : ""}${r.summary ? ` — "${r.summary}"` : ""}`);
+    out.push("  reflex path (reflexes on; the product path for these: no model turn)");
+    for (const r of summary.reflexPath) out.push(`  ${pad(r.cmd, 20)} ${r.status.padEnd(8)} done in ${ms(r.doneMs)} ms${r.firstActionMs !== undefined ? `, action@${ms(r.firstActionMs)} ms` : ""}${r.summary ? ` ("${r.summary}")` : ""}`);
   }
   out.push("");
   out.push(`  brain: ${String(meta["brainDetailEnd"] ?? meta["brainDetailAtReady"] ?? "?")}`);

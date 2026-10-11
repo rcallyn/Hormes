@@ -1,13 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { installChecks, type Check } from "../doctor.ts";
-import { CODESIGN } from "../install/bundle.ts";
-import { LSREGISTER } from "../install/launchservices.ts";
-import type { Exec } from "../install/hygiene.ts";
-import type { TargetProbe } from "../install/bundle.ts";
-import { dictGet, dictSet, parsePlistXml, serializePlistXml, stringAt } from "../install/plist.ts";
+import { browserChecks, installChecks, type Check } from "../doctor.ts";
+import { CODESIGN, LSREGISTER, defaultExec, dictGet, dictSet, parsePlistXml, serializePlistXml, stringAt, type Exec, type TargetProbe } from "@hormes/install";
+import { ADHOC_BUNDLE_ID, canSignAdhoc, makeStage, signLikeBuildMac } from "../../../install/src/__tests__/adhoc-stage.ts";
 
 /**
  * The doctor's app rows driven by a scripted exec and a scripted stat: they read the
@@ -16,17 +15,18 @@ import { dictGet, dictSet, parsePlistXml, serializePlistXml, stringAt } from "..
  * never an action the doctor takes itself.
  */
 
-const fixture = (name: string): string => readFileSync(fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url)), "utf8");
+// The sanitized Dock exports and lsregister dump the install library's tests own; one copy, read from there.
+const fixture = (name: string): string => readFileSync(fileURLToPath(new URL(`../../../install/src/__tests__/fixtures/${name}`, import.meta.url)), "utf8");
 const INSTALLED = "/Applications/Hormes.app";
 const dir: TargetProbe = { exists: true, isSymlink: false, isDirectory: true, uid: 501, inode: 103261417, writable: true };
-const ROOTS = ["/Users/kevinliu/.hormes/worktrees", "/Users/kevinliu/.hormes/trash", "/Users/kevinliu/.Trash", "/Users/kevinliu/hormes/build/stage", "/Users/kevinliu/hormes/build/previous"];
+const ROOTS = ["/Users/user/.hormes/worktrees", "/Users/user/.hormes/trash", "/Users/user/.Trash", "/Users/user/jarvis/build/stage", "/Users/user/jarvis/build/previous"];
 
-function exec(o: { verifyCode?: number; requirement?: string; dvv?: string; dump?: string; dumpCode?: number; dock?: string; calls?: string[][] }): Exec {
+function exec(o: { verifyCode?: number; requirement?: string; requirementOut?: string; dvv?: string; dump?: string; dumpCode?: number; dock?: string; calls?: string[][] }): Exec {
   return (cmd, args, _opts) => {
     o.calls?.push([cmd, ...args]);
     if (cmd === CODESIGN && args[0] === "-dvv") return { code: 0, stdout: "", stderr: o.dvv ?? "Executable=/Applications/Hormes.app/Contents/MacOS/Hormes\nAuthority=Hormes Local Signing\n" };
     if (cmd === CODESIGN && args[0] === "--verify") return { code: o.verifyCode ?? 0, stdout: "", stderr: o.verifyCode ? "/Applications/Hormes.app: a sealed resource is missing or invalid" : "/Applications/Hormes.app: valid on disk\n" };
-    if (cmd === CODESIGN && args[0] === "-d") return { code: 0, stdout: "", stderr: o.requirement ?? 'designated => identifier "com.kevinliu.hormes" and certificate leaf = H"8b79555ca54ff1c95d3e044805f34d5adac36055"\n' };
+    if (cmd === CODESIGN && args[0] === "-d") return { code: 0, stdout: o.requirementOut ?? "", stderr: o.requirement ?? 'designated => identifier "com.hormes.app" and certificate leaf = H"8b79555ca54ff1c95d3e044805f34d5adac36055"\n' };
     if (cmd === LSREGISTER && args[0] === "-dump") return o.dumpCode ? { code: o.dumpCode, stdout: "", stderr: `spawnSync ${LSREGISTER} ETIMEDOUT` } : { code: 0, stdout: o.dump ?? fixture("ls-dump-bundle.txt"), stderr: "" };
     if (cmd === "defaults" && args[0] === "export") return { code: 0, stdout: o.dock ?? fixture("dock-clean.xml"), stderr: "" };
     throw new Error(`unexpected ${cmd} ${args.join(" ")}`);
@@ -34,7 +34,7 @@ function exec(o: { verifyCode?: number; requirement?: string; dvv?: string; dump
 }
 
 const byName = (rows: readonly Check[]): Record<string, Check> => Object.fromEntries(rows.map((r) => [r.name, r]));
-const CLEAN_DUMP = fixture("ls-dump-bundle.txt").split("--------------------------------------------------------------------------------").filter((b) => b.includes("/Applications/Hormes.app") || b.includes("Grapher") || b.includes("/Users/kevinliu/hormes/apps/mac")).join("--------------------------------------------------------------------------------");
+const CLEAN_DUMP = fixture("ls-dump-bundle.txt").split("--------------------------------------------------------------------------------").filter((b) => b.includes("/Applications/Hormes.app") || b.includes("Grapher") || b.includes("/Users/user/jarvis/apps/mac")).join("--------------------------------------------------------------------------------");
 
 test("doctor app rows: a healthy Mac — installed, real identity, strict ok with the identifier, one LaunchServices record, one pinned tile; every row ok and read-only", () => {
   const calls: string[][] = [];
@@ -44,7 +44,7 @@ test("doctor app rows: a healthy Mac — installed, real identity, strict ok wit
   const r = byName(rows);
   assert.equal(r["Hormes.app"]!.detail, "/Applications/Hormes.app (build/Hormes.app → symlink)");
   assert.equal(r["signing identity"]!.detail, "Hormes Local Signing");
-  assert.equal(r["install"]!.detail, "/Applications/Hormes.app · inode 103261417 · strict ok · requirement identifier com.kevinliu.hormes");
+  assert.equal(r["install"]!.detail, "/Applications/Hormes.app · inode 103261417 · strict ok · requirement identifier com.hormes.app");
   assert.equal(r["launch services"]!.detail, "1 record: /Applications/Hormes.app");
   assert.equal(r["dock"]!.detail, "1 pinned, 0 recent");
   assert.ok(calls.some((c) => c[0] === CODESIGN && c[1] === "--verify" && c.includes("--deep") && c.at(-1) === INSTALLED), "strict + deep on the installed copy");
@@ -55,10 +55,10 @@ test("doctor app rows: a healthy Mac — installed, real identity, strict ok wit
 test("doctor app rows: two Dock tiles and stale records warn with `pnpm hormes dock --fix`; a failed verify or a missing identifier warns with `pnpm build:mac`", () => {
   const rows = byName(installChecks({ exec: exec({ dock: fixture("dock-two-tiles.xml") }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
   assert.equal(rows["dock"]!.status, "warn");
-  assert.equal(rows["dock"]!.detail, "1 pinned, 1 recent — two tiles");
+  assert.equal(rows["dock"]!.detail, "1 pinned, 1 recent · two tiles");
   assert.equal(rows["dock"]!.fix, "pnpm hormes dock --fix");
   assert.equal(rows["launch services"]!.status, "warn");
-  assert.match(rows["launch services"]!.detail, /^4 Hormes records — also .*\.Trash\/Hormes\.app.*open -a Hormes can pick one of them/);
+  assert.match(rows["launch services"]!.detail, /^4 Hormes records: also .*\.Trash\/Hormes\.app.*open -a Hormes can pick one of them/);
   assert.equal(rows["launch services"]!.fix, "pnpm hormes dock --fix");
 
   const bad = byName(installChecks({ exec: exec({ verifyCode: 1, dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
@@ -66,25 +66,89 @@ test("doctor app rows: two Dock tiles and stale records warn with `pnpm hormes d
   assert.match(bad["install"]!.detail, /codesign --verify --strict --deep failed: .*sealed resource/);
   assert.equal(bad["install"]!.fix, "pnpm build:mac");
 
-  const wrongId = byName(installChecks({ exec: exec({ requirement: 'designated => identifier "com.kevinliu.hormes"\n', dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
-  assert.match(wrongId["install"]!.detail, /designated requirement lacks identifier "com.kevinliu.hormes"/);
+  const wrongId = byName(installChecks({ exec: exec({ requirement: 'designated => identifier "com.example.other"\n', dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
+  assert.match(wrongId["install"]!.detail, /designated requirement lacks identifier "com.hormes.app"/);
 
-  const adhoc = byName(installChecks({ exec: exec({ dvv: "Signature=adhoc\n", dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
-  assert.equal(adhoc["signing identity"]!.status, "warn");
-  assert.match(adhoc["signing identity"]!.fix ?? "", /Certificate Assistant/);
 });
 
-test("doctor app rows: a Dock with no Hormes pin is a warn that asks Kevin to drag the app once (no fix command — pinning is his); a timed-out Bundle dump warns with the reason", () => {
+// What codesign prints for /Applications/Hormes.app signed ad-hoc (build-mac.ts on a Mac with no
+// identity): -dvv and -d -v on stderr, the implicit cdhash requirement on stdout. No Authority line,
+// no identifier clause in the requirement.
+const ADHOC_SIGNATURE = [
+  "Executable=/Applications/Hormes.app/Contents/MacOS/Hormes",
+  "Identifier=com.hormes.app",
+  "Format=app bundle with Mach-O thin (arm64)",
+  "CodeDirectory v=20400 size=48212 flags=0x2(adhoc) hashes=1495+7 location=embedded",
+  "Signature=adhoc",
+  "Info.plist entries=21",
+  "TeamIdentifier=not set",
+  "Sealed Resources version=2 rules=13 files=31",
+].join("\n");
+const ADHOC_REQUIREMENT = '# designated => cdhash H"5f0c1b3e9a7d2c4e8b6a0f1d3c5e7a9b2d4f6e8a"\n';
+
+test("doctor app rows on an ad-hoc install: the identity row warns with the certificate fix; the install row is ok, because ad-hoc is the no-identity default build:mac installs", () => {
+  const rows = byName(installChecks({ exec: exec({ dvv: `${ADHOC_SIGNATURE}\nInternal requirements count=0 size=12\n`, requirement: `${ADHOC_SIGNATURE}\n`, requirementOut: ADHOC_REQUIREMENT, dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
+  assert.equal(rows["signing identity"]!.status, "warn");
+  assert.match(rows["signing identity"]!.detail, /^ad-hoc/);
+  assert.match(rows["signing identity"]!.fix ?? "", /Certificate Assistant/);
+  assert.equal(rows["install"]!.status, "ok", `install row: ${rows["install"]!.detail}`);
+  assert.equal(rows["install"]!.detail, "/Applications/Hormes.app · inode 103261417 · strict ok · ad-hoc, identifier com.hormes.app");
+  assert.equal(rows["install"]!.fix, undefined, "no pnpm build:mac loop");
+
+  // An ad-hoc bundle under another identifier is still a warn, and the row quotes the requirement.
+  const other = ADHOC_SIGNATURE.replace("Identifier=com.hormes.app", "Identifier=com.example.other");
+  const wrong = byName(installChecks({ exec: exec({ dvv: other, requirement: other, requirementOut: ADHOC_REQUIREMENT, dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
+  assert.equal(wrong["install"]!.status, "warn");
+  assert.match(wrong["install"]!.detail, /^designated requirement lacks identifier "com\.hormes\.app": designated => cdhash H"5f0c1b3e/);
+  assert.match(wrong["install"]!.detail, /\(ad-hoc, signed as com\.example\.other\)$/);
+});
+
+test("doctor app rows against a real ad-hoc signature (codesign runs; LaunchServices and the Dock are stubbed)", { skip: canSignAdhoc() ? false : "needs macOS codesign" }, () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "jh-adhoc-doctor-")));
+  try {
+    const app = makeStage(root, "doctor");
+    signLikeBuildMac(app, undefined);
+    const run: Exec = (cmd, args, opts) => (cmd === CODESIGN ? defaultExec(cmd, args, opts) : { code: 0, stdout: "", stderr: "" });
+    const rows = byName(installChecks({ exec: run, installed: app, bundleId: ADHOC_BUNDLE_ID, uid: process.getuid?.() ?? -1, staleRoots: [], exists: () => true, linkTarget: app }));
+    assert.equal(rows["signing identity"]!.status, "warn", "ad-hoc is a warn on the identity row");
+    assert.equal(rows["install"]!.status, "ok", `install row: ${rows["install"]!.detail} (fix offered: ${rows["install"]!.fix})`);
+    assert.match(rows["install"]!.detail, /strict ok · ad-hoc, identifier com\.example\.hormes-adhoc-install$/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("doctor browser rows: the plain doctor sends no Apple event, names --browsers and warns about nothing; with it, each running browser is asked and one that is not running is never launched", async () => {
+  const asked: string[] = [];
+  const plain = await browserChecks({ ask: false, running: () => assert.fail("not even pgrep without --browsers"), probe: async (app) => (asked.push(app), { status: "ok", detail: "on" }) });
+  assert.equal(asked.length, 0, "no browser is asked");
+  assert.equal(plain.length, 1);
+  assert.equal(plain[0]!.name, "browser JS from Apple Events");
+  assert.equal(plain[0]!.status, "ok", "not asking is the default, so the plain doctor (the one install.sh names) shows no warn here");
+  assert.equal(plain[0]!.detail, "Not asked. pnpm run doctor --browsers sends each running browser an Apple event.");
+
+  const rows = await browserChecks({ ask: true, running: (app) => app === "Safari", probe: async (app) => (asked.push(app), { status: "off", detail: "Develop menu setting is off", fix: "Safari › Develop › Allow JavaScript from Apple Events" }) });
+  assert.deepEqual(asked, ["Safari"], "only the running browser is asked");
+  const r = byName(rows);
+  assert.equal(r["Google Chrome JS from Apple Events"]!.status, "warn");
+  assert.equal(r["Google Chrome JS from Apple Events"]!.detail, "Not running. Not probed.");
+  assert.equal(r["Safari JS from Apple Events"]!.status, "warn");
+  assert.equal(r["Safari JS from Apple Events"]!.detail, "Off. Develop menu setting is off");
+  for (const row of [...plain, ...rows]) assert.doesNotMatch(row.detail, /\u2014/, `no em dash: ${row.detail}`);
+  assert.match(r["Safari JS from Apple Events"]!.fix ?? "", /Allow JavaScript from Apple Events/);
+});
+
+test("doctor app rows: a Dock with no Hormes pin is a warn that asks User to drag the app once (no fix command — pinning is his); a timed-out Bundle dump warns with the reason", () => {
   // dock-clean.xml minus its Hormes pin: Safari alone in persistent-apps, recent-apps empty.
   const clean = parsePlistXml(fixture("dock-clean.xml"));
   const apps = dictGet(clean, "persistent-apps");
   assert.ok(apps && apps.kind === "array");
-  const others = apps.items.filter((tile) => stringAt(dictGet(tile, "tile-data")!, "bundle-identifier") !== "com.kevinliu.hormes");
+  const others = apps.items.filter((tile) => stringAt(dictGet(tile, "tile-data")!, "bundle-identifier") !== "com.hormes.app");
   assert.equal(others.length, apps.items.length - 1);
   const unpinned = serializePlistXml(dictSet(clean, "persistent-apps", { kind: "array", items: others }));
   const rows = byName(installChecks({ exec: exec({ dock: unpinned, dump: CLEAN_DUMP }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
-  assert.equal(rows["dock"]!.status, "warn", "an ok row that tells Kevin to do something is a contradiction");
-  assert.match(rows["dock"]!.detail, /^not pinned — drag \/Applications\/Hormes\.app to the Dock once/);
+  assert.equal(rows["dock"]!.status, "warn", "an ok row that tells User to do something is a contradiction");
+  assert.match(rows["dock"]!.detail, /^not pinned \(drag \/Applications\/Hormes\.app to the Dock once/);
   assert.equal(rows["dock"]!.fix, undefined, "nothing `dock --fix` can do about a missing pin");
 
   const slow = byName(installChecks({ exec: exec({ dumpCode: 1 }), probe: () => dir, uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
@@ -101,9 +165,9 @@ test("doctor app rows: not installed → both rows say pnpm build:mac; a symlink
   assert.equal(none["launch services"]!.status, "warn", "the bundle is not registered when nothing is there");
   assert.match(none["launch services"]!.detail, /is not registered/);
 
-  const link = byName(installChecks({ exec: exec({ dump: CLEAN_DUMP }), probe: () => ({ exists: true, isSymlink: true, isDirectory: false, uid: 501, inode: 3, linkTarget: "/Users/kevinliu/hormes/build/stage/Hormes.app" }), uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
+  const link = byName(installChecks({ exec: exec({ dump: CLEAN_DUMP }), probe: () => ({ exists: true, isSymlink: true, isDirectory: false, uid: 501, inode: 3, linkTarget: "/Users/user/jarvis/build/stage/Hormes.app" }), uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));
   assert.equal(link["install"]!.status, "warn");
-  assert.match(link["install"]!.detail, /is a symlink to .*build\/stage\/Hormes\.app.*the next pnpm build:mac refuses/);
+  assert.match(link["install"]!.detail, /is a symlink to .*build\/stage\/Hormes\.app.*\, so the next pnpm build:mac refuses/);
   assert.match(link["install"]!.fix ?? "", /move it to the Trash/);
 
   const root = byName(installChecks({ exec: exec({ dump: CLEAN_DUMP }), probe: () => ({ ...dir, uid: 0 }), uid: 501, staleRoots: ROOTS, exists: () => true, linkTarget: INSTALLED }));

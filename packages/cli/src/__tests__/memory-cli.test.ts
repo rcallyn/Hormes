@@ -20,7 +20,7 @@ import { AGENT_STATUSES, MEMORY_ID, agentsByStatus, agoWords, extractorPlan, mem
  * daemon stand-in on a unix socket.
  */
 
-// One temp dir for every CLI spawn (state dir, sockets); removed at the end — a test's scratch, not Kevin's data.
+// One temp dir for every CLI spawn (state dir, sockets); removed at the end — a test's scratch, not User's data.
 const stateDir = mkdtempSync(join(tmpdir(), "jh-cli-mem-"));
 after(() => rmSync(stateDir, { recursive: true, force: true }));
 
@@ -46,7 +46,7 @@ const summary: MemorySummary = { enabled: true, count: 142, forgotten: 3, archiv
 /** The same summary with its last learn measured from the real clock (memoryChecks renders "ago" from Date.now()). */
 const liveSummary: MemorySummary = { ...summary, lastRunAt: Date.now() - 12 * 60_000 };
 
-test("doctor: memory rows — counts and the last learn from a running daemon, the store's row count without one, exactly one row (no extractor) when Kevin switched it off; the cost words are the caps", () => {
+test("doctor: memory rows — counts and the last learn from a running daemon, the store's row count without one, exactly one row (no extractor) when User switched it off; the cost words are the caps", () => {
   const withDaemon = memoryChecks({ ...base, summary: liveSummary });
   assert.equal(withDaemon.length, 2);
   const [row, extractor] = withDaemon;
@@ -65,12 +65,12 @@ test("doctor: memory rows — counts and the last learn from a running daemon, t
 
   const off = memoryChecks({ ...base, enabled: false, summary: liveSummary });
   assert.equal(off.length, 1, "off: nothing is configured to run, so no extractor row");
-  assert.equal(off[0]!.status, "ok", "off is Kevin's choice, not a finding");
-  assert.match(off[0]!.detail, /^off \(Settings › Memory\) — nothing is extracted, injected or embedded; the store under \/tmp\/jh\/memory stays as it is$/);
+  assert.equal(off[0]!.status, "ok", "off is User's choice, not a finding");
+  assert.match(off[0]!.detail, /^off \(Settings › Memory\), so nothing is extracted, injected or embedded; the store under \/tmp\/jh\/memory stays as it is$/);
 
   const disagree = memoryChecks({ ...base, summary: { ...liveSummary, enabled: false } });
   assert.equal(disagree[0]!.status, "warn");
-  assert.match(disagree[0]!.fix ?? "", /restart the daemon or flip Settings › Memory/);
+  assert.match(disagree[0]!.fix ?? "", /: restart the daemon or flip Settings › Memory/);
 
   // Never the word delete: forget is a state.
   for (const c of [...withDaemon, ...noDaemon, ...off]) assert.doesNotMatch(`${c.detail} ${c.fix ?? ""}`, /delet/i);
@@ -83,36 +83,36 @@ test("doctor: extractor row — names the model the engine WILL run (the default
 
   const noKey = row({ hasOpenAIKey: false, modelIds: undefined });
   assert.equal(noKey.status, "ok");
-  assert.match(noKey.detail, /^rules \(regex over Kevin's lines\) — no OPENAI_API_KEY/);
-  assert.match(memoryChecks({ ...base, hasOpenAIKey: false, modelIds: undefined })[0]!.detail, /keywords \(no OPENAI_API_KEY — nothing leaves the Mac\)/);
+  assert.match(noKey.detail, /^rules \(regex over the user's lines\) since there is no OPENAI_API_KEY/);
+  assert.match(memoryChecks({ ...base, hasOpenAIKey: false, modelIds: undefined })[0]!.detail, /keywords \(no OPENAI_API_KEY, so nothing leaves the Mac\)/);
 
   // Unpinned: the default runs; a newer mini on the key is a hint, not a claim.
   const unpinned = row({});
   assert.equal(unpinned.status, "ok");
-  assert.equal(unpinned.detail, `runs ${DEFAULT_MEMORY_MODEL} (the memory module's default, listed for this key) — the key's best mini-class id is gpt-5.6-mini: pin it with HORMES_MEMORY_MODEL=gpt-5.6-mini. Dollars on the key, never the ChatGPT plan; ≤ 5 runs a day, ≤ ~8k in + 0.9k out each`);
+  assert.equal(unpinned.detail, `runs ${DEFAULT_MEMORY_MODEL} (the memory module's default, listed for this key); the key's best mini-class id is gpt-5.6-mini: pin it with HORMES_MEMORY_MODEL=gpt-5.6-mini. Dollars on the key, never the ChatGPT plan; ≤ 5 runs a day, ≤ ~8k in + 0.9k out each`);
   const unpinnedBest = row({ modelIds: new Set(["gpt-live-1", "gpt-5-mini"]) });
   assert.equal(unpinnedBest.detail, `runs gpt-5-mini (the memory module's default, listed for this key). Dollars on the key, never the ChatGPT plan; ≤ 5 runs a day, ≤ ~8k in + 0.9k out each`, "no hint when the default is already the key's best");
 
   // Unpinned and the default is not on the key: every run falls to rules — the fix is the pin.
   const defaultMissing = row({ modelIds: new Set(["gpt-live-1", "gpt-5.6-mini"]) });
   assert.equal(defaultMissing.status, "warn");
-  assert.equal(defaultMissing.detail, `runs ${DEFAULT_MEMORY_MODEL} (the memory module's default) — not listed for this key, so every run falls back to rules with one warning`);
+  assert.equal(defaultMissing.detail, `runs ${DEFAULT_MEMORY_MODEL} (the memory module's default), but it is not listed for this key, so every run falls back to rules with one warning`);
   assert.equal(defaultMissing.fix, "pin HORMES_MEMORY_MODEL=gpt-5.6-mini in ~/.hormes/env (the key's best mini-class Responses id)");
   const noMini = row({ modelIds: new Set(["gpt-live-1", "gpt-5.6-terra"]) });
   assert.equal(noMini.status, "warn");
-  assert.match(noMini.detail, /not listed for this key/);
+  assert.match(noMini.detail, /, but it is not listed for this key/);
   assert.match(noMini.fix ?? "", /or leave the rules extractor to it/);
 
-  // Pinned: Kevin's word runs; listed or not is the only finding.
+  // Pinned: User's word runs; listed or not is the only finding.
   assert.equal(row({ override: "gpt-5.6-mini" }).status, "ok");
   assert.equal(row({ override: "gpt-5.6-mini" }).detail, "runs gpt-5.6-mini (HORMES_MEMORY_MODEL, listed for this key). Dollars on the key, never the ChatGPT plan; ≤ 5 runs a day, ≤ ~8k in + 0.9k out each");
-  assert.match(row({ override: "gpt-5-mini" }).detail, /^runs gpt-5-mini \(HORMES_MEMORY_MODEL, listed for this key\) — the key also lists gpt-5\.6-mini\./);
+  assert.match(row({ override: "gpt-5-mini" }).detail, /^runs gpt-5-mini \(HORMES_MEMORY_MODEL, listed for this key\)\; the key also lists gpt-5\.6-mini\./);
   const unlisted = row({ override: "gpt-9-mini" });
   assert.equal(unlisted.status, "warn");
-  assert.equal(unlisted.detail, "runs gpt-9-mini (HORMES_MEMORY_MODEL) — not listed for this key, so every run falls back to rules with one warning");
+  assert.equal(unlisted.detail, "runs gpt-9-mini (HORMES_MEMORY_MODEL), but it is not listed for this key, so every run falls back to rules with one warning");
   assert.match(unlisted.fix ?? "", /pin HORMES_MEMORY_MODEL=gpt-5\.6-mini/);
 
-  // No list (the keys row says why): a pin is Kevin's word, the default is only unverified.
+  // No list (the keys row says why): a pin is User's word, the default is only unverified.
   const pinnedUnchecked = row({ modelIds: undefined, override: "gpt-9-mini" });
   assert.equal(pinnedUnchecked.status, "ok");
   assert.match(pinnedUnchecked.detail, /^runs gpt-9-mini \(HORMES_MEMORY_MODEL, not checked: the key's model list could not be read\)/);
@@ -137,8 +137,8 @@ test("status words: agentsByStatus lists ended and unknown apart in AGENT_STATUS
   assert.equal(agoWords(NOW - 3 * 3_600_000, NOW), "3 h ago");
   assert.equal(agoWords(NOW - 4 * 86_400_000, NOW), "4 d ago");
 
-  assert.equal(memoryLine(undefined), "(an older daemon: no summary)");
-  assert.equal(memoryLine({ ...summary, enabled: false }), "off — nothing is extracted, injected or embedded; the store stays as it is");
+  assert.equal(memoryLine(undefined), "(no summary in the snapshot)");
+  assert.equal(memoryLine({ ...summary, enabled: false }), "off, so nothing is extracted, injected or embedded; the store stays as it is");
   assert.equal(memoryLine(summary, NOW), "142 remembered · 3 forgotten · 7 archived · matching openai · 1 conversation waiting · learned 12 min ago (+3 · ~1 · responses) · last prompts 143 brain / 96 voice tokens (caps 250 / 120) · 2 used this turn");
   const { lastRun: _lastRun, budgetUsed: _budget, lastUsedIds: _ids, ...bare } = summary;
   const fresh = memoryLine({ ...bare, pending: 0, lastRunAt: NOW - 5000 }, NOW);
@@ -182,7 +182,7 @@ test("hormes memory: a bad id, an unknown state or kind, an empty text and an un
   const [badId, badState, badKind, emptyAdd, badVerb, forgetOk, listOk, runOk, help] = await Promise.all([
     hormes(["memory", "forget", "not-an-id"]),
     hormes(["memory", "list", "--state", "bogus"]),
-    hormes(["memory", "add", "Kevin likes tea", "--kind", "flavour"]),
+    hormes(["memory", "add", "User likes tea", "--kind", "flavour"]),
     hormes(["memory", "add"]),
     hormes(["memory", "purge"]),
     hormes(["memory", "forget", "m_mtzb9x1abc2"]),
@@ -199,7 +199,7 @@ test("hormes memory: a bad id, an unknown state or kind, an empty text and an un
   assert.equal(emptyAdd.code, 1);
   assert.match(emptyAdd.err, /usage: hormes memory add "<text>"/);
   assert.equal(badVerb.code, 1);
-  assert.match(badVerb.err, /unknown memory verb: purge — list \| search \| forget \| restore \| add \| run/);
+  assert.match(badVerb.err, /unknown memory verb: purge \(list \| search \| forget \| restore \| add \| run\)/);
   // Parsed fine, then the socket: the only error left is that nothing listens on it.
   for (const [name, r] of [
     ["forget", forgetOk],
@@ -207,7 +207,7 @@ test("hormes memory: a bad id, an unknown state or kind, an empty text and an un
     ["run", runOk],
   ] as const) {
     assert.equal(r.code, 1, name);
-    assert.match(r.err, /no daemon on .*nobody\.sock — start Hormes\.app or `pnpm hormesd`/, name);
+    assert.match(r.err, /no daemon on .*nobody\.sock \(start Hormes\.app or `pnpm hormesd`\)/, name);
     assert.doesNotMatch(r.err, /usage|unknown/, name);
   }
   assert.equal(help.code, 0);
@@ -248,7 +248,7 @@ function fakeDaemon(path: string, answer: (msg: ClientMessage) => unknown): Prom
 const item = (id: string, text: string, state: MemoryItem["state"] = "live", kind: MemoryItem["kind"] = "preference"): MemoryItem => ({ id, kind, text, subjects: [], confidence: 0.9, importance: 0.5, createdAt: Date.now() - 86_400_000, lastSeenAt: Date.now() - 3 * 3_600_000, seenCount: state === "live" ? 2 : 1, sources: [], state, origin: "extracted" });
 
 test("hormes memory list|search against a daemon: the frames carry state and limit, items render one per line with the state suffix only when not live, the limit tail and the forget/restore words; a daemon that never answers is said so after the wait", async () => {
-  const items = [item("m_tea1ab2", "Kevin likes his tea strong"), item("m_vim2cd3", "Kevin used Vim once, in 2019", "forgotten", "episode")];
+  const items = [item("m_tea1ab2", "User likes his tea strong"), item("m_vim2cd3", "User used Vim once, in 2019", "forgotten", "episode")];
   const answering = await fakeDaemon(join(stateDir, "a.sock"), (msg) => {
     if (msg.type === "memory.list") return { type: "memory.items", id: msg.id, items };
     if (msg.type === "memory.search") return { type: "memory.items", id: msg.id, items: items.slice(0, 1) };
@@ -261,13 +261,13 @@ test("hormes memory list|search against a daemon: the frames carry state and lim
     const [list, search, older] = await Promise.all([hormes(["memory", "list", "--state", "all", "--limit", "2"], join(stateDir, "a.sock")), hormes(["memory", "search", "tea", "please"], join(stateDir, "a.sock")), hormes(["memory", "list"], join(stateDir, "b.sock"))]);
 
     assert.equal(list.code, 0, list.err);
-    assert.match(list.out, /m_tea1ab2\s+preference\s+Kevin likes his tea strong  · seen 2× · 3 h ago/);
-    assert.match(list.out, /m_vim2cd3\s+episode\s+Kevin used Vim once, in 2019 \(forgotten\)  · seen 1× · 3 h ago/, "the state suffix only when it is not the default");
+    assert.match(list.out, /m_tea1ab2\s+preference\s+User likes his tea strong  · seen 2× · 3 h ago/);
+    assert.match(list.out, /m_vim2cd3\s+episode\s+User used Vim once, in 2019 \(forgotten\)  · seen 1× · 3 h ago/, "the state suffix only when it is not the default");
     assert.match(list.out, /2 items · limit 2 \(--limit N for more\) · forget <id> hides one \(nothing is deleted\); restore <id> brings it back/);
     assert.doesNotMatch(list.out, /\bdelete\b|\bDelete\b/);
 
     assert.equal(search.code, 0, search.err);
-    assert.match(search.out, /m_tea1ab2\s+preference\s+Kevin likes his tea strong  · seen 2×/);
+    assert.match(search.out, /m_tea1ab2\s+preference\s+User likes his tea strong  · seen 2×/);
     assert.doesNotMatch(search.out, /m_vim2cd3|\(forgotten\)/);
     assert.match(search.out, /\n  1 item\n/, "under the limit: no limit tail");
 

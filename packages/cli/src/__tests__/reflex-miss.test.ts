@@ -6,11 +6,11 @@ import { candidates, lastClause, mineMisses, renderMisses, stripFillers } from "
 /**
  * The reflex miner: fillers and tags come off the head, the last clause is what is
  * judged, hits (whole or tail) are dropped, long clauses are dropped, and the misses
- * group by head word with counts — the shapes the speed reader found in Kevin's ledger,
+ * group by head word with counts — the shapes the speed reader found in User's ledger,
  * anonymised.
  */
 
-const heard = (text: string, at = 1000, final = true): LedgerRow => ({ at, type: "heard", item: { id: `h${at}`, speaker: "kevin", text, startMs: 0, endMs: 1, at, final } as TranscriptItem });
+const heard = (text: string, at = 1000, final = true): LedgerRow => ({ at, type: "heard", item: { id: `h${at}`, speaker: "user", text, startMs: 0, endMs: 1, at, final } as TranscriptItem });
 const request = (text: string, at = 2000): LedgerRow => ({ at, type: "delegation.created", delegation: { id: `d${at}`, liveId: "l", createdAt: at, offsetMs: 0, request: text, status: "running", steps: [], timings: { delegatedAt: at } } });
 
 test("stripFillers: stacked fillers and bracketed tags come off the head; 'right click' keeps its right", () => {
@@ -60,7 +60,7 @@ test("mineMisses: hits are dropped whether the whole utterance or its tail parse
   assert.match(lines[lines.length - 1] ?? "", /never a destructive verb/);
 });
 
-test("mineMisses: with the real grammar, today's one-step rows are hits and Kevin's real shapes are misses", () => {
+test("mineMisses: with the real grammar, today's one-step rows are hits and User's real shapes are misses", () => {
   // A description ("draft a reply to ben") is never a reflex; the bare status question has no live thread name here.
   const rows: LedgerRow[] = [heard("um, scroll down please", 1), heard("okay press enter", 2), heard("yeah, what is spotify doing", 3), heard("hmm, draft a reply to ben", 4)];
   const groups = mineMisses(rows);
