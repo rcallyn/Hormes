@@ -1,0 +1,14 @@
+{
+  "name": "@hormes/daemon",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hormes/core": "workspace:*",
+    "@hormes/engine": "workspace:*",
+    "@hormes/protocol": "workspace:*"
+  }
+}

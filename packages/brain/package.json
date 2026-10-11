@@ -1,0 +1,19 @@
+{
+  "name": "@hormes/brain",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hormes/core": "workspace:*",
+    "@hormes/protocol": "workspace:*",
+    "@hormes/live": "workspace:*",
+    "@hormes/hands": "workspace:*",
+    "@hormes/agents": "workspace:*",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.267",
+    "@anthropic-ai/sdk": "^0.116.0",
+    "zod": "^4.0.0"
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@hormes/cli",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hormes/agents": "workspace:*",
+    "@hormes/brain": "workspace:*",
+    "@hormes/core": "workspace:*",
+    "@hormes/daemon": "workspace:*",
+    "@hormes/engine": "workspace:*",
+    "@hormes/hands": "workspace:*",
+    "@hormes/live": "workspace:*",
+    "@hormes/protocol": "workspace:*"
+  }
+}

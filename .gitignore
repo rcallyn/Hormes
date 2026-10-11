@@ -1,0 +1,36 @@
+node_modules/
+.env
+.env.local
+.env.*.local
+dist/
+build/
+.build/
+*.tsbuildinfo
+.DS_Store
+*.log
+.hormes/
+state/
+*.sqlite
+*.sqlite-*
+audio-cache/
+.turbo/
+coverage/
+*.pem
+*.p12
+secrets/
+
+# The Swift harnesses write their pictures here; only the icon-size check is tracked.
+apps/mac/Resources/preview-*.png
+!apps/mac/Resources/preview-icon-sizes.png
+
+# Vercel CLI link for the site (site/ deploys as project hormes)
+.vercel/
+.vercel
+.env*
+
+# Local developer state and signing material
+**/xcuserdata/
+*.xcuserstate
+*.p8
+*.mobileprovision
+.claude/settings.local.json
