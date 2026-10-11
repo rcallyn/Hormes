@@ -31,12 +31,13 @@ test("start sends session.start, resolves on session.started, and flushes queued
   const sock = new FakeSocket();
   const s = new LiveSession({
     apiKey: "k",
-    config: { model: "gpt-live-1", delegation: { type: "client" } },
+    config: { model: "gpt-live-1", interactionMode: "education", delegation: { type: "client" } },
     webSocketFactory: () => sock,
   });
   const started = s.start();
   sock.open();
   assert.equal(JSON.parse(sock.sent[0] ?? "{}").type, "session.start");
+  assert.equal(JSON.parse(sock.sent[0]!).session.interactionMode, undefined, "application mode metadata is not an unsupported OpenAI API field");
   s.appendAudio(Buffer.from([1, 2, 3, 4]));
   assert.equal(sock.sent.length, 1, "audio waits for session.started");
   sock.receive({ type: "session.started", event_id: "e1", session: resource });

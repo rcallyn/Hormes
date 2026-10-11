@@ -5,7 +5,27 @@ import Foundation
 /// The slice of the snapshot the ear reacts to.
 private struct EarInputs: Equatable {
     var phase: Phase
-    var reflexesOn: Bool
+    var reflexes: Bool
+}
+
+/// The slice of the snapshot's transcript the barge-in duck reacts to: User's open
+/// (non-final) item as Live transcribes him — a new id or a longer text is "Live heard
+/// User" — and Hormes's recent words, so a partial made only of them is not taken as
+/// User's confirmation.
+private struct EarTranscriptInputs: Equatable {
+    var userOpenId: String?
+    var userOpenLength = 0
+    var hormesRecent = ""
+
+    init(_ transcript: [TranscriptItem]) {
+        if let open = transcript.last(where: { $0.speaker == .user }), !open.final {
+            userOpenId = open.id
+            userOpenLength = open.text.count
+        }
+        // His last two items, capped: what the speaker is saying now and what it just said.
+        let recent = transcript.suffix(8).filter { $0.speaker == .hormes }.suffix(2).map(\.text).joined(separator: " ")
+        hormesRecent = String(recent.suffix(800))
+    }
 }
 
 /// The on-device ear while awake. Speech → Live → delegation → brain → first tool
@@ -36,6 +56,7 @@ final class ReflexEar {
 
     // Inputs.
     private var inputs: EarInputs
+    private var transcriptInputs = EarTranscriptInputs([])
     private var connected: Bool
     private var voiceAudioActive = false
     private let enabledByEnvironment: Bool
@@ -47,6 +68,11 @@ final class ReflexEar {
     private var blocked: String?
     private var retry: Task<Void, Never>?
     private var lastReason = ""
+    private var lastRoute = ""
+    /// Notification observers (screen hints from the client, the mic route from the
+    /// audio engine), removed when the ear goes away; a nonisolated bag so `deinit` needs
+    /// no actor hop.
+    private nonisolated let observers = ObserverBag()
 
     static let recheckInterval: TimeInterval = 30
 
@@ -55,7 +81,7 @@ final class ReflexEar {
         self.state = state
         self.send = send
         listener = EarListener()
-        inputs = EarInputs(phase: state.snapshot.phase, reflexesOn: state.snapshot.settings.reflexesOn)
+        inputs = EarInputs(phase: state.snapshot.phase, reflexes: state.snapshot.settings.reflexes)
         connected = state.connected
         enabledByEnvironment = ProcessInfo.processInfo.environment["HORMES_NO_AUDIO"] != "1"
 
@@ -64,14 +90,50 @@ final class ReflexEar {
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.handleListenerStatus(status) } }
         }
 
+        // What is on the screen (the engine's `ear.hints`, decoded by EngineClient): straight
+        // to the listener on whatever thread posted it; `applyHints` hops to the ear queue.
+        let listener = self.listener
+        observers.add(NotificationCenter.default.addObserver(forName: .hormesEarHints, object: nil, queue: nil) { note in
+            guard let strings = note.userInfo?["strings"] as? [String] else { return }
+            listener.applyHints(strings)
+        })
+        // The microphone route (AudioEngine's ranking): told to the daemon through the ear's
+        // status frame, so a vanished mic and what replaced it are in daemon.log.
+        observers.add(NotificationCenter.default.addObserver(forName: .hormesMicRoute, object: nil, queue: .main) { [weak self] note in
+            guard let summary = note.userInfo?["summary"] as? String else { return }
+            MainActor.assumeIsolated { self?.reportRoute(summary) }
+        })
+
         state.$snapshot
-            .map { (s: Snapshot) -> EarInputs in EarInputs(phase: s.phase, reflexesOn: s.settings.reflexesOn) }
+            .map { (s: Snapshot) -> EarInputs in EarInputs(phase: s.phase, reflexes: s.settings.reflexes) }
             .removeDuplicates()
             .sink { [weak self] (inputs: EarInputs) in
                 MainActor.assumeIsolated {
                     guard let self else { return }
                     self.inputs = inputs
+                    // The barge-in duck's fallback confirmation: the voice leaving `speaking` means
+                    // Live heard User too (1.2 s after Hormes's last words at the earliest).
+                    BargeInDuck.shared.noteVoiceSpeaking(inputs.phase == .speaking)
                     self.update()
+                }
+            }
+            .store(in: &cancellables)
+        // Live's own transcript, for the duck: User's non-final item growing is Live's
+        // `session.input_transcript.delta` — the confirmation the ear cannot give when it
+        // is off (no grant, reflexes off) and the one that outranks residual echo.
+        state.$snapshot
+            .map { (s: Snapshot) -> EarTranscriptInputs in EarTranscriptInputs(s.transcript) }
+            .removeDuplicates()
+            .sink { [weak self] (t: EarTranscriptInputs) in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    let was = self.transcriptInputs
+                    self.transcriptInputs = t
+                    if t.hormesRecent != was.hormesRecent { BargeInDuck.shared.noteHormesSaid(t.hormesRecent) }
+                    if let id = t.userOpenId, id != was.userOpenId || t.userOpenLength > was.userOpenLength {
+                        // The id lets the duck tell his barge-in's own item from a late one for his last turn.
+                        BargeInDuck.shared.noteLiveHeardUser(item: id)
+                    }
                 }
             }
             .store(in: &cancellables)
@@ -110,7 +172,7 @@ final class ReflexEar {
         if !enabledByEnvironment { return setOff("audio disabled (HORMES_NO_AUDIO)") }
         if !voiceAudioActive { return setOff("voice audio not running") } // asleep: the wake listener owns the mic
         if !connected { return setOff("daemon not connected") }
-        if !inputs.reflexesOn { return setOff("reflexes off") }
+        if !inputs.reflexes { return setOff("reflexes off") }
         switch inputs.phase {
         case .paused: return setOff("paused")
         case .muted: return setOff("muted")
@@ -177,7 +239,7 @@ final class ReflexEar {
     }
 
     /// The ear's state, logged here and told to the engine. The app's NSLog lines are not
-    /// kept by the unified log on Kevin's Mac, so the daemon's log is where a production
+    /// kept by the unified log on User's Mac, so the daemon's log is where a production
     /// session can be read back: the report rides the `ear` frame with a negative segment
     /// (`Engine.ear` logs it as "ear (app): …" and judges no words), so no wire change is
     /// needed. One line per change of mind; while disconnected the client drops it.
@@ -187,6 +249,30 @@ final class ReflexEar {
         send(text, true, ReflexEar.statusSegment, nowMs)
     }
 
+    /// The microphone route, once per change (`mic route: …` in daemon.log through the
+    /// status frame). The typed "microphone" problem is the engine's to raise from it.
+    private func reportRoute(_ summary: String) {
+        guard summary != lastRoute else { return }
+        lastRoute = summary
+        report("mic route: \(summary)")
+    }
+
     /// The `segment` of an `ear` frame that carries a status line instead of words.
     static let statusSegment = -1
+}
+
+/// Notification tokens removed together when their owner goes away.
+final class ObserverBag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var tokens: [NSObjectProtocol] = []
+
+    func add(_ token: NSObjectProtocol) {
+        lock.lock()
+        tokens.append(token)
+        lock.unlock()
+    }
+
+    deinit {
+        for t in tokens { NotificationCenter.default.removeObserver(t) }
+    }
 }

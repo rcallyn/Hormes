@@ -1,4 +1,6 @@
+import AudioToolbox
 import AVFoundation
+import CoreAudio
 import Foundation
 import Speech
 
@@ -10,8 +12,10 @@ import Speech
 ///
 /// Recognition tasks are capped at about a minute, so the listener rolls to a fresh
 /// request every 50 s and whenever a task ends; each roll starts a new "segment",
-/// signalled through the `segment` counter passed with every transcript. The gate can
-/// also ask for a roll (`rollSegment`) so a passphrase answer starts in a clean segment.
+/// signalled through the `segment` counter passed with every transcript. The gate also
+/// asks for a roll (`rollSegment`) each time it hears the word, so the recogniser's later
+/// revisions of that utterance stay in a spent segment, and again when a passphrase answer
+/// starts, so the answer begins clean. The gate drives this through `WakeListening`.
 /// The request/task/roll machinery is `SegmentedRecognizer` (Ear/), shared with the
 /// reflex ear that listens while awake; what is here is the microphone and the status.
 final class WakeWordListener {
@@ -40,6 +44,8 @@ final class WakeWordListener {
     var onTranscript: ((String, Bool, Int) -> Void)?
     /// Status and errors. Main queue.
     var onStatus: ((Status) -> Void)?
+    /// Signal features only; no recordings are retained. Called from the local tap.
+    var onClapFrames: (([ClapDetector.Frame]) -> Void)?
 
     private let locale = Locale(identifier: "en-US")
     private let engine = AVAudioEngine()
@@ -56,6 +62,12 @@ final class WakeWordListener {
     private var startFailures = 0
     private var retryScheduled = false
     private var restartPending = false
+    /// design12 § Engine 8: whether this start pointed the input AU at the ranked microphone,
+    /// and whether a start that did so has failed since the last device change. A pin the HAL
+    /// accepts can still leave the engine unable to start (the −10875 family); the next attempt
+    /// then hears the system default instead of re-pinning the same device for ever. On `queue`.
+    private var pinnedThisStart = false
+    private var pinFailedOnce = false
 
     static let rollInterval: TimeInterval = SegmentedRecognizer.rollInterval
     /// Failed starts retried here (0.5, 1, 2, 5 s) before the gate is told; see `startDidFail`.
@@ -115,7 +127,7 @@ final class WakeWordListener {
     private static func describe(_ status: SFSpeechRecognizerAuthorizationStatus) -> (Bool, String) {
         switch status {
         case .authorized: return (true, "Speech Recognition granted")
-        case .denied: return (false, "Speech Recognition denied — enable it in System Settings › Privacy › Speech Recognition")
+        case .denied: return (false, "Speech Recognition denied · enable it in System Settings › Privacy › Speech Recognition")
         case .restricted: return (false, "Speech Recognition restricted on this Mac")
         case .notDetermined: return (false, "Speech Recognition not decided")
         @unknown default: return (false, "Speech Recognition unavailable")
@@ -180,7 +192,7 @@ final class WakeWordListener {
             return
         }
         guard recognizer.supportsOnDeviceRecognition else {
-            status(.unavailable("on-device speech model missing — download it under System Settings › Keyboard › Dictation (nothing is sent to a server)"))
+            status(.unavailable("on-device speech model missing · download it under System Settings › Keyboard › Dictation (nothing is sent to a server)"))
             return
         }
         // Everything AVFoundation can raise from runs inside the ObjC shim (`objcTry`):
@@ -191,6 +203,10 @@ final class WakeWordListener {
         do {
             try objcTry(throwing: {
                 let input = self.engine.inputNode
+                // design12 § Engine 8: hear through the ranked microphone, not the system
+                // default — before the format is read, so the guard below sees the device
+                // the tap will run on.
+                self.pointAtRankedMic(input)
                 let before = input.outputFormat(forBus: 0)
                 formatBefore = before.brief
                 guard before.sampleRate > 0, before.channelCount > 0 else { throw StartFailure.noInputDevice }
@@ -199,12 +215,24 @@ final class WakeWordListener {
                 // created, whatever it has become — nothing to mismatch. The recogniser
                 // accepts any PCM format, so no conversion is needed here.
                 var loggedFirst = false
-                input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, _ in
+                var nextClapTime = 0.0
+                var clapFeatures = ClapFrameExtractor()
+                input.installTap(onBus: 0, bufferSize: 4096, format: nil) { [weak self] buffer, audioTime in
                     if !loggedFirst {
                         loggedFirst = true
                         WakeWordListener.log("first buffer \(buffer.format.brief), \(buffer.frameLength) frames")
                     }
                     self?.segments?.append(buffer)
+                    if let observer = self?.onClapFrames, let channel = buffer.floatChannelData?[0] {
+                        let count = Int(buffer.frameLength), rate = buffer.format.sampleRate
+                        let stride = buffer.format.isInterleaved ? Int(buffer.format.channelCount) : 1
+                        // The device's sample clock is stable even when callbacks arrive
+                        // late. The count-based fallback has the same acoustic timing.
+                        let start = audioTime.isSampleTimeValid ? Double(audioTime.sampleTime) / rate : nextClapTime
+                        nextClapTime = start + Double(count) / rate
+                        observer(clapFeatures.frames(samples: channel, count: count,
+                            sampleRate: rate, stride: stride, at: start))
+                    }
                 }
                 self.engine.prepare()
                 formatAfter = input.outputFormat(forBus: 0).brief
@@ -225,6 +253,38 @@ final class WakeWordListener {
         status(.started("listening on-device (\(formatAfter); tap at the node's own format\(note))"))
     }
 
+    /// design12 § Engine 8: the listener hears through the ranked microphone (the MacBook's
+    /// when it is there), not the system default. A Bluetooth headset's mic held while
+    /// Hormes merely waits for his name drops every app's sound to the hands-free codec —
+    /// most of the day, on User's Mac. One property on this engine's own input AU
+    /// (`kAudioOutputUnitProperty_CurrentDevice`, the plain-path call the voice engine
+    /// makes in `applyInputDevice`); no voice processing, no output node, nothing in the
+    /// gate. Runs inside the caller's `objcTry`. Logs `hears <name> (ranked | system default)`.
+    /// After a start that failed with the pin in place, the pin is skipped until a device change.
+    private func pointAtRankedMic(_ input: AVAudioInputNode) {
+        pinnedThisStart = false
+        let inputs = MicInputs.enumerate()
+        let systemDefault = MicInputs.systemDefaultUID()
+        let ranked = MicRanking.rank(inputs, explicit: nil, lastUsed: nil, systemDefault: systemDefault)
+        let defaultName = MicInputs.name(of: systemDefault) ?? "the system default"
+        guard let choice = ranked.first, choice.uid != systemDefault, let au = input.audioUnit else {
+            WakeWordListener.log("hears \(defaultName) (system default)")
+            return
+        }
+        guard !pinFailedOnce else {
+            WakeWordListener.log("hears \(defaultName) (system default; ranked mic start failed)")
+            return
+        }
+        var dev = choice.id
+        let err = AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &dev, UInt32(MemoryLayout<AudioDeviceID>.size))
+        if err == noErr {
+            pinnedThisStart = true
+            WakeWordListener.log("hears \(choice.name) (ranked)")
+        } else {
+            WakeWordListener.log("hears \(defaultName) (system default; could not select \(choice.name): \(err))")
+        }
+    }
+
     /// A start that did not come up. Devices come and go — the first failures are retried
     /// here on a quick ladder (0.5, 1, 2, 5 s), which covers an input device that is still
     /// switching; if it keeps failing the gate is told (`.startFailed`) and takes over with
@@ -232,6 +292,10 @@ final class WakeWordListener {
     /// drops), so the two loops never race. A raise caught by the shim is named as such.
     private func startDidFail(_ error: Error, formats: String) {
         startFailures += 1
+        if pinnedThisStart, !pinFailedOnce {
+            pinFailedOnce = true
+            WakeWordListener.log("start failed with the ranked mic pinned; the next attempt hears the system default")
+        }
         let what: String
         if let raised = error as? ObjCException {
             what = "AVFoundation raised \(raised.name): \(raised.reason)"
@@ -272,6 +336,8 @@ final class WakeWordListener {
     private func restartAfterConfigurationChange() {
         guard wanted, !restartPending else { return }
         restartPending = true
+        // A new device pair: the ranked mic gets its pin tried again.
+        pinFailedOnce = false
         let before = inputFormatText()
         if running { stopLocked() }
         try? objcTry { self.engine.reset() }

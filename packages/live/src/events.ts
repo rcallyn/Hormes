@@ -26,6 +26,12 @@ export interface ResponsesDelegationConfig {
 }
 
 export interface SessionConfig {
+  /** Application-owned interaction boundary, never inferred from saved work or prompt text. Not sent as an OpenAI API field. */
+  readonly interactionMode?: "general" | "education" | "capture";
+  /** Gemini setup only; the engine also enforces silent capture and refuses actions. */
+  readonly captureOnly?: boolean;
+  /** Gemini-only recording script; no backend tools are offered in this mode. */
+  readonly fixedReply?: string;
   readonly model: string;
   readonly instructions?: string;
   readonly audio?: {

@@ -17,7 +17,7 @@ import {
  * typed emits. Policy — who speaks, what gets delegated, how appends are
  * chunked — lives above it. The one piece of judgement here is the send queue:
  * audio may be fed before `session.started`, and dropping it would clip the
- * first word Kevin says after waking.
+ * first word User says after waking.
  */
 
 export interface LiveSessionOptions {
@@ -43,6 +43,8 @@ export interface WebSocketLike {
 export type LiveState = "idle" | "connecting" | "started" | "closing" | "closed";
 
 export interface LiveSessionEvents {
+  /** Interim ASR hypothesis for captions; never an input utterance or durable evidence. */
+  inputCaption: [text: string];
   started: [session: SessionResource];
   event: [event: ServerEvent];
   audio: [pcm: Buffer];
@@ -52,20 +54,30 @@ export interface LiveSessionEvents {
   responseEvent: [delegationId: string | null, event: Record<string, unknown>];
   usage: [seconds: number, contextRatio: number | undefined];
   appended: [channel: "thinking" | "commentary" | "instructions", clientEventId: string | undefined, startMs: number];
+  /**
+   * The client asked the voice for words: a `commentary` or `instructions` append left (or was queued) just now. Emitted
+   * on send, not on the server's `appended` ack, so whoever gates the voice's turns (the engine's room-talk gate) knows
+   * the ask before the reply can start; `eventId` is the append's client event id (its `appended` ack carries it) and
+   * `content` what it asked for. A `thinking` append is silent progress and asks for nothing, nor does an instructions
+   * append sent with `{ ask: false }` (one that asks the voice to stop or keep quiet).
+   */
+  ask: [channel: "commentary" | "instructions", delegationId: string | null, eventId: string, content: string];
   closed: [reason: string, usageSeconds: number];
   error: [error: Error, clientEventId: string | undefined];
   state: [state: LiveState];
+  interrupted: [];
+  turnEnd: [speaker: "user" | "hormes"];
+  delegationCancelled: [ids: readonly string[]];
 }
 
 const log = logger("live");
 
 /**
- * What a GPT-Live-1 error is about, for the typed problem the engine raises (REDESIGN
- * §16, "Problems, typed"). The server's `error` frames arrive as `code: message`
+ * What a GPT-Live-1 error is about, for the typed problem the engine raises (typed problems, "Problems, typed"). The server's `error` frames arrive as `code: message`
  * (`dispatch`), a failed start as this class's own words; both are matched here.
  *
  * - `limit`: the session hit a cap that passes — a rate limit, the 128-item / 32 768-token
- *   response input history (`response_input_buffer_full`, 10 rows in two days of Kevin's
+ *   response input history (`response_input_buffer_full`, 10 rows in two days of User's
  *   ledger), the append cap. Transient: the remedy is to wait, and the row clears itself.
  * - `connection`: the socket, the network, the server closing us (`connection_lost`,
  *   `remote_hangup`, a start that never answered); the engine reconnects on its own.
@@ -104,6 +116,13 @@ function defaultFactory(url: string, headers: Record<string, string>): WebSocket
 }
 
 export class LiveSession extends EventEmitter<LiveSessionEvents> {
+  /**
+   * GPT-Live-1 acknowledges every commentary and instructions append (`session.*.appended`, with its `client_event_id`)
+   * 450-650 ms after it is sent, before the voice can answer it (LC-5, LC-7, LC-10): the engine's room-talk gate grants
+   * the append's ask only to words after the ack.
+   */
+  readonly acknowledgesAppends: boolean = true;
+  readonly continuousFrames: boolean = true;
   private ws: WebSocketLike | undefined;
   private state: LiveState = "idle";
   private resource: SessionResource | undefined;
@@ -112,6 +131,8 @@ export class LiveSession extends EventEmitter<LiveSessionEvents> {
   private usageSeconds = 0;
   /** Wall clock at session.started; session-timeline ms ≈ now - this. */
   private startedAtWall = 0;
+  /** Every message the server has sent on this socket, parsed or not. */
+  private frames = 0;
 
   constructor(private readonly opts: LiveSessionOptions) {
     super();
@@ -132,6 +153,18 @@ export class LiveSession extends EventEmitter<LiveSessionEvents> {
 
   get billedSeconds(): number {
     return this.usageSeconds;
+  }
+
+  /**
+   * How many messages the server has sent so far, counted on arrival. GPT-Live-1 streams output audio continuously,
+   * silence included, but only while the mic is open: on a healthy unmuted session this never stands still for long.
+   * The engine reads it once a second on its own clock and treats a count that stopped as a dead socket (V3). About
+   * 3.4 s after `session.input_audio.mute` (3.37 s in LC-2, 2026-10-06) the stream stops and only the 15 s usage beat
+   * comes, so the watch is off while muted and starts over at the first tick after the unmute. A count, not a
+   * timestamp, so it holds on any clock.
+   */
+  get serverFrames(): number {
+    return this.frames;
   }
 
   private setState(next: LiveState): void {
@@ -163,10 +196,12 @@ export class LiveSession extends EventEmitter<LiveSessionEvents> {
       }, this.opts.connectTimeoutMs ?? 15_000);
 
       ws.onopen = () => {
-        const config: SessionConfig = { ...this.opts.config, model: this.opts.config.model || LIVE_MODEL };
+        const { interactionMode: _localMode, captureOnly: _localCapture, ...wireConfig } = this.opts.config;
+        const config: SessionConfig = { ...wireConfig, model: this.opts.config.model || LIVE_MODEL };
         this.raw({ type: "session.start", event_id: "start", session: config });
       };
       ws.onmessage = (ev) => {
+        this.frames += 1;
         const parsed = parseServerEvent(String(ev.data));
         if (!parsed) return;
         if (parsed.type === "session.started") {
@@ -299,12 +334,15 @@ export class LiveSession extends EventEmitter<LiveSessionEvents> {
 
   appendCommentary(delegationId: string | null, content: string): string {
     const id = this.nextEventId("say");
+    this.emit("ask", "commentary", delegationId, id, content);
     this.raw({ type: "session.commentary.append", event_id: id, delegation_id: delegationId, content });
     return id;
   }
 
-  appendInstructions(delegationId: string | null, content: string): string {
+  /** `o.ask: false`: the instruction asks the voice for no words (stop speaking, stay silent), so it is no ask (`ask`). */
+  appendInstructions(delegationId: string | null, content: string, o?: { readonly ask?: boolean }): string {
     const id = this.nextEventId("steer");
+    if (o?.ask !== false) this.emit("ask", "instructions", delegationId, id, content);
     this.raw({ type: "session.instructions.append", event_id: id, delegation_id: delegationId, content });
     return id;
   }
@@ -365,11 +403,13 @@ export class LiveSession extends EventEmitter<LiveSessionEvents> {
   /**
    * Close the socket now, without asking the server to finalize. For when a
    * graceful close() has not been answered and the meter must stop: the state is
-   * `closed` at once and `closed("client_closed", usageSeconds)` fires exactly
-   * once — the socket's own onclose (if it still fires) and any late
-   * `session.closed` frame are swallowed. Harmless when already closed.
+   * `closed` at once and `closed(reason, usageSeconds)` fires exactly once — the
+   * socket's own onclose (if it still fires) and any late `session.closed` frame
+   * are swallowed. Harmless when already closed. `reason` is `client_closed`, or
+   * `connection_lost` when the engine drops a socket that went silent (V3), so the
+   * reconnect that follows a real drop follows this one too.
    */
-  terminate(): void {
+  terminate(reason: "client_closed" | "connection_lost" = "client_closed"): void {
     if (this.state === "closed") return;
     const wasConnecting = this.state === "connecting";
     this.setState("closed");
@@ -381,6 +421,20 @@ export class LiveSession extends EventEmitter<LiveSessionEvents> {
       // ignore
     }
     if (wasConnecting) this.rejectStart?.(new Error("live session terminated before it started"));
-    if (report) this.emit("closed", "client_closed", this.usageSeconds);
+    if (report) this.emit("closed", reason, this.usageSeconds);
   }
 }
+
+/** Public voice transport contract, shared by OpenAI and Gemini; private socket state stays vendor-specific. */
+export type AssessmentResolution =
+  | { readonly kind: "checked" | "discussion"; readonly instruction: string }
+  | { readonly kind: "delegate" | "cancel" };
+
+export type VoiceSession = Pick<LiveSession, Exclude<keyof LiveSession, keyof EventEmitter>> & EventEmitter<LiveSessionEvents> & {
+  /** Finalize a streaming ASR hypothesis before capture closes, with a bounded wait. */
+  flushInput?(): Promise<boolean>;
+  /** Optional application-owned gate for reference-checked whiteboard conversations. */
+  setAssessmentContext?(readBinding: () => string | undefined): void;
+  beginAssessmentTurn?(utteranceId: string): boolean;
+  resolveAssessmentTurn?(utteranceId: string, result: AssessmentResolution): void;
+};

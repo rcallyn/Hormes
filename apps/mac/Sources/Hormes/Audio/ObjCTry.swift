@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 import HormesObjC
 
-/// An Objective-C exception caught by the `HormesObjC` shim (`JHTry`) and surfaced
+/// An Objective-C exception caught by the `HormesObjC` shim (`HMSTry`) and surfaced
 /// as a Swift error. AVFoundation raises NSExceptions for graph mistakes — a tap
 /// installed with a format the node no longer has ("Failed to create tap due to
 /// format mismatch"), a connection at the wrong rate, a player started while the
@@ -35,7 +35,7 @@ struct ObjCException: LocalizedError, CustomStringConvertible {
 func objcTry(_ body: () -> Void) throws {
     var nsError: NSError?
     let ok = withoutActuallyEscaping(body) { escapable -> Bool in
-        JHTry(escapable, &nsError)
+        HMSTry(escapable, &nsError)
     }
     if !ok { throw ObjCException(nsError) }
 }

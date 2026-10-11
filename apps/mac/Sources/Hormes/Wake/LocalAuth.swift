@@ -2,17 +2,43 @@ import CommonCrypto
 import Foundation
 import LocalAuthentication
 
+/// The device-owner factor (Touch ID, an Apple Watch, the Mac password), as the wake gate uses it.
+protocol OwnerFactor {
+    /// One of them can be asked for on this Mac.
+    func available() -> Bool
+    /// "Touch ID", "Apple Watch" or "your password", for the spoken prompt.
+    func name() -> String
+    /// A fresh sheet, not yet shown.
+    func prompt() -> OwnerPrompt
+}
+
+/// One sheet. `evaluate` shows it and resolves false on cancel or failure; `cancel()` dismisses it.
+protocol OwnerPrompt: AnyObject, Sendable {
+    func evaluate(reason: String) async -> Bool
+    func cancel()
+}
+
 /// Authentication for the wake word gate. Two independent factors, both local:
 ///
 /// * **Device owner** — LocalAuthentication's `.deviceOwnerAuthentication`: Touch ID,
 ///   an unlocked Apple Watch, or the Mac's login password, through the system sheet.
-/// * **Passphrase** — a phrase Kevin says (or types). Stored as PBKDF2-HMAC-SHA256
+/// * **Passphrase** — a phrase User says (or types). Stored as PBKDF2-HMAC-SHA256
 ///   (200 000 rounds, 16-byte salt) in `~/.hormes/wake-auth.json` with mode 0600;
 ///   the plaintext is never written. Speech is normalised (lowercase, letters and
 ///   digits only, single spaces) before hashing, on enrolment and on verification,
 ///   so "Open, Sesame!" and "open sesame" are the same phrase.
+///
+/// The gate reaches the device-owner factor through `OwnerFactor` (`LocalAuth.System` in the
+/// app), so `Scripts/wake-gate-check.sh` scripts the sheet's answer and never shows one.
 enum LocalAuth {
     // MARK: device owner
+
+    /// The system's device-owner factor, as the gate sees it.
+    struct System: OwnerFactor {
+        func available() -> Bool { LocalAuth.ownerAuthAvailable() }
+        func name() -> String { LocalAuth.ownerAuthName() }
+        func prompt() -> OwnerPrompt { OwnerAuth() }
+    }
 
     static func ownerAuthAvailable() -> Bool {
         var error: NSError?
@@ -31,8 +57,10 @@ enum LocalAuth {
             default: break
             }
         }
-        if #available(macOS 15.0, *) {
-            if ctx.canEvaluatePolicy(.deviceOwnerAuthenticationWithCompanion, error: &error) { return "Apple Watch" }
+        // Policy 3 is the companion policy. The macOS 15 SDK names it for companions, the
+        // macOS 14 SDK for the Watch; the raw value compiles against both SDKs (the app's floor is Xcode 16 for its SwiftUI).
+        if #available(macOS 15.0, *), let companion = LAPolicy(rawValue: 3) {
+            if ctx.canEvaluatePolicy(companion, error: &error) { return "Apple Watch" }
         }
         return "your password"
     }
@@ -40,7 +68,7 @@ enum LocalAuth {
     /// One system authentication sheet. `evaluate` resolves false on cancel, failure,
     /// or when no policy is available; `cancel()` dismisses the sheet (timeout, or
     /// the passphrase won first).
-    final class OwnerAuth: @unchecked Sendable {
+    final class OwnerAuth: OwnerPrompt, @unchecked Sendable {
         private let ctx = LAContext()
         private let lock = NSLock()
         private var finished = false

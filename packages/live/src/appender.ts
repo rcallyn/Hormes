@@ -1,7 +1,7 @@
 /**
  * Every append channel is capped at 500 tokens. A brain that has just read a
  * whole web page must not try to hand it over in one go — Live rejects it and
- * Kevin hears nothing. Split at sentence boundaries into chunks that fit, and
+ * User hears nothing. Split at sentence boundaries into chunks that fit, and
  * estimate tokens conservatively (chars / 3.2) so we never sit exactly on the cap.
  */
 

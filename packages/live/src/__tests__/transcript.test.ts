@@ -3,13 +3,20 @@ import assert from "node:assert/strict";
 import { Transcript, joinFragments } from "../transcript.ts";
 import { chunkForAppend, APPEND_CHAR_BUDGET, estimateTokens } from "../appender.ts";
 
+test("a separator at the end of the first provider fragment survives", () => {
+  const t = new Transcript(() => 0);
+  t.push({ speaker: "hormes", delta: " Take a look ", startMs: 0, endMs: 200 });
+  t.push({ speaker: "hormes", delta: "at the problem.", startMs: 200, endMs: 400 });
+  assert.equal(t.last("hormes")?.text, "Take a look at the problem.");
+});
+
 test("fragments from one speaker merge into one utterance with real spacing", () => {
   const t = new Transcript(() => 0);
   const frags = [
-    [" hey", 800, 1000], [", jar", 1400, 1600], ["head", 1600, 1800], [", can you", 2000, 2200], [" look", 2200, 2400],
+    [" hey", 800, 1000], [", hor", 1400, 1600], ["mes", 1600, 1800], [", can you", 2000, 2200], [" look", 2200, 2400],
     [" at my", 2400, 2600], [" screen", 3000, 3200],
   ] as const;
-  for (const [delta, s, e] of frags) t.push({ speaker: "kevin", delta, startMs: s, endMs: e });
+  for (const [delta, s, e] of frags) t.push({ speaker: "user", delta, startMs: s, endMs: e });
   const all = t.all();
   assert.equal(all.length, 1);
   assert.equal(all[0]?.text, "hey, hormes, can you look at my screen");
@@ -19,26 +26,26 @@ test("fragments from one speaker merge into one utterance with real spacing", ()
 
 test("a long pause or the other speaker starts a new utterance", () => {
   const t = new Transcript(() => 0);
-  t.push({ speaker: "kevin", delta: "what time is it", startMs: 0, endMs: 900 });
+  t.push({ speaker: "user", delta: "what time is it", startMs: 0, endMs: 900 });
   t.push({ speaker: "hormes", delta: " ten past", startMs: 1200, endMs: 1600 });
   t.push({ speaker: "hormes", delta: " four.", startMs: 1600, endMs: 1800 });
-  t.push({ speaker: "kevin", delta: " thanks", startMs: 2000, endMs: 2300 });
-  t.push({ speaker: "kevin", delta: " open slack", startMs: 6000, endMs: 6800 });
+  t.push({ speaker: "user", delta: " thanks", startMs: 2000, endMs: 2300 });
+  t.push({ speaker: "user", delta: " open slack", startMs: 6000, endMs: 6800 });
   const texts = t.all().map((i) => `${i.speaker}:${i.text}`);
-  assert.deepEqual(texts, ["kevin:what time is it", "hormes:ten past four.", "kevin:thanks", "kevin:open slack"]);
+  assert.deepEqual(texts, ["user:what time is it", "hormes:ten past four.", "user:thanks", "user:open slack"]);
   assert.equal(t.all()[0]?.final, true, "an utterance is finalized when the next one begins");
-  assert.equal(t.last("kevin")?.text, "open slack");
-  assert.equal(t.since(5000, "kevin").length, 1);
+  assert.equal(t.last("user")?.text, "open slack");
+  assert.equal(t.since(5000, "user").length, 1);
 });
 
 test("settle finalizes stale utterances and render shows a window", () => {
   const t = new Transcript(() => 0);
-  t.push({ speaker: "kevin", delta: "hello", startMs: 0, endMs: 500 });
+  t.push({ speaker: "user", delta: "hello", startMs: 0, endMs: 500 });
   assert.equal(t.settle(600).length, 0);
   assert.equal(t.settle(3000).length, 1);
   assert.equal(t.all()[0]?.final, true);
   t.push({ speaker: "hormes", delta: "hi", startMs: 3100, endMs: 3300 });
-  assert.equal(t.render(10_000, 3300), "Kevin: hello\nHormes: hi");
+  assert.equal(t.render(10_000, 3300), "User: hello\nHormes: hi");
 });
 
 test("an utterance closed by the next one is emitted as final once — the ledger keeps the command Hormes answered at once — and settle does not emit it again", () => {
@@ -49,29 +56,29 @@ test("an utterance closed by the next one is emitted as final once — the ledge
     kinds.push(`${kind}:${item.speaker}`);
     if (kind === "final") finals.push(`${item.speaker}:${item.text}`);
   });
-  t.push({ speaker: "kevin", delta: "hormes scroll down", startMs: 0, endMs: 900 });
-  // Hormes answers 200 ms later: Kevin's utterance is closed by finalizeOpen (inside push), not by settle.
+  t.push({ speaker: "user", delta: "hormes scroll down", startMs: 0, endMs: 900 });
+  // Hormes answers 200 ms later: User's utterance is closed by finalizeOpen (inside push), not by settle.
   t.push({ speaker: "hormes", delta: " On it.", startMs: 1100, endMs: 1400 });
-  assert.deepEqual(finals, ["kevin:hormes scroll down"], "the closed utterance was emitted as final");
-  assert.deepEqual(kinds, ["start:kevin", "final:kevin", "start:hormes"], "final lands before the new utterance starts");
+  assert.deepEqual(finals, ["user:hormes scroll down"], "the closed utterance was emitted as final");
+  assert.deepEqual(kinds, ["start:user", "final:user", "start:hormes"], "final lands before the new utterance starts");
   assert.equal(t.all()[0]?.final, true);
   assert.equal(t.settle(5000).length, 1, "settle closes only the still-open hormes line");
-  assert.deepEqual(finals, ["kevin:hormes scroll down", "hormes:On it."], "nothing is emitted twice");
+  assert.deepEqual(finals, ["user:hormes scroll down", "hormes:On it."], "nothing is emitted twice");
   // Explicit finalizeOpen with several open items (both speakers): one final each, nothing for what was already final.
   const t2 = new Transcript(() => 0);
   const closed: string[] = [];
   t2.onChange((item, kind) => kind === "final" && closed.push(item.text));
-  t2.push({ speaker: "kevin", delta: "one", startMs: 0, endMs: 500 });
+  t2.push({ speaker: "user", delta: "one", startMs: 0, endMs: 500 });
   t2.settle(3000);
-  t2.push({ speaker: "kevin", delta: "two", startMs: 4000, endMs: 4500 });
+  t2.push({ speaker: "user", delta: "two", startMs: 4000, endMs: 4500 });
   t2.finalizeOpen();
   t2.finalizeOpen();
   assert.deepEqual(closed, ["one", "two"]);
 });
 
 test("joinFragments handles punctuation and word pieces", () => {
-  assert.equal(joinFragments("hey", ", jar"), "hey, jar");
-  assert.equal(joinFragments("hey, jar", "head"), "hey, hormes");
+  assert.equal(joinFragments("hey", ", hor"), "hey, hor");
+  assert.equal(joinFragments("hey, hor", "mes"), "hey, hormes");
   assert.equal(joinFragments("chrome's", " up"), "chrome's up");
   assert.equal(joinFragments("", " on it"), "on it");
 });
@@ -94,23 +101,23 @@ test("pushTyped: a typed line is final at once, never merges with a fragment on 
   const t = new Transcript(() => 1000);
   const events: string[] = [];
   t.onChange((item, kind) => events.push(`${kind}:${item.speaker}:${item.text}${item.source ? `:${item.source}` : ""}`));
-  // Kevin is mid-sentence by voice when the typed line lands within the merge gap.
-  t.push({ speaker: "kevin", delta: "open", startMs: 0, endMs: 400 });
+  // User is mid-sentence by voice when the typed line lands within the merge gap.
+  t.push({ speaker: "user", delta: "open", startMs: 0, endMs: 400 });
   const typed = t.pushTyped("  open   safari ", 600);
-  assert.deepEqual(typed, { id: "t_2", speaker: "kevin", text: "open safari", startMs: 600, endMs: 600, at: 1000, final: true, source: "typed" });
-  assert.deepEqual(events, ["start:kevin:open", "final:kevin:open", "final:kevin:open safari:typed"], "the open fragment is closed first; the typed line is emitted exactly once, as final");
+  assert.deepEqual(typed, { id: "t_2", speaker: "user", text: "open safari", startMs: 600, endMs: 600, at: 1000, final: true, source: "typed" });
+  assert.deepEqual(events, ["start:user:open", "final:user:open", "final:user:open safari:typed"], "the open fragment is closed first; the typed line is emitted exactly once, as final");
   // A fragment right after it (within GAP_MS) starts a NEW utterance rather than growing the typed one.
-  t.push({ speaker: "kevin", delta: " and slack", startMs: 900, endMs: 1200 });
+  t.push({ speaker: "user", delta: " and slack", startMs: 900, endMs: 1200 });
   assert.deepEqual(t.all().map((i) => [i.text, i.final, i.source ?? "voice"]), [["open", true, "voice"], ["open safari", true, "typed"], ["and slack", false, "voice"]]);
-  // since() and last() see it in order; render() shows it as Kevin's line.
-  assert.deepEqual(t.since(500, "kevin").map((i) => i.text), ["open safari", "and slack"]);
+  // since() and last() see it in order; render() shows it as User's line.
+  assert.deepEqual(t.since(500, "user").map((i) => i.text), ["open safari", "and slack"]);
   t.finalizeOpen();
-  assert.equal(t.last("kevin")?.text, "and slack");
-  assert.equal(t.render(10_000, 1200), "Kevin: open\nKevin: open safari\nKevin: and slack");
+  assert.equal(t.last("user")?.text, "and slack");
+  assert.equal(t.render(10_000, 1200), "User: open\nUser: open safari\nUser: and slack");
   // A typed yes is what the confirmation path reads back.
   const yes = t.pushTyped("yes", 5000);
-  assert.equal(t.last("kevin"), yes);
-  assert.equal(t.last("kevin")?.source, "typed");
+  assert.equal(t.last("user"), yes);
+  assert.equal(t.last("user")?.source, "typed");
   // The other speaker may type too (a Hormes line placed on the record by the engine).
   assert.equal(t.pushTyped("done.", 6000, "hormes")?.speaker, "hormes");
   // settle() has nothing to close for typed lines and emits nothing more for them.
@@ -123,7 +130,7 @@ test("pushTyped: a blank line is nothing said — no item, no emission, and the 
   const t = new Transcript(() => 1000);
   const events: string[] = [];
   t.onChange((item, kind) => events.push(`${kind}:${item.text}`));
-  t.push({ speaker: "kevin", delta: "open", startMs: 0, endMs: 200 });
+  t.push({ speaker: "user", delta: "open", startMs: 0, endMs: 200 });
   assert.equal(t.pushTyped("", 600), undefined);
   assert.equal(t.pushTyped("   \n\t ", 600), undefined);
   assert.deepEqual(events, ["start:open"], "nothing emitted for a blank line; the open fragment is not closed by it");
@@ -138,4 +145,13 @@ test("pushTyped: the item cap still holds when typed lines pour in", () => {
   const t = new Transcript(() => 0, 5);
   for (let i = 0; i < 8; i++) t.pushTyped(`line ${i}`, i * 100);
   assert.deepEqual(t.all().map((i) => i.text), ["line 3", "line 4", "line 5", "line 6", "line 7"]);
+});
+
+test("release F1: render labels the user's lines with the given name (the default stays User)", () => {
+  const t = new Transcript(() => 0);
+  t.push({ speaker: "user", delta: "hello", startMs: 0, endMs: 500 });
+  t.settle(3000);
+  t.push({ speaker: "hormes", delta: "hi", startMs: 3100, endMs: 3300 });
+  assert.equal(t.render(10_000, 3300, "Sam"), "Sam: hello\nHormes: hi");
+  assert.equal(t.render(10_000, 3300), "User: hello\nHormes: hi");
 });

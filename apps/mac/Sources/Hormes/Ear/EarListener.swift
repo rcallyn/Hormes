@@ -8,7 +8,7 @@ import Speech
 /// `AVAudioEngine`), rolled every 50 s through `SegmentedRecognizer`. Every changed
 /// partial and every final comes out of `onTranscript`, throttled to at most 20 a
 /// second (finals never wait) and stamped with the moment the recogniser's callback
-/// fired, so the engine's reflex layer can act ~100–200 ms behind Kevin's speech and
+/// fired, so the engine's reflex layer can act ~100–200 ms behind User's speech and
 /// later reconcile with Live's own transcript of the same words.
 ///
 /// Thread shape: `start`/`stop` are asynchronous onto `queue`; `ingest` is called on
@@ -17,6 +17,49 @@ import Speech
 /// which defaults to the app's MAIN queue and would otherwise put every partial behind
 /// orb rendering and SwiftUI before it was even stamped), where the throttle lives.
 /// Nothing on the ear path touches the main queue.
+extension Notification.Name {
+    /// The engine's `ear.hints` arrived (wire.ts): `userInfo["strings"]` is what is on the
+    /// screen right now. Posted by EngineClient on its own queue; ReflexEar hands it to the
+    /// listener (`applyHints`), which is where the recogniser's contextual strings live.
+    static let hormesEarHints = Notification.Name("hormes.earHints")
+}
+
+/// The engine's `ear.hints` — the front app, its window title, the visible controls'
+/// titles, the agents' names — merged with the grammar into the recogniser's
+/// `contextualStrings`: the grammar first, then up to `maxHints` cleaned hints
+/// (whitespace collapsed, ellipses and edge punctuation dropped, at most `maxWords`
+/// words, 2–40 characters with a letter in them), deduplicated case-insensitively.
+/// `click Add Folder` is then heard as those words on the first partial, which is the
+/// one the reflex grammar matches (reflex implementation).
+enum EarHints {
+    static let maxHints = 100
+    static let maxWords = 3
+
+    static func clean(_ raw: String) -> String? {
+        let unellipsed = raw.replacingOccurrences(of: "…", with: " ").replacingOccurrences(of: "...", with: " ")
+        let words = unellipsed.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).prefix(maxWords).map(String.init)
+        let joined = words.joined(separator: " ")
+        let trimmed = joined.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.symbols).union(.whitespaces))
+        guard trimmed.count >= 2, trimmed.count <= 40, trimmed.contains(where: { $0.isLetter }) else { return nil }
+        return trimmed
+    }
+
+    static func merge(base: [String], hints: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for s in base where seen.insert(s.lowercased()).inserted { out.append(s) }
+        var taken = 0
+        for raw in hints {
+            guard taken < maxHints, let s = clean(raw) else { continue }
+            if seen.insert(s.lowercased()).inserted {
+                out.append(s)
+                taken += 1
+            }
+        }
+        return out
+    }
+}
+
 final class EarListener: @unchecked Sendable {
     enum Status {
         /// Recognition is running.
@@ -85,6 +128,10 @@ final class EarListener: @unchecked Sendable {
     /// Below this RMS nothing counts as speech whatever the noise floor says.
     static let minimumHotRMS: Double = 0.004
 
+    /// en-US on purpose: the wake phrases (Protocol.swift WakeSettings.standard) and EarGrammar
+    /// are English, and so is the on-device model this ear needs. `Settings.language` is the
+    /// voice's language (what GPT-Live-1 speaks), not this recogniser's; derive nothing from
+    /// it here until a second language is actually offered. Wake/** keeps its own en-US.
     private let locale = Locale(identifier: "en-US")
     private let queue = DispatchQueue(label: "hormes.ear", qos: .userInteractive)
     private let recognizer: SFSpeechRecognizer?
@@ -112,6 +159,15 @@ final class EarListener: @unchecked Sendable {
     private var floorSum: Double = 0
     private var lastLatencyLogAt: CFAbsoluteTime = 0
 
+    // Screen hints, on `queue`: the first hint is the front app; a change of it may roll early.
+    private var hintsHead = ""
+    private var lastEarlyRollAt: CFAbsoluteTime = 0
+    private var lastPartialAt: CFAbsoluteTime = 0
+    /// An early roll waits for this much quiet since the last words and this much segment age.
+    static let earlyRollQuiet: TimeInterval = 2
+    static let earlyRollMinAge: TimeInterval = 3
+    static let earlyRollSpacing: TimeInterval = 5
+
     init(contextualStrings: [String] = EarGrammar.contextualStrings) {
         let recognizer = SFSpeechRecognizer(locale: locale)
         self.recognizer = recognizer
@@ -132,7 +188,7 @@ final class EarListener: @unchecked Sendable {
             self.segments = segments
             segments.onTranscript = { [weak self] t in self?.received(t) }
             segments.onError = { [weak self] message in self?.onStatus?(.recognitionError("ear recognition: \(message)")) }
-            segments.onRoll = { [weak self] retired, new in self?.rolled(from: retired, to: new) }
+            segments.onRoll = { [weak self] old, new in self?.rolled(from: old, to: new) }
             segments.shouldDeferRoll = { [weak self] in self?.microphoneHot ?? false }
         } else {
             segments = nil
@@ -164,6 +220,29 @@ final class EarListener: @unchecked Sendable {
     /// Words to bias recognition toward; takes effect at the next roll.
     func setContextualStrings(_ strings: [String]) {
         queue.async { self.segments?.contextualStrings = strings }
+    }
+
+    /// The engine's `ear.hints`: what is on the screen right now, merged with the grammar
+    /// (`EarHints.merge`) into the recogniser's contextual strings, applied at the next
+    /// segment. When the front app changed (the first hint) and nothing is being said —
+    /// the mic quiet, no words for 2 s, no text in the current segment, the segment at
+    /// least 3 s old, no early roll in the last 5 s — the segment rolls now rather than at
+    /// the 50 s mark, so the new app's controls are heard on the first command in it.
+    /// Any thread.
+    func applyHints(_ strings: [String]) {
+        queue.async {
+            guard let segments = self.segments else { return }
+            segments.contextualStrings = EarHints.merge(base: EarGrammar.contextualStrings, hints: strings)
+            let head = strings.first ?? ""
+            let headChanged = head != self.hintsHead
+            self.hintsHead = head
+            guard headChanged, self.running, !self.microphoneHot, self.segmentText.isEmpty else { return }
+            let now = CFAbsoluteTimeGetCurrent()
+            guard now - self.lastPartialAt >= EarListener.earlyRollQuiet, now - self.lastEarlyRollAt >= EarListener.earlyRollSpacing, segments.segmentAge >= EarListener.earlyRollMinAge else { return }
+            self.lastEarlyRollAt = now
+            let seg = segments.begin()
+            if EarListener.logsLatency { NSLog("ear: rolled early for the screen's words (%@); segment %d", head, seg) }
+        }
     }
 
     private func startLocked() {
@@ -265,6 +344,12 @@ final class EarListener: @unchecked Sendable {
         }
         if let audio = t.audio { noteLatency(callbackHost: t.hostTime, audio: audio) }
         if !t.isFinal, t.text.isEmpty { return }
+        if !t.text.isEmpty { lastPartialAt = CFAbsoluteTimeGetCurrent() }
+        // Words arriving while Hormes speaks: the barge-in duck's second cue, and its
+        // confirmation that the energy the gate heard is speech, not a cough — when they
+        // carry a word Hormes did not just say (the duck knows his transcript; a partial
+        // made only of his words may be residual echo and confirms nothing).
+        if !t.isFinal, t.text != segmentText { BargeInDuck.shared.noteEarWords(t.text) }
         if t.isFinal { segmentFinalSeen = true } else { segmentText = t.text }
         let item = EarThrottle.Item(text: t.text, isFinal: t.isFinal, segment: t.segment, atMs: Int((t.at.timeIntervalSince1970 * 1000).rounded()))
         guard !throttle.isRepeat(item) else { return }
@@ -275,11 +360,11 @@ final class EarListener: @unchecked Sendable {
     /// its words end with the last partial: send that as the segment's final, now, before
     /// the new task can call back — the engine reads an unknown older segment arriving
     /// late as a new one and would restart on its words.
-    private func rolled(from retired: Int, to new: Int) {
+    private func rolled(from old: Int, to new: Int) {
         guard running else { return }
-        if retired == currentSegment, !segmentFinalSeen, !segmentText.isEmpty {
+        if old == currentSegment, !segmentFinalSeen, !segmentText.isEmpty {
             let nowMs = Int((Date().timeIntervalSince1970 * 1000).rounded())
-            throttle.offer(EarThrottle.Item(text: segmentText, isFinal: true, segment: retired, atMs: nowMs))
+            throttle.offer(EarThrottle.Item(text: segmentText, isFinal: true, segment: old, atMs: nowMs))
         }
         currentSegment = new
         segmentText = ""
@@ -319,10 +404,5 @@ final class EarListener: @unchecked Sendable {
             NSLog("ear: on-device partial latency %@", window.description)
         }
         window = LatencyWindow(); wordSum = 0; floorSum = 0
-    }
-
-    /// The window so far, for harnesses. On the caller's thread; a snapshot.
-    func latencyWindow() -> LatencyWindow {
-        queue.sync { window }
     }
 }
