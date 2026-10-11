@@ -1,5 +1,49 @@
 import Foundation
+
+// A Stop that arrives before this process's first type op must not be lost: the handler installs now.
+_ = typeCancelHandlerInstalled
 import AppKit
+import IOKit.hid
+
+// A helper inside Hormes.app has no Info.plist of its own: CFBundle resolves
+// Contents/MacOS/hormes-hands to the enclosing Hormes.app, and LaunchServices checks the process
+// in from that dictionary (LSUIElement false) as a Foreground app: a second "Hormes" Dock tile per
+// helper process, parked in recent-apps when it exits. `.prohibited` set after `NSApplication.shared`
+// was too late. The check-in happens INSIDE `NSApplication.shared`: the unified log on 2026-10-05 has
+// `CHECKEDIN … foreground=1` then `PostHideProcess` for every helper, and the app's first three
+// `--permissions` refreshers were the Dock's three recent tiles (`lsappinfo` reads BackgroundOnly
+// only after the transform, so the smoke check passed). So the check-in is told first:
+// LSBackgroundOnly in the main bundle's in-memory Info dictionary, the copy the check-in reads (a
+// scratch bundle whose file says LSUIElement checked in BackgroundOnly with it set). The file on disk
+// and the signature are untouched. Never an embedded __info_plist with a bundle id: it would change
+// the nested code's ad-hoc signing identifier that the --deep verify expects.
+markBackgroundOnly()
+
+// `hormes-hands --permissions`: print the grants and exit, before AppKit exists, so a refresher
+// (the app runs one every 1.5 s while anything asks) never checks in at all. A fresh process is the
+// only reliable way to read TCC after the user changes it — a running process may keep the answer
+// it got at launch (Screen Recording notoriously does). Prints all four: accessibility,
+// screenRecording, inputMonitoring, fullDiskAccess.
+if CommandLine.arguments.contains("--permissions") {
+    let data = (try? JSONSerialization.data(withJSONObject: permissionsJSON())) ?? Data("{}".utf8)
+    FileHandle.standardOutput.write(data)
+    FileHandle.standardOutput.write(Data("\n".utf8))
+    exit(0)
+}
+
+// `.prohibited`, not `.accessory`: no UI, no windows; it restates what the check-in was told. CGEvent
+// posting, AX reads, NSPasteboard, NSRunningApplication.activate and NSWorkspace.openApplication all
+// keep working from a background-only process.
+_ = NSApplication.shared
+NSApp.setActivationPolicy(.prohibited)
+
+/// LSBackgroundOnly = 1 in the main bundle's Info dictionary as CFBundle holds it in memory (a mutable
+/// dictionary: CFBundle adds its own keys to it). Before anything checks the process in. Unbundled
+/// (build/hormes-hands) it is the empty dictionary CFBundle made for the tool, and the same holds.
+func markBackgroundOnly() {
+    guard let info = CFBundleGetInfoDictionary(CFBundleGetMainBundle()), let dict = (info as AnyObject) as? NSMutableDictionary else { return }
+    dict["LSBackgroundOnly"] = "1"
+}
 
 // hormes-hands: resident macOS "hands" helper for Hormes.
 // Newline-delimited JSON over stdin/stdout. One request per line, one response per request,
@@ -15,6 +59,7 @@ let workerQueue = DispatchQueue(label: "hormes.hands.worker", qos: .userInteract
 func dispatch(op: String, params: Params) throws -> JSONObject {
     switch op {
     case "hello": return opHello()
+    case "owner_approval": return try opOwnerApproval(params)
     case "permissions": return try opPermissions(params)
     case "displays": return opDisplays()
     case "screenshot": return try opScreenshot(params)
@@ -35,26 +80,60 @@ func dispatch(op: String, params: Params) throws -> JSONObject {
     case "focus_app": return try opFocusApp(params)
     case "focused_text": return try opFocusedText()
     case "element_at": return try opElementAt(params)
+    case "find_element": return try opFindElement(params)
+    case "ax_tree": return try opAXTree(params)
+    case "browser_js": return try opBrowserJS(params)
+    case "browser_tabs": return try opBrowserTabs(params)
+    case "browser_navigate": return try opBrowserNavigate(params)
+    case "browser_url": return try opBrowserURL(params)
+    case "user_idle": return opUserIdle()
     case "wait": return try opWait(params)
     default: throw HandsError.badRequest("unknown op '\(op)'")
     }
 }
 
+// The grants a helper process can read for itself. TCC keys every one of them on
+// the responsible app (Hormes.app when the daemon spawned us; the terminal when a
+// shell did), so these answers are the app's when run under it. None of the four
+// reads shows a dialog: AXIsProcessTrusted, CGPreflightScreenCaptureAccess and
+// IOHIDCheckAccess only check, and Full Disk Access has no prompt at all — the
+// probe below opens something only that grant unlocks and looks at errno.
 func permissionsJSON() -> JSONObject {
     return [
         "accessibility": AXIsProcessTrusted(),
         "screenRecording": CGPreflightScreenCaptureAccess(),
+        "inputMonitoring": IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted,
+        "fullDiskAccess": fullDiskAccessGranted(),
     ]
 }
 
-// `hormes-hands --permissions`: print the grants and exit. A fresh process is the
-// only reliable way to read TCC after the user changes it — a running process may
-// keep the answer it got at launch (Screen Recording notoriously does).
-if CommandLine.arguments.contains("--permissions") {
-    let data = (try? JSONSerialization.data(withJSONObject: permissionsJSON())) ?? Data("{}".utf8)
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write(Data("\n".utf8))
-    exit(0)
+// Full Disk Access is the one permission with neither API nor prompt: the only read
+// is to try. The user TCC database and ~/Library/Safari exist on every account and
+// are FDA-only (no folder prompt covers them); opening one for reading succeeds with
+// the grant and fails with EPERM without it. Nothing is read, the descriptor is
+// closed at once, and a denied open never shows a dialog or a Settings row.
+func fullDiskAccessGranted() -> Bool {
+    let home = NSHomeDirectory()
+    let files = [
+        "\(home)/Library/Application Support/com.apple.TCC/TCC.db",
+        "\(home)/Library/Safari/Bookmarks.plist",
+        "\(home)/Library/Safari/CloudTabs.db",
+    ]
+    for path in files {
+        let fd = open(path, O_RDONLY)
+        if fd >= 0 {
+            close(fd)
+            return true
+        }
+    }
+    // A folder listing is the same test for accounts whose files above are missing.
+    for dir in ["\(home)/Library/Safari", "\(home)/Library/Application Support/com.apple.TCC"] {
+        if let handle = opendir(dir) {
+            closedir(handle)
+            return true
+        }
+    }
+    return false
 }
 
 func opHello() -> JSONObject {
@@ -65,13 +144,36 @@ func opHello() -> JSONObject {
     ]
 }
 
+// `prompt: true` asks for one of the two grants a helper process can prompt for from
+// here — `which`: "accessibility" or "screenRecording" (the dialogs name the
+// responsible app) — one dialog per call: two at once and the second is dismissed
+// with the first, so the caller (the engine's prompt queue) asks for the next only
+// once this one lands. `which` omitted or "all" asks for the first of the two still
+// missing, never both. Input Monitoring's prompt belongs to the app
+// (IOHIDRequestAccess from its own process, so the grant lands on the app's global
+// key monitors) and Full Disk Access has none; all four are still *read* by every call.
 func opPermissions(_ params: Params) throws -> JSONObject {
     if try params.bool("prompt") ?? false {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        _ = CGRequestScreenCaptureAccess()
+        let which = try params.string("which") ?? "all"
+        switch which {
+        case "accessibility": promptAccessibility()
+        case "screenRecording": promptScreenRecording()
+        case "all":
+            if !AXIsProcessTrusted() { promptAccessibility() }
+            else if !CGPreflightScreenCaptureAccess() { promptScreenRecording() }
+        default: throw HandsError.badRequest("'which' must be accessibility, screenRecording or all")
+        }
     }
     return permissionsJSON()
+}
+
+func promptAccessibility() {
+    let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    _ = AXIsProcessTrustedWithOptions(options)
+}
+
+func promptScreenRecording() {
+    _ = CGRequestScreenCaptureAccess()
 }
 
 func opWait(_ params: Params) throws -> JSONObject {

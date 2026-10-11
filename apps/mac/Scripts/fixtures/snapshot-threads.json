@@ -1,0 +1,1975 @@
+[
+  {
+    "type": "hello",
+    "version": "2.0.0",
+    "protocol": 4,
+    "pid": 53190,
+    "stateDir": "/Users/user/.hormes"
+  },
+  {
+    "type": "snapshot",
+    "snapshot": {
+      "phase": "acting",
+      "session": {
+        "id": "sess_d92e1a",
+        "startedAt": 1789243200000,
+        "expiresAt": 1789246800000,
+        "usageSeconds": 24,
+        "contextRatio": 0.03
+      },
+      "usageToday": {
+        "seconds": 542,
+        "sessions": 4
+      },
+      "transcript": [
+        {
+          "id": "u_21",
+          "speaker": "user",
+          "text": "tell Ben on Slack I'm late and play Focus on Spotify",
+          "startMs": 3800,
+          "endMs": 7100,
+          "at": 1789243203800,
+          "final": true
+        },
+        {
+          "id": "u_23",
+          "speaker": "hormes",
+          "text": "Slack and Spotify alongside.",
+          "startMs": 9400,
+          "endMs": 10300,
+          "at": 1789243209400,
+          "final": true
+        },
+        {
+          "id": "u_22",
+          "speaker": "user",
+          "text": "yes",
+          "startMs": 15200,
+          "endMs": 15200,
+          "at": 1789243215200,
+          "final": true,
+          "source": "typed"
+        }
+      ],
+      "delegations": [
+        {
+          "id": "dl_61f0",
+          "liveId": "call_Rt2q",
+          "createdAt": 1789243207400,
+          "offsetMs": 7400,
+          "request": "tell Ben on Slack I'm late and play Focus on Spotify",
+          "status": "running",
+          "steps": [
+            {
+              "id": "st_31",
+              "at": 1789243208100,
+              "kind": "thinking",
+              "text": "Two independent apps: one thread each, in this turn."
+            },
+            {
+              "id": "st_32",
+              "at": 1789243208700,
+              "kind": "tool",
+              "tool": {
+                "name": "thread_start",
+                "input": {
+                  "name": "Slack",
+                  "task": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+                  "lane": "screen"
+                },
+                "output": "started Slack (t_9a1c, screen lane)",
+                "ok": true,
+                "ms": 4
+              }
+            },
+            {
+              "id": "st_33",
+              "at": 1789243208800,
+              "kind": "tool",
+              "tool": {
+                "name": "thread_start",
+                "input": {
+                  "name": "Spotify",
+                  "task": "Play the Focus playlist in Spotify by Apple event; never the pointer.",
+                  "lane": "background"
+                },
+                "output": "started Spotify (t_b02d, background lane)",
+                "ok": true,
+                "ms": 3
+              }
+            }
+          ],
+          "timings": {
+            "delegatedAt": 1789243207400,
+            "speechEndAt": 1789243207100,
+            "firstThinkingAt": 1789243208100
+          },
+          "stepCount": 3
+        }
+      ],
+      "agents": [],
+      "connectors": [
+        {
+          "kind": "sessions",
+          "ok": true,
+          "detail": "14 sessions on disk, 0 live"
+        }
+      ],
+      "settings": {
+        "voice": "cedar",
+        "brain": "codex",
+        "brainModel": "",
+        "effort": "medium",
+        "idleSleepMinutes": 10,
+        "autoWake": true,
+        "orbPosition": {
+          "x": 1180,
+          "y": 12
+        },
+        "wake": {
+          "enabled": true,
+          "phrases": [
+            "hormes",
+            "hor mes",
+            "hey hormes"
+          ],
+          "auth": "either"
+        },
+        "reflexes": true,
+        "orbHome": "notch",
+        "ledgerRetentionDays": 0,
+        "shotsRetentionDays": 14,
+        "threads": true,
+        "language": "en",
+        "accent": "american",
+        "memory": true,
+        "observe": true,
+        "typedWakes": false,
+        "threadOverflow": "supersede",
+        "warmThreads": 2
+      },
+      "permissions": {
+        "all": [
+          {
+            "kind": "microphone",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": true,
+            "label": "Microphone",
+            "why": "The voice hears you.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "speechRecognition",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": true,
+            "label": "Speech Recognition",
+            "why": "The wake word is heard on-device.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "screenRecording",
+            "grant": "granted",
+            "ask": "settings",
+            "required": true,
+            "label": "Screen Recording",
+            "why": "The hands see the screen.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "accessibility",
+            "grant": "granted",
+            "ask": "settings",
+            "required": true,
+            "label": "Accessibility",
+            "why": "The hands click and type.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "inputMonitoring",
+            "grant": "unknown",
+            "ask": "settings",
+            "required": false,
+            "label": "Input Monitoring",
+            "why": "Hotkeys while another app is up.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "automation",
+            "grant": "granted",
+            "ask": "perApp",
+            "required": false,
+            "label": "Automation",
+            "why": "Apple events drive other apps.",
+            "detail": "granted: Spotify, Slack, System Events \u00b7 5 not running",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "fullDiskAccess",
+            "grant": "denied",
+            "ask": "settings",
+            "required": false,
+            "label": "Full Disk Access",
+            "why": "Files outside your folders.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "notifications",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Notifications",
+            "why": "A word when something finishes.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "camera",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Camera",
+            "why": "Only when you ask.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "contacts",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Contacts",
+            "why": "Names and addresses on request.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "calendars",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Calendars",
+            "why": "Events on request.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "reminders",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Reminders",
+            "why": "Reminders on request.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "localNetwork",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Local Network",
+            "why": "Devices on your network.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "filesDesktop",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Desktop",
+            "why": "Files on the Desktop.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "filesDocuments",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Documents",
+            "why": "Files in Documents.",
+            "checkedAt": 1789243199000
+          },
+          {
+            "kind": "filesDownloads",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Downloads",
+            "why": "Files in Downloads.",
+            "checkedAt": 1789243199000
+          }
+        ]
+      },
+      "problems": [
+        {
+          "kind": "permission.screenRecording",
+          "text": "Screen Recording not granted: circles arrive without pixels.",
+          "remedy": {
+            "label": "Request",
+            "command": {
+              "type": "request-permission",
+              "which": "screenRecording"
+            }
+          },
+          "since": 1789243188000
+        },
+        {
+          "kind": "permission.fullDiskAccess",
+          "text": "Full Disk Access not granted: files outside Desktop, Documents and Downloads are out of reach.",
+          "remedy": {
+            "label": "Open pane",
+            "command": {
+              "type": "request-permission",
+              "which": "fullDiskAccess"
+            }
+          },
+          "since": 1789243190000
+        },
+        {
+          "kind": "automation.failed",
+          "text": "Nightly backup failed at 23:00. The recipe exited 1.",
+          "remedy": {
+            "label": "Open Console",
+            "command": {
+              "type": "open-console"
+            }
+          },
+          "since": 1789192800000
+        }
+      ],
+      "brainReady": true,
+      "handsReady": true,
+      "setup": {
+        "openaiKey": "ok",
+        "brain": "ok",
+        "brainDetail": "Codex 0.154 \u00b7 private CODEX_HOME \u00b7 model gpt-5.3-codex \u00b7 two warm spares for threads",
+        "brainResolved": "codex",
+        "liveModel": "gpt-live-1",
+        "secrets": {
+          "openai": true,
+          "anthropic": false,
+          "brainApiKey": false
+        },
+        "local": {
+          "reachable": false,
+          "baseUrl": "",
+          "models": [],
+          "ramBytes": 137438953472,
+          "checkedAt": 0
+        },
+        "dataPaths": [
+          {
+            "what": "voice",
+            "where": "cloud",
+            "detail": "OpenAI gpt-live-1: every word heard and said, billed per second of open session"
+          },
+          {
+            "what": "brain",
+            "where": "cloud",
+            "detail": "OpenAI via your ChatGPT login gpt-5.3-codex: screenshots and tool results leave"
+          },
+          {
+            "what": "memory",
+            "where": "cloud",
+            "detail": "text-embedding-3-small + a mini model, so item text and closed conversations leave"
+          },
+          {
+            "what": "web",
+            "where": "cloud",
+            "detail": "the sites you ask for (web_fetch, web_search)"
+          }
+        ]
+      },
+      "marks": [
+        {
+          "id": "mark_7f3a1c",
+          "rect": {
+            "x": 412,
+            "y": 220,
+            "w": 640,
+            "h": 400
+          },
+          "at": 1789242660000,
+          "screenshotPath": "shots/2026-09-13/mark_7f3a1c.png",
+          "consumed": true,
+          "element": {
+            "role": "button",
+            "title": "Send",
+            "app": "Slack"
+          }
+        },
+        {
+          "id": "mark_9b02de",
+          "rect": {
+            "x": 880,
+            "y": 140,
+            "w": 512,
+            "h": 384
+          },
+          "at": 1789243195000,
+          "consumed": false
+        },
+        {
+          "id": "mark_c41e88",
+          "rect": {
+            "x": 120,
+            "y": 60,
+            "w": 1280,
+            "h": 800
+          },
+          "at": 1789243198000,
+          "screenshotPath": "shots/2026-09-13/mark_c41e88.png",
+          "consumed": false,
+          "element": {
+            "role": "window",
+            "title": "Hormes \u2014 Safari",
+            "app": "Safari"
+          },
+          "source": "window"
+        }
+      ],
+      "trash": {
+        "path": "/Users/user/.hormes/trash",
+        "days": 0,
+        "bytes": 0
+      },
+      "audioState": {
+        "running": true,
+        "voiceProcessing": true,
+        "duckLevel": 10,
+        "advancedDucking": true,
+        "agc": true,
+        "bypassed": false,
+        "rung": 2,
+        "wiring": "input-rate",
+        "hears": {
+          "name": "MacBook Pro Microphone",
+          "uid": "BuiltInMicrophoneDevice",
+          "rate": 48000,
+          "channels": 1,
+          "transport": "built-in"
+        },
+        "speaks": {
+          "name": "MacBook Pro Speakers",
+          "uid": "BuiltInSpeakerDevice",
+          "rate": 48000,
+          "channels": 2,
+          "transport": "built-in"
+        },
+        "tapFormat": "24000 Hz \u00d79 Float32",
+        "recording": false,
+        "fallback": false,
+        "guardOn": false,
+        "guardTailMs": 0,
+        "gated": 0,
+        "chunks": 240,
+        "breakthroughs": 0,
+        "sharedWith": [],
+        "inputMuted": false,
+        "aggregatePresent": true,
+        "since": 1789243200400,
+        "playout": {
+          "chunks": 412,
+          "underruns": 0,
+          "underrunMs": 0,
+          "longestUnderrunMs": 0,
+          "wouldBeUnderruns": 4,
+          "resets": 3,
+          "targetMs": 120,
+          "queuedMs": 121,
+          "queuedMinMs": 96,
+          "lateMaxMs": 7,
+          "lateMaxGraphMs": 31,
+          "droppedChunks": 0,
+          "droppedMs": 0
+        },
+        "duck": {
+          "ducks": 2,
+          "gate": 2,
+          "confirmed": 2,
+          "unconfirmed": 0,
+          "held": 0,
+          "refusedWords": 1,
+          "refusedLive": 0,
+          "wordOnsetsSkipped": 3,
+          "duckedMs": 900,
+          "deepMs": 400,
+          "residualP50Dbfs": -61,
+          "residualP99Dbfs": -49,
+          "echoFloorDbfs": -55,
+          "last": {
+            "source": "gate",
+            "confirmed": true,
+            "depthDb": -20,
+            "runDbfs": -31.5,
+            "thresholdDbfs": -38,
+            "releasedAfterMs": 900,
+            "reason": "quiet after gate"
+          }
+        },
+        "output": {
+          "rmsDbfs": -21.8,
+          "peakDbfs": -4.1,
+          "heardRmsDbfs": -22,
+          "audibleMs": 61000,
+          "mixFormat": "48000 Hz \u00d72",
+          "volume": 0.62
+        }
+      },
+      "liveAudio": {
+        "deltas": 640,
+        "deltaMsP50": 40,
+        "deltaMsMax": 120,
+        "arrivalP99Ms": 31,
+        "arrivalMaxMs": 182,
+        "aheadMs": 0,
+        "gatedFrames": 0,
+        "loopDelayMaxMs": 12,
+        "formatRate": 24000
+      },
+      "hiddenAgents": [],
+      "threads": [
+        {
+          "id": "main",
+          "name": "Hormes",
+          "lane": "voice",
+          "status": "thinking",
+          "task": "",
+          "apps": [
+            "Slack"
+          ],
+          "app": "Slack",
+          "startedAt": 1789243200000,
+          "updatedAt": 1789243209200,
+          "turns": 1,
+          "steps": 3,
+          "waits": 0,
+          "budget": {
+            "steps": 0,
+            "seconds": 0
+          },
+          "currentDelegationId": "dl_61f0",
+          "canSay": true,
+          "canStop": true
+        },
+        {
+          "id": "t_9a1c",
+          "name": "Slack",
+          "lane": "screen",
+          "status": "waiting-user",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "liveId": "call_Rt2q",
+          "task": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+          "detail": "click_element Send \u2192 asks",
+          "apps": [
+            "Slack"
+          ],
+          "app": "Slack",
+          "at": {
+            "x": 1180.5,
+            "y": 742
+          },
+          "startedAt": 1789243208790,
+          "updatedAt": 1789243214400,
+          "turns": 1,
+          "steps": 4,
+          "waits": 1,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "question": "About to press Send in Slack to Ben. Yes?",
+          "currentDelegationId": "dl_t9a1c_1",
+          "lastScreenshotPath": "shots/2026-09-13/1789243213900-t_9a1c.png",
+          "canSay": true,
+          "canStop": true
+        },
+        {
+          "id": "t_b02d",
+          "name": "Spotify",
+          "lane": "clipboard",
+          "status": "handing-off",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "task": "Play the Focus playlist in Spotify by Apple event; never the pointer.",
+          "detail": "a lane and a status from a newer daemon: this app shows a live, thinking, background thread",
+          "apps": [
+            "Spotify"
+          ],
+          "app": "Spotify",
+          "startedAt": 1789243208800,
+          "updatedAt": 1789243211300,
+          "turns": 1,
+          "steps": 2,
+          "waits": 0,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "currentDelegationId": "dl_tb02d_1",
+          "canSay": true,
+          "canStop": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 1,
+      "at": 1789243208790,
+      "threadId": "t_9a1c",
+      "kind": "started",
+      "thread": {
+        "id": "t_9a1c",
+        "name": "Slack",
+        "lane": "screen",
+        "status": "starting",
+        "parentId": "main",
+        "parentDelegationId": "dl_61f0",
+        "liveId": "call_Rt2q",
+        "task": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+        "apps": [
+          "Slack"
+        ],
+        "app": "Slack",
+        "startedAt": 1789243208790,
+        "updatedAt": 1789243208790,
+        "turns": 1,
+        "steps": 0,
+        "waits": 0,
+        "budget": {
+          "steps": 25,
+          "seconds": 180
+        },
+        "currentDelegationId": "dl_t9a1c_1",
+        "canSay": true,
+        "canStop": true
+      }
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 2,
+      "at": 1789243208791,
+      "threadId": "t_9a1c",
+      "kind": "turn",
+      "delegationId": "dl_t9a1c_1",
+      "request": "Tell Ben on Slack that User is running late, there in 15."
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 3,
+      "at": 1789243209100,
+      "threadId": "t_9a1c",
+      "kind": "status",
+      "status": "thinking"
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 4,
+      "at": 1789243209980,
+      "threadId": "t_9a1c",
+      "kind": "step",
+      "steps": 1,
+      "tool": "focus_app",
+      "ok": true
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 5,
+      "at": 1789243209981,
+      "threadId": "t_9a1c",
+      "kind": "at",
+      "x": 1180.5,
+      "y": 742,
+      "app": "Slack"
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 6,
+      "at": 1789243214400,
+      "threadId": "t_9a1c",
+      "kind": "question",
+      "question": "About to press Send in Slack to Ben. Yes?"
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 7,
+      "at": 1789243214401,
+      "threadId": "t_9a1c",
+      "kind": "status",
+      "status": "waiting-user",
+      "detail": "click_element Send \u2192 asks"
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 8,
+      "at": 1789243213200,
+      "threadId": "t_b02d",
+      "kind": "said",
+      "text": "Spotify: playing Focus."
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 9,
+      "at": 1789243213300,
+      "threadId": "t_b02d",
+      "kind": "status",
+      "status": "handing-off",
+      "detail": "a status from a newer daemon \u2192 .thinking"
+    }
+  },
+  {
+    "type": "thread.event",
+    "event": {
+      "seq": 10,
+      "at": 1789243213400,
+      "threadId": "t_b02d",
+      "kind": "ended",
+      "status": "done",
+      "summary": "playing Focus"
+    }
+  },
+  {
+    "type": "thread.transcript",
+    "mode": "replace",
+    "transcript": {
+      "threadId": "t_9a1c",
+      "total": 9,
+      "complete": false,
+      "live": true,
+      "cursor": {
+        "startSeq": 3,
+        "endSeq": 9
+      },
+      "readMs": 2.4,
+      "entries": [
+        {
+          "kind": "system",
+          "seq": 3,
+          "at": 1789243208790,
+          "symbol": "circle.fill",
+          "text": "started on the screen lane",
+          "mono": "t_9a1c",
+          "trailing": "0:00"
+        },
+        {
+          "kind": "utterance",
+          "seq": 4,
+          "item": {
+            "id": "u_23",
+            "speaker": "hormes",
+            "text": "Slack and Spotify alongside.",
+            "startMs": 9400,
+            "endMs": 10300,
+            "at": 1789243209400,
+            "final": true
+          }
+        },
+        {
+          "kind": "delegation",
+          "seq": 5,
+          "delegation": {
+            "id": "dl_t9a1c_1",
+            "liveId": "call_Rt2q",
+            "createdAt": 1789243208790,
+            "offsetMs": 8790,
+            "request": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+            "status": "awaiting-confirmation",
+            "steps": [
+              {
+                "id": "st_41",
+                "at": 1789243209600,
+                "kind": "tool",
+                "tool": {
+                  "name": "focus_app",
+                  "input": {
+                    "app": "Slack"
+                  },
+                  "output": "Slack is frontmost \u00b7 now: Slack, Ben (DM), message field focused",
+                  "ok": true,
+                  "ms": 380
+                }
+              },
+              {
+                "id": "st_42",
+                "at": 1789243211900,
+                "kind": "tool",
+                "tool": {
+                  "name": "type",
+                  "input": {
+                    "text": "Running late, there in 15."
+                  },
+                  "output": "typed 26 characters \u00b7 now: Slack, message field holds the text",
+                  "ok": true,
+                  "ms": 1420
+                }
+              },
+              {
+                "id": "st_43",
+                "at": 1789243213900,
+                "kind": "screenshot",
+                "screenshotPath": "shots/2026-09-13/1789243213900-t_9a1c.png"
+              },
+              {
+                "id": "st_44",
+                "at": 1789243214400,
+                "kind": "confirm",
+                "text": "About to press Send in Slack to Ben. Yes?"
+              }
+            ],
+            "timings": {
+              "delegatedAt": 1789243208790,
+              "firstThinkingAt": 1789243209100,
+              "firstActionAt": 1789243209980
+            },
+            "threadId": "t_9a1c",
+            "stepCount": 4
+          }
+        },
+        {
+          "kind": "step",
+          "seq": 6,
+          "delegationId": "dl_t9a1c_1",
+          "step": {
+            "id": "st_44",
+            "at": 1789243214400,
+            "kind": "confirm",
+            "text": "About to press Send in Slack to Ben. Yes?"
+          }
+        },
+        {
+          "kind": "status",
+          "seq": 7,
+          "delegationId": "dl_t9a1c_1",
+          "status": "awaiting-confirmation",
+          "summary": "asks before Send",
+          "timings": {
+            "delegatedAt": 1789243208790,
+            "firstThinkingAt": 1789243209100,
+            "firstActionAt": 1789243209980
+          }
+        },
+        {
+          "kind": "utterance",
+          "seq": 8,
+          "item": {
+            "id": "u_22",
+            "speaker": "user",
+            "text": "yes",
+            "startMs": 15200,
+            "endMs": 15200,
+            "at": 1789243215200,
+            "final": true,
+            "source": "typed"
+          }
+        },
+        {
+          "kind": "system",
+          "seq": 9,
+          "at": 1789243215200,
+          "symbol": "keyboard.fill",
+          "text": "User allowed \u00b7 typed"
+        }
+      ]
+    }
+  },
+  {
+    "type": "thread.transcript",
+    "mode": "append",
+    "transcript": {
+      "threadId": "t_9a1c",
+      "total": 10,
+      "complete": false,
+      "live": true,
+      "entries": [
+        {
+          "kind": "step",
+          "seq": 10,
+          "delegationId": "dl_t9a1c_1",
+          "step": {
+            "id": "st_45",
+            "at": 1789243215600,
+            "kind": "tool",
+            "tool": {
+              "name": "click_element",
+              "input": {
+                "label": "Send"
+              },
+              "output": "clicked Send \u00b7 now: Slack, Ben (DM), message sent",
+              "ok": true,
+              "ms": 96
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "thread.transcript",
+    "mode": "prepend",
+    "transcript": {
+      "threadId": "t_9a1c",
+      "total": 10,
+      "complete": true,
+      "live": true,
+      "cursor": {
+        "startSeq": 1,
+        "endSeq": 2
+      },
+      "readMs": 0.7,
+      "entries": [
+        {
+          "kind": "utterance",
+          "seq": 1,
+          "item": {
+            "id": "u_21",
+            "speaker": "user",
+            "text": "tell Ben on Slack I'm late and play Focus on Spotify",
+            "startMs": 3800,
+            "endMs": 7100,
+            "at": 1789243203800,
+            "final": true
+          }
+        },
+        {
+          "kind": "delegation",
+          "seq": 2,
+          "delegation": {
+            "id": "dl_61f0",
+            "liveId": "call_Rt2q",
+            "createdAt": 1789243207400,
+            "offsetMs": 7400,
+            "request": "tell Ben on Slack I'm late and play Focus on Spotify",
+            "status": "running",
+            "steps": [
+              {
+                "id": "st_31",
+                "at": 1789243208100,
+                "kind": "thinking",
+                "text": "Two independent apps: one thread each, in this turn."
+              },
+              {
+                "id": "st_32",
+                "at": 1789243208700,
+                "kind": "tool",
+                "tool": {
+                  "name": "thread_start",
+                  "input": {
+                    "name": "Slack",
+                    "task": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+                    "lane": "screen"
+                  },
+                  "output": "started Slack (t_9a1c, screen lane)",
+                  "ok": true,
+                  "ms": 4
+                }
+              },
+              {
+                "id": "st_33",
+                "at": 1789243208800,
+                "kind": "tool",
+                "tool": {
+                  "name": "thread_start",
+                  "input": {
+                    "name": "Spotify",
+                    "task": "Play the Focus playlist in Spotify by Apple event; never the pointer.",
+                    "lane": "background"
+                  },
+                  "output": "started Spotify (t_b02d, background lane)",
+                  "ok": true,
+                  "ms": 3
+                }
+              }
+            ],
+            "timings": {
+              "delegatedAt": 1789243207400,
+              "speechEndAt": 1789243207100,
+              "firstThinkingAt": 1789243208100
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "type": "overlay",
+    "command": {
+      "cmd": "click-pulse",
+      "x": 1180.5,
+      "y": 742
+    }
+  },
+  {
+    "type": "overlay",
+    "command": {
+      "cmd": "click-pulse",
+      "x": 640,
+      "y": 400
+    }
+  },
+  {
+    "type": "overlay",
+    "command": {
+      "cmd": "stroke",
+      "points": [
+        {
+          "x": 100,
+          "y": 100
+        },
+        {
+          "x": 200,
+          "y": 140
+        }
+      ],
+      "label": "here",
+      "tone": "accent"
+    }
+  },
+  {
+    "type": "ledger.rows",
+    "id": "r7",
+    "rows": [
+      {
+        "at": 1789243200000,
+        "type": "session.started",
+        "sessionId": "sess_d92e1a",
+        "voice": "cedar",
+        "language": "en",
+        "accent": "american"
+      },
+      {
+        "at": 1789243200100,
+        "type": "thread.ended",
+        "threadId": "t_c3e7",
+        "status": "failed",
+        "summary": "the daemon restarted",
+        "steps": 5,
+        "seconds": 900.1
+      },
+      {
+        "at": 1789243203800,
+        "type": "heard",
+        "item": {
+          "id": "u_21",
+          "speaker": "user",
+          "text": "tell Ben on Slack I'm late and play Focus on Spotify",
+          "startMs": 3800,
+          "endMs": 7100,
+          "at": 1789243203800,
+          "final": true
+        }
+      },
+      {
+        "at": 1789243207400,
+        "type": "delegation.created",
+        "delegation": {
+          "id": "dl_61f0",
+          "liveId": "call_Rt2q",
+          "createdAt": 1789243207400,
+          "offsetMs": 7400,
+          "request": "tell Ben on Slack I'm late and play Focus on Spotify",
+          "status": "running",
+          "steps": [],
+          "timings": {
+            "delegatedAt": 1789243207400,
+            "speechEndAt": 1789243207100,
+            "firstThinkingAt": 1789243208100
+          }
+        }
+      },
+      {
+        "at": 1789243208790,
+        "type": "thread.started",
+        "thread": {
+          "id": "t_9a1c",
+          "name": "Slack",
+          "lane": "screen",
+          "status": "starting",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "liveId": "call_Rt2q",
+          "task": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+          "apps": [
+            "Slack"
+          ],
+          "app": "Slack",
+          "startedAt": 1789243208790,
+          "updatedAt": 1789243208790,
+          "turns": 1,
+          "steps": 0,
+          "waits": 0,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "currentDelegationId": "dl_t9a1c_1",
+          "canSay": true,
+          "canStop": true
+        }
+      },
+      {
+        "at": 1789243208790,
+        "type": "delegation.created",
+        "delegation": {
+          "id": "dl_t9a1c_1",
+          "liveId": "call_Rt2q",
+          "createdAt": 1789243208790,
+          "offsetMs": 8790,
+          "request": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+          "status": "running",
+          "steps": [],
+          "timings": {
+            "delegatedAt": 1789243208790,
+            "firstThinkingAt": 1789243209100,
+            "firstActionAt": 1789243209980
+          },
+          "threadId": "t_9a1c",
+          "stepCount": 4
+        }
+      },
+      {
+        "at": 1789243208800,
+        "type": "thread.started",
+        "thread": {
+          "id": "t_b02d",
+          "name": "Spotify",
+          "lane": "clipboard",
+          "status": "starting",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "task": "Play the Focus playlist in Spotify by Apple event; never the pointer.",
+          "apps": [
+            "Spotify"
+          ],
+          "app": "Spotify",
+          "startedAt": 1789243208800,
+          "updatedAt": 1789243208800,
+          "turns": 1,
+          "steps": 0,
+          "waits": 0,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "currentDelegationId": "dl_tb02d_1",
+          "canSay": true,
+          "canStop": true
+        }
+      },
+      {
+        "at": 1789243209400,
+        "type": "said",
+        "item": {
+          "id": "u_23",
+          "speaker": "hormes",
+          "text": "Slack and Spotify alongside.",
+          "startMs": 9400,
+          "endMs": 10300,
+          "at": 1789243209400,
+          "final": true
+        }
+      },
+      {
+        "at": 1789243209980,
+        "type": "delegation.step",
+        "delegationId": "dl_t9a1c_1",
+        "step": {
+          "id": "st_41",
+          "at": 1789243209600,
+          "kind": "tool",
+          "tool": {
+            "name": "focus_app",
+            "input": {
+              "app": "Slack"
+            },
+            "output": "Slack is frontmost \u00b7 now: Slack, Ben (DM), message field focused",
+            "ok": true,
+            "ms": 380
+          }
+        }
+      },
+      {
+        "at": 1789243213200,
+        "type": "thread.said",
+        "threadId": "t_b02d",
+        "text": "Spotify: playing Focus."
+      },
+      {
+        "at": 1789243213300,
+        "type": "thread.status",
+        "threadId": "t_b02d",
+        "status": "handing-off",
+        "detail": "a status from a newer daemon"
+      },
+      {
+        "at": 1789243213400,
+        "type": "thread.ended",
+        "threadId": "t_b02d",
+        "status": "done",
+        "summary": "playing Focus",
+        "steps": 2,
+        "seconds": 4.6
+      },
+      {
+        "at": 1789243214401,
+        "type": "thread.status",
+        "threadId": "t_9a1c",
+        "status": "waiting-user",
+        "detail": "click_element Send \u2192 asks"
+      },
+      {
+        "at": 1789243215200,
+        "type": "heard",
+        "item": {
+          "id": "u_22",
+          "speaker": "user",
+          "text": "yes",
+          "startMs": 15200,
+          "endMs": 15200,
+          "at": 1789243215200,
+          "final": true,
+          "source": "typed"
+        }
+      },
+      {
+        "at": 1789243215700,
+        "type": "delegation.finished",
+        "delegationId": "dl_t9a1c_1",
+        "status": "done",
+        "timings": {
+          "delegatedAt": 1789243208790,
+          "firstThinkingAt": 1789243209100,
+          "firstActionAt": 1789243209980,
+          "doneAt": 1789243215700
+        },
+        "summary": "sent"
+      },
+      {
+        "at": 1789243215700,
+        "type": "thread.ended",
+        "threadId": "t_9a1c",
+        "status": "done",
+        "summary": "sent to Ben",
+        "steps": 5,
+        "seconds": 6.9
+      },
+      {
+        "at": 1789243259800,
+        "type": "heard",
+        "item": {
+          "id": "u_24",
+          "speaker": "user",
+          "text": "go to sleep",
+          "startMs": 59800,
+          "endMs": 60600,
+          "at": 1789243259800,
+          "final": true
+        }
+      },
+      {
+        "at": 1789243260900,
+        "type": "sleep",
+        "cause": "said",
+        "phrase": "go to sleep",
+        "sessionId": "sess_d92e1a",
+        "farewell": true
+      },
+      {
+        "at": 1789243261000,
+        "type": "thread.status",
+        "threadId": "main",
+        "status": "idle"
+      },
+      {
+        "at": 1789243260000,
+        "type": "session.usage",
+        "sessionId": "sess_d92e1a",
+        "usageSeconds": 60
+      },
+      {
+        "at": 1789243262600,
+        "type": "audio.playout",
+        "sessionId": "sess_d92e1a",
+        "playout": {
+          "chunks": 610,
+          "underruns": 1,
+          "underrunMs": 40,
+          "longestUnderrunMs": 40,
+          "wouldBeUnderruns": 6,
+          "resets": 4,
+          "targetMs": 120,
+          "queuedMs": 0,
+          "lateMaxMs": 9,
+          "lateMaxGraphMs": 42,
+          "droppedChunks": 0,
+          "droppedMs": 0
+        },
+        "duck": {
+          "ducks": 3,
+          "gate": 3,
+          "confirmed": 2,
+          "unconfirmed": 1,
+          "held": 0,
+          "refusedWords": 1,
+          "wordOnsetsSkipped": 3,
+          "duckedMs": 1500,
+          "deepMs": 600,
+          "residualP50Dbfs": -60,
+          "residualP99Dbfs": -48,
+          "echoFloorDbfs": -55
+        },
+        "output": {
+          "rmsDbfs": -22.1,
+          "peakDbfs": -3.9,
+          "heardRmsDbfs": -22.4,
+          "audibleMs": 88000,
+          "mixFormat": "48000 Hz \u00d72",
+          "volume": 0.62
+        },
+        "liveAudio": {
+          "deltas": 980,
+          "deltaMsP50": 40,
+          "deltaMsMax": 160,
+          "arrivalP99Ms": 34,
+          "arrivalMaxMs": 210,
+          "aheadMs": 0,
+          "gatedFrames": 12,
+          "loopDelayMaxMs": 14,
+          "formatRate": 24000
+        }
+      },
+      {
+        "at": 1789243262700,
+        "type": "session.closed",
+        "sessionId": "sess_d92e1a",
+        "reason": "sleep:said",
+        "usageSeconds": 61
+      },
+      {
+        "at": 1789243262750,
+        "type": "delegation.step",
+        "delegationId": "dl_61f0",
+        "step": {
+          "id": "st_34",
+          "at": 1789243262750,
+          "kind": "note",
+          "text": "Spotify: playing Focus.",
+          "thread": "Spotify"
+        }
+      },
+      {
+        "at": 1789243300000,
+        "type": "session.started",
+        "sessionId": "sess_e04b7c",
+        "voice": "cedar",
+        "language": "en",
+        "accent": "american"
+      },
+      {
+        "at": 1789243360000,
+        "type": "session.usage",
+        "sessionId": "sess_e04b7c",
+        "usageSeconds": 60
+      },
+      {
+        "at": 1789243420000,
+        "type": "session.usage",
+        "sessionId": "sess_e04b7c",
+        "usageSeconds": 120
+      },
+      {
+        "at": 1789243447300,
+        "type": "heard",
+        "item": {
+          "id": "u_41",
+          "speaker": "user",
+          "text": "what's next on my calendar",
+          "startMs": 146200,
+          "endMs": 147300,
+          "at": 1789243447300,
+          "final": true
+        }
+      },
+      {
+        "at": 1789243447300,
+        "type": "session.closed",
+        "sessionId": "sess_e04b7c",
+        "reason": "lost",
+        "usageSeconds": 120
+      },
+      {
+        "at": 1789243500000,
+        "type": "conversation.renamed",
+        "chainId": "sess_e04b7c",
+        "name": "Calendar check",
+        "carried": true,
+        "decidedAt": 1789157000000
+      },
+      {
+        "at": 1789243500000,
+        "type": "now.cleared",
+        "sessionId": "sess_e04b7c",
+        "carried": true,
+        "decidedAt": 1789157100000
+      },
+      {
+        "at": 1789243500000,
+        "type": "agent.hidden",
+        "agentId": "codex:019a2c",
+        "hidden": true,
+        "carried": true,
+        "decidedAt": 1789157200000
+      },
+      {
+        "at": 1789243500000,
+        "type": "ledger.moved",
+        "day": "2026-09-08",
+        "what": "ledger",
+        "to": "trash",
+        "path": "/Users/user/.hormes/trash/ledger/2026-09-08.jsonl",
+        "by": "user",
+        "lineage": {
+          "sess_e04b7c": [
+            "sess_a01f3d"
+          ]
+        }
+      },
+      {
+        "at": 1789243262800,
+        "type": "worker",
+        "worker": {
+          "id": "w_old",
+          "name": "Spotify",
+          "delegationId": "dlg_old",
+          "task": "play the playlist Focus \u2014 a row as day files before 2026-09-13 hold it",
+          "lane": "background",
+          "status": "working",
+          "startedAt": 1789243262500,
+          "steps": 1
+        }
+      },
+      {
+        "at": 1789243262900,
+        "type": "delegation.step",
+        "delegationId": "dlg_old",
+        "step": {
+          "id": "s_old",
+          "at": 1789243262900,
+          "kind": "note",
+          "text": "playing Focus \u2014 a step as day files before 2026-09-13 hold it",
+          "worker": "Spotify"
+        }
+      },
+      {
+        "at": 1789243263000,
+        "type": "session.started",
+        "sessionId": "live_old",
+        "voice": "cedar"
+      }
+    ]
+  },
+  {
+    "type": "snapshot",
+    "snapshot": {
+      "phase": "asleep",
+      "session": {
+        "id": "sess_d92e1a",
+        "startedAt": 1789243200000,
+        "expiresAt": 1789246800000,
+        "usageSeconds": 24,
+        "contextRatio": 0.03
+      },
+      "usageToday": {
+        "seconds": 603,
+        "sessions": 4
+      },
+      "transcript": [],
+      "delegations": [],
+      "agents": [],
+      "connectors": [
+        {
+          "kind": "sessions",
+          "ok": true,
+          "detail": "14 sessions on disk, 0 live"
+        }
+      ],
+      "settings": {
+        "voice": "cedar",
+        "brain": "codex",
+        "brainModel": "",
+        "effort": "medium",
+        "idleSleepMinutes": 10,
+        "autoWake": true,
+        "orbPosition": {
+          "x": 1180,
+          "y": 12
+        },
+        "wake": {
+          "enabled": true,
+          "phrases": [
+            "hormes",
+            "hor mes",
+            "hey hormes"
+          ],
+          "auth": "either"
+        },
+        "reflexes": true,
+        "orbHome": "notch",
+        "ledgerRetentionDays": 0,
+        "shotsRetentionDays": 14,
+        "threads": true,
+        "language": "en",
+        "accent": "american",
+        "memory": true,
+        "observe": true,
+        "typedWakes": false,
+        "threadOverflow": "supersede",
+        "warmThreads": 2
+      },
+      "permissions": {
+        "all": [
+          {
+            "kind": "microphone",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": true,
+            "label": "Microphone",
+            "why": "The voice hears you.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "speechRecognition",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": true,
+            "label": "Speech Recognition",
+            "why": "The wake word is heard on-device.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "screenRecording",
+            "grant": "granted",
+            "ask": "settings",
+            "required": true,
+            "label": "Screen Recording",
+            "why": "The hands see the screen.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "accessibility",
+            "grant": "granted",
+            "ask": "settings",
+            "required": true,
+            "label": "Accessibility",
+            "why": "The hands click and type.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "inputMonitoring",
+            "grant": "unknown",
+            "ask": "settings",
+            "required": false,
+            "label": "Input Monitoring",
+            "why": "Hotkeys while another app is up.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "automation",
+            "grant": "granted",
+            "ask": "perApp",
+            "required": false,
+            "label": "Automation",
+            "why": "Apple events drive other apps.",
+            "detail": "granted: Spotify, Slack, System Events \u00b7 5 not running",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "fullDiskAccess",
+            "grant": "denied",
+            "ask": "settings",
+            "required": false,
+            "label": "Full Disk Access",
+            "why": "Files outside your folders.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "notifications",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Notifications",
+            "why": "A word when something finishes.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "camera",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Camera",
+            "why": "Only when you ask.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "contacts",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Contacts",
+            "why": "Names and addresses on request.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "calendars",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Calendars",
+            "why": "Events on request.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "reminders",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Reminders",
+            "why": "Reminders on request.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "localNetwork",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Local Network",
+            "why": "Devices on your network.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "filesDesktop",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Desktop",
+            "why": "Files on the Desktop.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "filesDocuments",
+            "grant": "unknown",
+            "ask": "prompt",
+            "required": false,
+            "label": "Documents",
+            "why": "Files in Documents.",
+            "checkedAt": 1789243262000
+          },
+          {
+            "kind": "filesDownloads",
+            "grant": "granted",
+            "ask": "prompt",
+            "required": false,
+            "label": "Downloads",
+            "why": "Files in Downloads.",
+            "checkedAt": 1789243262000
+          }
+        ]
+      },
+      "problems": [
+        {
+          "kind": "brain.local",
+          "text": "Nothing on Ollama 0.34.0 can call tools; pull a model with the tools badge. The brain's work goes to OpenAI until then; memory stays local.",
+          "remedy": {
+            "label": "Retry",
+            "command": {
+              "type": "problem.retry",
+              "kind": "brain.local"
+            },
+            "copy": "ollama pull qwen3.5:27b"
+          },
+          "since": 1789243195000
+        },
+        {
+          "kind": "app.version",
+          "text": "The app and the daemon are from different builds. Restart the daemon. If this stays, run pnpm build:mac.",
+          "remedy": {
+            "label": "Restart daemon",
+            "command": {
+              "type": "daemon.restart"
+            },
+            "copy": "pnpm build:mac"
+          },
+          "since": 1789243262000
+        }
+      ],
+      "brainReady": true,
+      "handsReady": true,
+      "setup": {
+        "openaiKey": "ok",
+        "brain": "ok",
+        "brainDetail": "Codex 0.154 \u00b7 private CODEX_HOME \u00b7 model gpt-5.3-codex \u00b7 two warm spares for threads",
+        "brainResolved": "codex",
+        "liveModel": "gpt-live-1",
+        "secrets": {
+          "openai": true,
+          "anthropic": false,
+          "brainApiKey": false
+        },
+        "local": {
+          "reachable": false,
+          "baseUrl": "",
+          "models": [],
+          "ramBytes": 137438953472,
+          "checkedAt": 0
+        },
+        "dataPaths": [
+          {
+            "what": "voice",
+            "where": "cloud",
+            "detail": "OpenAI gpt-live-1: every word heard and said, billed per second of open session"
+          },
+          {
+            "what": "brain",
+            "where": "cloud",
+            "detail": "OpenAI via your ChatGPT login gpt-5.3-codex: screenshots and tool results leave"
+          },
+          {
+            "what": "memory",
+            "where": "cloud",
+            "detail": "text-embedding-3-small + a mini model, so item text and closed conversations leave"
+          },
+          {
+            "what": "web",
+            "where": "cloud",
+            "detail": "the sites you ask for (web_fetch, web_search)"
+          }
+        ]
+      },
+      "marks": [],
+      "trash": {
+        "path": "/Users/user/.hormes/trash",
+        "days": 0,
+        "bytes": 0
+      },
+      "hiddenAgents": [],
+      "threads": [
+        {
+          "id": "main",
+          "name": "Hormes",
+          "lane": "voice",
+          "status": "idle",
+          "task": "",
+          "apps": [],
+          "startedAt": 1789243200000,
+          "updatedAt": 1789243261000,
+          "turns": 1,
+          "steps": 3,
+          "waits": 0,
+          "budget": {
+            "steps": 0,
+            "seconds": 0
+          },
+          "canSay": false,
+          "canStop": true
+        },
+        {
+          "id": "t_9a1c",
+          "name": "Slack",
+          "lane": "screen",
+          "status": "done",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "liveId": "call_Rt2q",
+          "task": "Tell Ben on Slack that User is running late, there in 15; press Send only after asking.",
+          "detail": "sent to Ben",
+          "apps": [
+            "Slack"
+          ],
+          "app": "Slack",
+          "startedAt": 1789243208790,
+          "updatedAt": 1789243215700,
+          "turns": 1,
+          "steps": 5,
+          "waits": 1,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "lastScreenshotPath": "shots/2026-09-13/1789243213900-t_9a1c.png",
+          "canSay": false,
+          "canStop": false,
+          "doneAt": 1789243215700
+        },
+        {
+          "id": "t_b02d",
+          "name": "Spotify",
+          "lane": "clipboard",
+          "status": "done",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "task": "Play the Focus playlist in Spotify by Apple event; never the pointer.",
+          "detail": "playing Focus",
+          "apps": [
+            "Spotify"
+          ],
+          "app": "Spotify",
+          "startedAt": 1789243208800,
+          "updatedAt": 1789243213400,
+          "turns": 1,
+          "steps": 2,
+          "waits": 0,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "canSay": false,
+          "canStop": false,
+          "doneAt": 1789243213400
+        },
+        {
+          "id": "t_c3e7",
+          "name": "Calendar",
+          "lane": "screen",
+          "status": "failed",
+          "parentId": "main",
+          "parentDelegationId": "dl_61f0",
+          "task": "Read the rest of today's events in Calendar and report them in one line.",
+          "detail": "the daemon restarted",
+          "apps": [
+            "Calendar"
+          ],
+          "app": "Calendar",
+          "startedAt": 1789242300000,
+          "updatedAt": 1789243200100,
+          "doneAt": 1789243200100,
+          "turns": 1,
+          "steps": 5,
+          "waits": 1,
+          "budget": {
+            "steps": 25,
+            "seconds": 180
+          },
+          "canSay": false,
+          "canStop": false
+        }
+      ]
+    }
+  },
+  {
+    "type": "automation.event",
+    "event": {
+      "seq": 7,
+      "at": 1789243320000,
+      "id": "auto_6d1f0a",
+      "kind": "fired",
+      "actions": [
+        "open"
+      ],
+      "line": "notes \u00b7 opened Notes",
+      "ok": true,
+      "presses": [
+        {
+          "kind": "snooze",
+          "minutes": 10
+        },
+        {
+          "kind": "done"
+        }
+      ],
+      "ring": false
+    }
+  },
+  {
+    "type": "ledger.days",
+    "id": "q_days",
+    "days": [
+      "2026-09-12",
+      "2026-09-11",
+      "2026-09-10"
+    ],
+    "totals": [
+      {
+        "day": "2026-09-12",
+        "sessions": 5,
+        "billedSeconds": 723
+      },
+      {
+        "day": "2026-09-11",
+        "sessions": 2,
+        "billedSeconds": 181
+      },
+      {
+        "day": "2026-09-10",
+        "sessions": 0,
+        "billedSeconds": 0
+      }
+    ]
+  },
+  {
+    "type": "ledger.hits",
+    "id": "q_search",
+    "hits": [
+      {
+        "sessionId": "sess_e04b7c",
+        "chainId": "sess_e04b7c",
+        "state": "active",
+        "at": 1789243447300,
+        "kind": "heard",
+        "text": "what's next on my calendar"
+      }
+    ],
+    "older": "2026-09-11"
+  },
+  {
+    "type": "overlay",
+    "command": {
+      "cmd": "point",
+      "x": 12,
+      "y": -40,
+      "label": "here",
+      "ttlMs": 500
+    }
+  },
+  {
+    "type": "overlay",
+    "command": {
+      "cmd": "highlight",
+      "rect": {
+        "x": 12,
+        "y": -40,
+        "w": 80,
+        "h": 20
+      }
+    }
+  },
+  {
+    "type": "overlay",
+    "command": {
+      "cmd": "path",
+      "from": {
+        "x": 12,
+        "y": -40
+      },
+      "to": {
+        "x": 90,
+        "y": -20
+      },
+      "ttlMs": 1000
+    }
+  }
+]

@@ -2,7 +2,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { LineSplitter, logger } from "@hormes/core";
-import type { Rect } from "@hormes/protocol";
+import { SECRET_KEYS, type Rect } from "@hormes/protocol";
 
 /**
  * Client for the resident Swift helper (packages/hands/native).
@@ -16,9 +16,67 @@ import type { Rect } from "@hormes/protocol";
 
 const log = logger("hands.native");
 
+/**
+ * The helper's codes plus the client's own (`unavailable`, `timeout`, `cancelled`).
+ * `busy` and `focus_moved` are the helper's two refusals on behalf of User's hands:
+ * he used the keyboard or mouse within the last 1.5 s, or the app in front is not the
+ * one the action was judged against. Both mean nothing was posted.
+ */
 export interface NativeError {
-  readonly code: "bad_request" | "permission_denied" | "capture_failed" | "not_found" | "internal" | "unavailable" | "timeout";
+  readonly code: "bad_request" | "permission_denied" | "capture_failed" | "not_found" | "internal" | "unavailable" | "timeout" | "cancelled" | "busy" | "focus_moved";
   readonly message: string;
+}
+
+/**
+ * The `type` op's cancel reasons: the client's stop (SIGURG), User's own key, click or
+ * scroll after the type began (`busy`), or the place the keystrokes land moving to another
+ * app or window, or out of text entry (`focus_moved`). Mirrors HandsWin.swift TypeCancelReason.
+ */
+export type TypeCancelReason = "stop" | "busy" | "focus_moved";
+
+/**
+ * `user_idle`: milliseconds since the session's last key press, click, scroll and pointer
+ * move, and since the last one of those (moves excluded) that THIS helper did not post —
+ * User's own input, as far as the helper can tell. A huge number when there was none.
+ */
+export interface UserIdle {
+  readonly keyMs: number;
+  readonly clickMs: number;
+  readonly scrollMs: number;
+  readonly moveMs: number;
+  readonly foreignMs: number;
+}
+
+/** What `user_idle` reports when the session has never seen that kind of event (JSON has no Infinity). */
+export const USER_IDLE_NONE_MS = 1e12;
+
+/** The first words of every `busy` message with the user's name in front (release F1): "<Name> used the keyboard/mouse". */
+export function handsBusyPrefix(userName = "User"): string {
+  return `${userName} used the keyboard/mouse`;
+}
+/** The prefix with the default name; runners spot the refusal with `isHandsBusyMessage`, whatever the name. */
+export const HANDS_BUSY_PREFIX = handsBusyPrefix();
+/** The helper knows no name: its `busy` message opens with this subject, and the client puts the user's name there. */
+export const HELPER_BUSY_SUBJECT = "the user";
+const HELPER_BUSY_HEAD = /^(?:the user|User) used the keyboard\/mouse\b/;
+/** A `busy` refusal as a ToolResult message, with or without the "busy: " code and whatever the name in front. */
+export function isHandsBusyMessage(message: string): boolean {
+  return /^(?:busy: )?[^\n]{1,80}? used the keyboard\/mouse\b/.test(message);
+}
+/** The helper's `busy` message with the user's name as its subject; other messages pass through. */
+export function nameBusyMessage(message: string, userName: string): string {
+  return HELPER_BUSY_HEAD.test(message) ? message.replace(HELPER_BUSY_HEAD, handsBusyPrefix(userName)) : message;
+}
+
+/**
+ * The environment a helper is spawned with: the daemon's minus Hormes's keys. The
+ * helper needs no key, and a resident process's environ is readable by anyone at the
+ * Mac (`ps -E`); the shell and Codex children already get the same scrub.
+ */
+export function scrubHandsEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base };
+  for (const key of SECRET_KEYS) delete env[key];
+  return env;
 }
 
 export class NativeRequestError extends Error {
@@ -28,9 +86,39 @@ export class NativeRequestError extends Error {
   }
 }
 
+/**
+ * The grants a helper process reads for itself (`hormes-hands --permissions`). TCC
+ * keys them on the responsible app, so under Hormes.app these are the app's answers;
+ * from a terminal they are the terminal's. The app reads the other twelve kinds
+ * (microphone, speech, camera, contacts, …) itself and reports them over the wire.
+ */
 export interface Permissions {
   readonly accessibility: boolean;
   readonly screenRecording: boolean;
+  /** Input Monitoring: IOHIDCheckAccess(listen) — the app's global key monitors (mark mode) need it. */
+  readonly inputMonitoring: boolean;
+  /** Full Disk Access: a read probe of an FDA-only path (no API, no prompt exists). */
+  readonly fullDiskAccess: boolean;
+}
+
+/** The kinds the helper reads, in the order `--permissions` prints them. */
+export const HELPER_PERMISSION_KINDS = ["accessibility", "screenRecording", "inputMonitoring", "fullDiskAccess"] as const;
+export type HelperPermissionKind = (typeof HELPER_PERMISSION_KINDS)[number];
+
+/** `hello` from a helper built before Input Monitoring / Full Disk Access were read lacks those two. */
+export type HelloPermissions = Pick<Permissions, "accessibility" | "screenRecording"> & Partial<Permissions>;
+
+/** The helper's JSON (any build) as booleans; a key a build did not print is absent, never false. */
+export function parseHelperPermissions(raw: unknown): HelloPermissions {
+  const o = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+  const out: Record<string, boolean> = { accessibility: o["accessibility"] === true, screenRecording: o["screenRecording"] === true };
+  for (const kind of ["inputMonitoring", "fullDiskAccess"] as const) if (typeof o[kind] === "boolean") out[kind] = o[kind];
+  return out as unknown as HelloPermissions;
+}
+
+/** Every kind a boolean: what a current `--permissions` run yields (a missing key reads as not granted). */
+export function completeHelperPermissions(p: HelloPermissions): Permissions {
+  return { accessibility: p.accessibility, screenRecording: p.screenRecording, inputMonitoring: p.inputMonitoring === true, fullDiskAccess: p.fullDiskAccess === true };
 }
 
 export interface DisplayInfo {
@@ -52,6 +140,10 @@ export interface ScreenshotResult {
   readonly points: Rect;
   /** Image pixels per point. */
   readonly scale: number;
+  /** The helper's running frame number (absent from the screencapture fallback and older helpers). */
+  readonly frameId?: number;
+  /** The display-configuration hash the shot was taken under (display ids and bounds, the front app and its front window). */
+  readonly config?: string;
 }
 
 export interface FrontmostInfo {
@@ -59,6 +151,28 @@ export interface FrontmostInfo {
   readonly bundleId?: string;
   readonly pid: number;
   readonly window: { readonly title: string; readonly x: number; readonly y: number; readonly w: number; readonly h: number; readonly windowId: number } | null;
+  /** The screen is locked or another user's session is on the console (a probe may carry it). */
+  readonly locked?: boolean;
+}
+
+/** What the helper's `type` op reports back: how the text was delivered and whether it read back. */
+export interface TypeResult {
+  /** Characters (grapheme clusters, a line break or a tab one each) that went in: all of them, or on a stop the ones that landed. */
+  readonly characters: number;
+  /** On a stop: the text's own length in the same characters, for "N of total". Absent on older helpers. */
+  readonly total?: number;
+  readonly events: number;
+  /** The strategy that delivered it (the last one, when several were tried). */
+  readonly via: "ax" | "keystrokes" | "paste";
+  readonly attempts: number;
+  /** True when the field's value read back with the text; false when the field exposes no value to read; absent when nothing was typed. */
+  readonly verified?: boolean;
+  /** "the Subject field in Mail" — the field it landed in, when accessibility knew. */
+  readonly field?: string;
+  /** A stop landed between two graphemes: `characters` were typed, the rest were not. */
+  readonly cancelled?: boolean;
+  /** Why it stopped: the client's stop, User's hands (`busy`), or the focus moved (`focus_moved`). Absent on older helpers (a stop). */
+  readonly reason?: TypeCancelReason;
 }
 
 export interface WindowInfo {
@@ -82,6 +196,10 @@ export interface FocusedText {
   readonly secure: boolean;
   readonly app?: string;
   readonly frame?: Rect | null;
+  /** The display-configuration hash right now (see ScreenshotResult.config); the gate compares it with the last shot's. */
+  readonly config?: string;
+  /** The screen is locked (CGSessionCopyCurrentDictionary). */
+  readonly locked?: boolean;
 }
 
 export interface ElementInfo {
@@ -92,6 +210,73 @@ export interface ElementInfo {
   readonly value?: string;
   readonly frame?: Rect | null;
   readonly app?: string;
+  /** The display-configuration hash right now; a coordinate action compares it with the last screenshot's. */
+  readonly config?: string;
+  /** The screen is locked (CGSessionCopyCurrentDictionary). */
+  readonly locked?: boolean;
+}
+
+/** One node of the frontmost window's accessibility tree, as `ax_tree` / `find_element` report it. */
+export interface AxNodeInfo {
+  readonly i: number;
+  readonly depth: number;
+  readonly role: string;
+  readonly subrole?: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly value?: string;
+  readonly x?: number;
+  readonly y?: number;
+  readonly w?: number;
+  readonly h?: number;
+  readonly pressable?: boolean;
+}
+
+/** `find_element`'s best match: the node plus how it matched and where to click. */
+export interface FoundElement extends AxNodeInfo {
+  readonly app: string;
+  readonly score: number;
+  readonly label: string;
+  readonly center?: { readonly x: number; readonly y: number };
+}
+
+export interface FindElementResult {
+  readonly app: string;
+  readonly window: string;
+  readonly found: boolean;
+  /** Exactly one control carries the name; two candidates mean the caller must not guess. */
+  readonly unique: boolean;
+  readonly candidates: number;
+  readonly tier: "exact" | "fuzzy" | "none";
+  readonly element?: FoundElement;
+  readonly others?: readonly FoundElement[];
+  readonly cached: boolean;
+  readonly treeMs: number;
+  readonly nodes: number;
+  readonly truncated: boolean;
+  readonly ms: number;
+}
+
+export interface AxTreeResult {
+  readonly app: string;
+  readonly pid: number;
+  readonly window: string;
+  readonly count: number;
+  readonly cached: boolean;
+  readonly ageMs: number;
+  readonly treeMs: number;
+  readonly truncated: boolean;
+  /** Absent with `summary: true`. */
+  readonly nodes?: readonly AxNodeInfo[];
+}
+
+export interface BrowserTab {
+  readonly windowId?: number;
+  readonly tabId?: number;
+  readonly index: number;
+  readonly title: string;
+  readonly url: string;
+  readonly active: boolean;
 }
 
 /** What the toolset needs from the helper. Faked in tests. */
@@ -104,16 +289,53 @@ interface Pending {
   resolve: (v: unknown) => void;
   reject: (e: Error) => void;
   timer: NodeJS.Timeout;
+  op: string;
 }
+
+/**
+ * The out-of-band stop for a `type` in flight. The helper is serial — a cancel line
+ * would queue behind the very op it means to stop — so the client sends a signal
+ * instead: the helper's type loop checks between grapheme clusters and stops
+ * mid-word. SIGURG because its default action is "ignore": a helper built before
+ * the handler existed shrugs it off instead of dying.
+ */
+export const TYPE_CANCEL_SIGNAL: NodeJS.Signals = "SIGURG";
+
+/**
+ * The ops that capture through ScreenCaptureKit. One process may run them, never two. Measured
+ * 2026-10-06 with the Mac locked: a second capturing helper from the same executable path (both of
+ * the app's helpers start from Hormes.app/Contents/MacOS/hormes-hands) sets the two processes'
+ * replayd connections interrupting each other dozens of times a second. The second capture's callback
+ * never comes, and the helper waits on it on its serial queue, so every op after it (a move, a click,
+ * a cursor read) times out until the process is restarted (likely after unlock too; every probe ran
+ * locked). Two processes from two paths capture fine, and so does a second process started after
+ * the first has exited. Two live processes from one path capturing one after the other is the stall.
+ */
+export const CAPTURE_OPS: ReadonlySet<string> = new Set(["screenshot", "zoom"]);
 
 export interface NativeHandsProcessOptions {
   readonly binPath: string;
   readonly defaultTimeoutMs?: number;
   readonly spawnImpl?: typeof spawn;
+  /** With a stand-in `spawnImpl` there is no binary to find: treat the helper as available. */
+  readonly assumeAvailable?: boolean;
+  /** Test seam for the fresh-process read (`--permissions`): what a new helper process would print. */
+  readonly probeImpl?: () => Promise<HelloPermissions>;
+  /** The environment to spawn from (default `process.env`). Hormes's keys are stripped from it either way. */
+  readonly env?: NodeJS.ProcessEnv;
+  /** The user's name for the helper's `busy` refusals (release F1), read live; default "User". */
+  readonly userName?: (() => string) | undefined;
+  /**
+   * Where this client's captures (CAPTURE_OPS) go instead of its own process. HandsPool points the
+   * reading helper at the acting one, so ScreenCaptureKit runs in one process whoever asks.
+   */
+  readonly captures?: NativeHands | undefined;
 }
 
 export class NativeHandsProcess extends EventEmitter implements NativeHands {
   private child: ChildProcess | undefined;
+  /** Set by stop(): the next exit of that child was asked for and is not a warning. */
+  private stoppedChild: ChildProcess | undefined;
   private readonly pending = new Map<string, Pending>();
   private seq = 0;
   private splitter = new LineSplitter();
@@ -128,19 +350,20 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
   }
 
   get available(): boolean {
-    return existsSync(this.opts.binPath);
+    return this.opts.assumeAvailable === true || existsSync(this.opts.binPath);
   }
 
   private ensure(): Promise<void> {
     if (this.ready) return Promise.resolve();
     if (this.starting) return this.starting;
     this.starting = new Promise<void>((resolve, reject) => {
-      if (!existsSync(this.opts.binPath)) {
+      if (!this.available) {
         reject(new NativeRequestError({ code: "unavailable", message: `hands helper not built at ${this.opts.binPath}; run pnpm build:hands` }));
         return;
       }
       const spawnFn = this.opts.spawnImpl ?? spawn;
-      const child = spawnFn(this.opts.binPath, [], { stdio: ["pipe", "pipe", "pipe"] });
+      // Never the keys: the helper has no use for them and its environ is readable.
+      const child = spawnFn(this.opts.binPath, [], { stdio: ["pipe", "pipe", "pipe"], env: scrubHandsEnv(this.opts.env ?? process.env) });
       this.child = child;
       this.splitter = new LineSplitter();
       child.stdout?.on("data", (chunk: Buffer) => {
@@ -160,7 +383,10 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
         reject(e);
       });
       child.on("exit", (code, signal) => {
-        log.warn(`helper exited (code ${code}, signal ${signal})`);
+        const asked = this.stoppedChild === child;
+        if (asked) this.stoppedChild = undefined;
+        if (asked) log.debug(`helper exited (code ${code}, signal ${signal}) — stopped`);
+        else log.warn(`helper exited (code ${code}, signal ${signal})`);
         // After restart() a successor may already be running: only the current child
         // clears the slot and fails the pending requests; a late exit of an old one
         // must not orphan the new helper (which then leaks as a second process).
@@ -186,6 +412,40 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
     }
   }
 
+  /** Requests still waiting on the helper right now. */
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+
+  /**
+   * User pressed stop: every request in flight is failed now with `cancelled`,
+   * so the toolset awaiting it returns an error instead of acting on the answer.
+   * The helper is serial and cannot be interrupted mid-op — a click already sent
+   * still lands — but its late reply arrives for an id nobody waits on and is
+   * dropped in onLine(), and nothing queued behind it is written. Returns how
+   * many were dropped.
+   */
+  cancelPending(reason = "stopped"): number {
+    const n = this.pending.size;
+    // A `type` in flight is the one op the helper can stop part way: tell it, out of band,
+    // before the ids are forgotten. Nothing to send for anything else (a click has landed).
+    const typing = [...this.pending.values()].some((p) => p.op === "type");
+    this.failAll({ code: "cancelled", message: reason });
+    if (typing) this.signalTypeCancel();
+    return n;
+  }
+
+  /** SIGURG to the resident helper: its type loop stops at the next grapheme. Harmless to a helper that does not listen. */
+  private signalTypeCancel(): void {
+    const pid = this.child?.pid;
+    if (typeof pid !== "number" || pid <= 0 || !this.ready) return;
+    try {
+      process.kill(pid, TYPE_CANCEL_SIGNAL);
+    } catch (e) {
+      log.debug(`type cancel signal: ${(e as Error).message}`);
+    }
+  }
+
   private onLine(line: string): void {
     let msg: { id?: unknown; ok?: unknown; result?: unknown; error?: { code?: unknown; message?: unknown } };
     try {
@@ -203,11 +463,15 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
     if (msg.ok === true) p.resolve(msg.result ?? {});
     else {
       const code = String(msg.error?.code ?? "internal") as NativeError["code"];
-      p.reject(new NativeRequestError({ code, message: String(msg.error?.message ?? "unknown helper error") }));
+      const raw = String(msg.error?.message ?? "unknown helper error");
+      p.reject(new NativeRequestError({ code, message: code === "busy" ? nameBusyMessage(raw, this.opts.userName?.() || "User") : raw }));
     }
   }
 
   async request<T = unknown>(op: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
+    // A capture asked of a client that does not capture: the process that does takes it (this one is not even spawned for it).
+    const captures = this.opts.captures;
+    if (captures && captures !== this && CAPTURE_OPS.has(op)) return this.forwardCapture<T>(captures, op, params, timeoutMs);
     await this.ensure();
     const child = this.child;
     if (!child?.stdin) throw new NativeRequestError({ code: "unavailable", message: "hands helper is not running" });
@@ -218,7 +482,7 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
         this.pending.delete(id);
         reject(new NativeRequestError({ code: "timeout", message: `${op} did not answer within ${timeoutMs ?? this.opts.defaultTimeoutMs ?? 8000}ms` }));
       }, timeoutMs ?? this.opts.defaultTimeoutMs ?? 8000);
-      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer });
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer, op });
       child.stdin?.write(line, (err) => {
         if (err) {
           this.pending.delete(id);
@@ -229,15 +493,36 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
     });
   }
 
-  async hello(): Promise<{ version: string; pid: number; permissions: Permissions }> {
-    return this.request("hello", {}, 3000);
+  /**
+   * A capture the capturing helper takes for this one. It queues behind whatever that helper is doing (an
+   * `open_app` up to 30 s, a `type` longer than the capture's 6 s). Its timeout does not say which: a capture
+   * that waited and never ran, or one that ran slow. Either way it fails `capture_failed`, which the toolset's
+   * screenshot answers with its `screencapture` fallback. A cut reaches it through the capturing client's
+   * pending map, where it waits.
+   */
+  private async forwardCapture<T>(to: NativeHands, op: string, params: Record<string, unknown>, timeoutMs: number | undefined): Promise<T> {
+    try {
+      return await to.request<T>(op, params, timeoutMs);
+    } catch (e) {
+      if (!(e instanceof NativeRequestError) || e.detail.code !== "timeout") throw e;
+      throw new NativeRequestError({ code: "capture_failed", message: `${e.detail.message}. It was queued on the acting helper, the one process that captures.` });
+    }
+  }
+
+  /** The resident helper's greeting: its version, pid and the grants it read at launch (a key the helper did not print is absent). */
+  async hello(): Promise<{ version: string; pid: number; permissions: HelloPermissions }> {
+    const raw = await this.request<{ version: string; pid: number; permissions?: unknown }>("hello", {}, 3000);
+    return { version: raw.version, pid: raw.pid, permissions: parseHelperPermissions(raw.permissions) };
   }
 
   /**
    * Read the grants from a *fresh* helper process (`--permissions`). The resident
-   * helper may still report what it saw at launch; a new process asks TCC now.
+   * helper may still report what it saw at launch; a new process asks TCC now. All
+   * four kinds come back as booleans (a key an older binary did not print reads as
+   * not granted; `pnpm build:hands` fixes that).
    */
   probePermissions(timeoutMs = 3000): Promise<Permissions> {
+    if (this.opts.probeImpl) return this.opts.probeImpl().then(completeHelperPermissions);
     return new Promise((resolve, reject) => {
       if (!existsSync(this.opts.binPath)) {
         reject(new NativeRequestError({ code: "unavailable", message: `hands helper not built at ${this.opts.binPath}` }));
@@ -249,8 +534,7 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
           return;
         }
         try {
-          const parsed = JSON.parse(stdout.trim()) as { accessibility?: unknown; screenRecording?: unknown };
-          resolve({ accessibility: parsed.accessibility === true, screenRecording: parsed.screenRecording === true });
+          resolve(completeHelperPermissions(parseHelperPermissions(JSON.parse(stdout.trim()))));
         } catch (e) {
           reject(new NativeRequestError({ code: "internal", message: `bad --permissions output: ${(e as Error).message}` }));
         }
@@ -267,6 +551,7 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
   stop(): void {
     const child = this.child;
     this.child = undefined;
+    this.stoppedChild = child;
     this.failAll({ code: "unavailable", message: "hands helper stopped" });
     try {
       child?.stdin?.end();

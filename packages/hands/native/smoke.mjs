@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 // Smoke test for build/hormes-hands. Plain Node, no dependencies.
-// Safe on a live machine: it only reads (screenshots, cursor, windows, AX) and nudges the
-// mouse by 3 points and back. It never clicks, types, scrolls, drags or focuses apps.
+// Safe on a live machine: it only reads (screenshots, cursor, windows, AX, user_idle) and nudges
+// the mouse by 3 points and back. It never clicks, types, scrolls, drags or focuses apps: the
+// acting ops it sends carry `expectFront: {pid: 1}` (launchd is never in front), so the helper
+// refuses each with `focus_moved` before its first post — which is the check.
+// Last, `lsappinfo info <pid>` (read-only) must never say the helper is a Foreground app: inside
+// Hormes.app LaunchServices reads the app's Info.plist for it, and a Foreground helper is a
+// second "Hormes" Dock tile per process. main.swift sets `.prohibited` before AppKit checks in.
 //
 //   node packages/hands/native/smoke.mjs
 //   HORMES_HANDS_BIN=/path/to/hormes-hands node packages/hands/native/smoke.mjs
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -139,6 +144,31 @@ if (moved && moved.x === cursor.x && moved.y === cursor.y) {
 }
 await step("move back", "move", { x: cursor.x, y: cursor.y });
 await step("wait 50", "wait", { ms: 50 });
+
+// User's hands win: `user_idle` reads the session's last inputs (a huge number = never seen);
+// an acting op judged against an app that is not in front posts nothing. `ownDriver: true`
+// skips the busy check so a keystroke of yours during the run cannot turn `focus_moved` into `busy`.
+const idle = await step("user_idle", "user_idle");
+if (idle) {
+  for (const key of ["keyMs", "clickMs", "scrollMs", "moveMs", "foreignMs"]) {
+    if (typeof idle[key] !== "number" || idle[key] < 0) {
+      failures += 1;
+      console.log(`FAIL user_idle: ${key} should be a non-negative number, got ${JSON.stringify(idle[key])}`);
+    }
+  }
+}
+const nothingInFront = { expectFront: { pid: 1 }, ownDriver: true };
+await step("click with expectFront pid 1 (nothing posted)", "click", { ...nothingInFront }, "focus_moved");
+await step("type with expectFront pid 1 (nothing posted)", "type", { text: "x", ...nothingInFront }, "focus_moved");
+await step("key with expectFront pid 1 (nothing posted)", "key", { combo: "shift", ...nothingInFront }, "focus_moved");
+await step("scroll with expectFront pid 1 (nothing posted)", "scroll", { dy: 1, ...nothingInFront }, "focus_moved");
+await step("expectFront without pid", "click", { expectFront: {}, ownDriver: true }, "bad_request");
+const idleAfter = await step("user_idle after the refusals", "user_idle");
+if (idle && idleAfter && idleAfter.keyMs < idle.keyMs - 50 && idle.keyMs < 1e11) {
+  // A key press arrived between the two reads: yours, or a refusal that posted (it must not).
+  console.log("note keyMs moved between the reads — if you did not touch the keyboard, a refused op posted something");
+}
+
 await step("invalid op", "definitely_not_an_op", {}, "bad_request");
 await step("click with bad button", "click", { button: "nope" }, "bad_request");
 await step("key with bad combo", "key", { combo: "cmd+notakey" }, "bad_request");
@@ -147,6 +177,23 @@ await step("screenshot with bad display", "screenshot", { display: "nope" }, "ba
 
 child.stdin.write("this is not json\n");
 await step("hello after garbage line", "hello");
+
+// After every op that could have made AppKit check the process in (frontmost, windows, AX,
+// screenshots): what LaunchServices calls it. No ASN (`type=[ NULL ]`), `BackgroundOnly` or
+// `UIElement` are all fine; `Foreground` is the second Dock tile. Skipped where there is no
+// lsappinfo (not a Mac, or a stripped runner) — the check needs the real LaunchServices.
+const ls = spawnSync("lsappinfo", ["info", String(child.pid)], { encoding: "utf8", timeout: 5000 });
+if (ls.error || ls.status !== 0) {
+  console.log(`skip lsappinfo type: lsappinfo unavailable (${ls.error?.message ?? `exit ${ls.status}`})`);
+} else {
+  const type = ls.stdout.match(/\btype="([^"]*)"/)?.[1];
+  if (type === "Foreground") {
+    failures += 1;
+    console.log(`FAIL lsappinfo type: pid ${child.pid} is a Foreground app — a second Hormes Dock tile per helper; main.swift must set NSApp.setActivationPolicy(.prohibited) before any AppKit call`);
+  } else {
+    console.log(`ok   lsappinfo type: ${type ?? "none (no ASN)"} — not a Dock tile`);
+  }
+}
 const garbage = unmatchedResponses.find((m) => m.id === null && m.ok === false && m.error?.code === "bad_request");
 if (garbage) {
   console.log(`ok   garbage line -> bad_request with id null: ${garbage.error.message}`);

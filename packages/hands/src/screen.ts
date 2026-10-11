@@ -15,6 +15,14 @@ export interface ScreenMapping {
   readonly width: number;
   readonly height: number;
   readonly scale: number;
+  /** The helper's running frame number for this shot (absent from the screencapture fallback). */
+  readonly frameId?: number;
+  /**
+   * The display configuration the shot was taken under — display ids and bounds,
+   * the front app and its front window — as the helper's hash. A coordinate action
+   * whose probe reports a different hash is aimed at a screen that no longer exists.
+   */
+  readonly config?: string;
 }
 
 export interface ShotBudget {
@@ -26,6 +34,24 @@ export interface ShotBudget {
 
 export const DEFAULT_SHOT_BUDGET: ShotBudget = { maxLongEdge: 2000, maxPixels: 2_500_000 };
 
+/**
+ * The quick budget: what a screenshot costs when the point is to act now, not to
+ * read small print — the pre-warm shot handed to a brain as its task begins, a
+ * reflex "screenshot this", the bench. The pixel cap (~1.1 MP, less than half the
+ * default) is what bounds the encode time; the long edge is left at 2000 so the cap
+ * decides the shape: a 5120×1440 ultrawide comes out ~1977×556 (legible; at a
+ * 1280 edge it was 1280×360 and the model spent a zoom on it), a 16:10 Retina
+ * display ~1300×830 (3456×2234 → 1304×843; 2560×1600 → 1326×829). Zoom is there
+ * for anything that needs the full budget.
+ */
+export const QUICK_SHOT_BUDGET: ShotBudget = { maxLongEdge: 2000, maxPixels: 1_100_000 };
+
+/** The pixel size the budget yields for a w×h capture (what `fitScale` gives, rounded as the helper rounds). */
+export function fitSize(w: number, h: number, budget: ShotBudget = DEFAULT_SHOT_BUDGET): { width: number; height: number } {
+  const s = fitScale(w, h, budget);
+  return { width: Math.round(w * s), height: Math.round(h * s) };
+}
+
 export class Screen {
   private mapping: ScreenMapping | undefined;
 
@@ -34,8 +60,23 @@ export class Screen {
   }
 
   remember(shot: ScreenshotResult): ScreenMapping {
-    this.mapping = { displayId: shot.displayId, points: shot.points, width: shot.width, height: shot.height, scale: shot.scale };
+    this.mapping = {
+      displayId: shot.displayId,
+      points: shot.points,
+      width: shot.width,
+      height: shot.height,
+      scale: shot.scale,
+      ...(typeof shot.frameId === "number" ? { frameId: shot.frameId } : {}),
+      ...(typeof shot.config === "string" && shot.config ? { config: shot.config } : {}),
+    };
     return this.mapping;
+  }
+
+  /** Is `config` (a probe's current hash) the one the last screenshot was taken under? Unknown on either side is taken as unchanged. */
+  sameConfig(config: string | undefined): boolean {
+    const m = this.mapping;
+    if (!m?.config || !config) return true;
+    return m.config === config;
   }
 
   /** Image pixel → global point. Throws when no screenshot has been taken yet. */
