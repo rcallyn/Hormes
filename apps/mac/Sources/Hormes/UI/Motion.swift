@@ -1,0 +1,151 @@
+import AppKit
+import QuartzCore
+import SwiftUI
+
+/// The one motion vocabulary for the app. Every transition — the notch island, the
+/// blob's tuck and drop, flights, the capsule, the Console's views, toasts and pills,
+/// the overlay's shapes — picks from here, so the whole thing moves like one object.
+///
+/// Rules of thumb:
+///   - Things that follow the hand or answer a press use `quick`/`snappy`; things that
+///     happen on their own (a phase change, a settle) use `base`/`gentle`.
+///   - Enter eases out (arrive fast, settle soft); exit eases in (leave gaining speed);
+///     a move from A to B eases in-out.
+///   - Nothing cuts. A value that changes gets a transition; a view that appears fades
+///     and rises a few points; a view that leaves fades and drops.
+///   - Reduce Motion (`Motion.reduced`) halves durations, removes overshoot and
+///     replaces slides with plain fades; the app stays usable, just stiller.
+enum Motion {
+    // MARK: durations (seconds)
+
+    /// A press being felt, a hover state.
+    static let instant = 0.08
+    /// Something answering the hand: a toggle, a selection, a button's fill.
+    static let quick = 0.16
+    /// The default for anything that moves on its own: a view switch, a fade.
+    static let base = 0.24
+    /// A larger change of state: the capsule opening, a panel arriving.
+    static let slow = 0.40
+    /// Ambient: a drift, a breath, a colour crossfade.
+    static let drift = 0.60
+
+    // MARK: durations (indicators)
+
+    /// The live dot's ring: one pulse.
+    static let pulse = 1.6
+    /// The streaming caret's blink.
+    static let caret = 0.5
+    /// One 20 Hz meter sample to the next.
+    static let meter = 0.06
+    // MARK: curves (Core Animation)
+
+    /// Arrive fast, settle soft — for anything entering or answering a press.
+    static let easeOut = CAMediaTimingFunction(controlPoints: 0.16, 1, 0.3, 1)
+    /// Leave gaining speed — for anything exiting.
+    static let easeIn = CAMediaTimingFunction(controlPoints: 0.7, 0, 0.84, 0)
+    /// A to B — for a move between two resting places.
+    static let easeInOut = CAMediaTimingFunction(controlPoints: 0.65, 0, 0.35, 1)
+
+    // MARK: curves as numbers (display-link driven code)
+
+    /// The same cubic Bézier as a CAMediaTimingFunction, evaluated by hand, for motion
+    /// stepped per frame instead of handed to Core Animation. `value(at:)` maps progress 0…1 to 0…1.
+    struct Curve {
+        let p1x: Double, p1y: Double, p2x: Double, p2y: Double
+        init(_ p1x: Double, _ p1y: Double, _ p2x: Double, _ p2y: Double) {
+            self.p1x = p1x; self.p1y = p1y; self.p2x = p2x; self.p2y = p2y
+        }
+        private func bezier(_ t: Double, _ a: Double, _ b: Double) -> Double {
+            let u = 1 - t
+            return 3 * u * u * t * a + 3 * u * t * t * b + t * t * t
+        }
+        func value(at x: Double) -> Double {
+            // Not a number is no progress; an infinity is the end it points at.
+            guard x.isFinite else { return x > 0 ? 1 : 0 }
+            let x = min(1, max(0, x))
+            if x <= 0 { return 0 }
+            if x >= 1 { return 1 }
+            // Newton–Raphson on the x polynomial, seeded with x itself; the curves in
+            // use are monotonic in x, so a handful of steps lands within a pixel.
+            var t = x
+            for _ in 0..<8 {
+                let fx = bezier(t, p1x, p2x) - x
+                let u = 1 - t
+                let dx = 3 * u * u * p1x + 6 * u * t * (p2x - p1x) + 3 * t * t * (1 - p2x)
+                if abs(dx) < 1e-6 { break }
+                let next = t - fx / dx
+                if abs(next - t) < 1e-5 { t = next; break }
+                t = min(1, max(0, next))
+            }
+            return bezier(t, p1y, p2y)
+        }
+    }
+
+    /// `easeOut`, `easeIn` and `easeInOut` above, as numbers.
+    static let easeOutCurve = Curve(0.16, 1, 0.3, 1)
+    static let easeInCurve = Curve(0.7, 0, 0.84, 0)
+    static let easeInOutCurve = Curve(0.65, 0, 0.35, 1)
+
+    // MARK: springs (SwiftUI)
+
+    /// Answers the hand: selection, toggles, the segmented thumb.
+    static var snappy: Animation { reduced ? .easeOut(duration: quick / 2) : .spring(response: 0.28, dampingFraction: 0.82) }
+    /// Moves on its own: a view switch, a card arriving.
+    static var gentle: Animation { reduced ? .easeInOut(duration: base / 2) : .spring(response: 0.42, dampingFraction: 0.90) }
+    /// A little life: the capsule popping open, a toast landing.
+    static var bouncy: Animation { reduced ? .easeOut(duration: base / 2) : .spring(response: 0.36, dampingFraction: 0.70) }
+    /// A plain fade at `base`.
+    static var fade: Animation { .easeInOut(duration: reduced ? base / 2 : base) }
+
+    /// A Core Animation curve (`easeOut` / `easeIn` / `easeInOut`) as a SwiftUI animation of
+    /// `duration`, honouring Reduce Motion the way `seconds` does. The Console's
+    /// `ConsoleMotion.animation` is this.
+    static func animation(_ curve: CAMediaTimingFunction, _ duration: Double) -> Animation {
+        var c1 = [Float](repeating: 0, count: 2), c2 = [Float](repeating: 0, count: 2)
+        curve.getControlPoint(at: 1, values: &c1)
+        curve.getControlPoint(at: 2, values: &c2)
+        return .timingCurve(Double(c1[0]), Double(c1[1]), Double(c2[0]), Double(c2[1]), duration: seconds(duration))
+    }
+
+    // MARK: springs (display-link driven, stiffness/damping)
+
+    struct SpringSpec {
+        let stiffness: Double
+        let damping: Double
+        /// A spring with a damping ratio: 1 is critically damped, < 1 overshoots a little.
+        static func of(stiffness: Double, ratio: Double) -> SpringSpec {
+            SpringSpec(stiffness: stiffness, damping: 2 * stiffness.squareRoot() * ratio)
+        }
+    }
+
+    /// The notch island growing and shrinking.
+    static var island: SpringSpec { .of(stiffness: 520, ratio: reduced ? 1.0 : 0.78) }
+    // MARK: transitions (SwiftUI)
+
+    /// A view arriving: fade + rise 6 pt; leaving: fade + drop 4 pt. Plain fade under Reduce Motion.
+    static var appear: AnyTransition {
+        if reduced { return .opacity }
+        return .asymmetric(insertion: .opacity.combined(with: .offset(y: 6)), removal: .opacity.combined(with: .offset(y: 4)))
+    }
+
+    /// Switching between two views that occupy the same place.
+    static var swap: AnyTransition {
+        if reduced { return .opacity }
+        return .asymmetric(insertion: .opacity.combined(with: .offset(y: 4)), removal: .opacity)
+    }
+
+    static var reduced: Bool { NSWorkspace.shared.accessibilityDisplayShouldReduceMotion }
+
+    /// A duration honouring Reduce Motion.
+    static func seconds(_ d: Double) -> Double { reduced ? d / 2 : d }
+
+    /// Run an AppKit animation group with one of the curves above.
+    static func animate(_ duration: Double, curve: CAMediaTimingFunction = Motion.easeOut, _ body: () -> Void, completion: (() -> Void)? = nil) {
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = seconds(duration)
+            ctx.timingFunction = curve
+            ctx.allowsImplicitAnimation = true
+            body()
+        }, completionHandler: completion)
+    }
+}
