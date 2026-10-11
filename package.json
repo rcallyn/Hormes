@@ -1,31 +1,27 @@
 {
   "name": "hormes",
   "version": "2.0.0",
-  "description": "Voice-first Mac assistant that uses the computer for you. GPT-Live-1 full-duplex voice behind an on-device wake word and Touch ID; vendor-neutral brains (Codex, Claude Code, any API); native Swift hands, two at once; a Console into every coding-agent session; a dithered ASCII blob in the notch. Rewrites itself in a worktree, with your yes.",
+  "description": "Calendar-aware, voice-first Mac workspace for learning, work, and verified agent execution.",
+  "author": "Hormes contributors",
   "private": true,
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/Kevin-Liu-01/Hormes.git"
-  },
-  "homepage": "https://github.com/Kevin-Liu-01/Hormes",
   "type": "module",
   "packageManager": "pnpm@10.30.0",
   "engines": {
-    "node": ">=24"
+    "node": ">=24",
+    "pnpm": ">=10"
   },
   "scripts": {
     "doctor": "tsx scripts/doctor.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test 'packages/*/src/**/*.test.ts' 'scripts/**/*.test.ts'",
+    "test": "node --import tsx --import ./scripts/test-preload.mjs --test --test-concurrency=4 'packages/*/src/**/*.test.ts' 'scripts/**/*.test.ts'",
     "check": "pnpm run typecheck && pnpm run test && pnpm run doctor",
     "hormes": "tsx packages/cli/src/main.ts",
     "build:hands": "tsx scripts/build-hands.ts",
     "build:icon": "tsx scripts/make-icon.ts",
-    "build:banner": "tsx scripts/make-banner.ts",
-    "build:media": "pnpm build:icon && pnpm build:banner",
     "hormesd": "tsx packages/daemon/src/main.ts",
-    "build:mac": "tsx scripts/build-mac.ts"
+    "build:mac": "tsx scripts/build-mac.ts",
+    "build:ios": "zsh apps/ios/Scripts/build.sh"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.267",
@@ -37,6 +33,7 @@
     "@hormes/daemon": "workspace:*",
     "@hormes/engine": "workspace:*",
     "@hormes/hands": "workspace:*",
+    "@hormes/install": "workspace:*",
     "@hormes/live": "workspace:*",
     "@hormes/memory": "workspace:*",
     "@hormes/protocol": "workspace:*",
