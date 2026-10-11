@@ -1,0 +1,201 @@
+#!/usr/bin/env tsx
+import { execFileSync } from "node:child_process";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { REPO_ROOT } from "@hormes/core";
+import { HORMES_BUNDLE_ID, compareTrees, defaultExec, performInstall, probeTarget, runHygiene, type InstallIO } from "@hormes/cli/install";
+import { ICON_SOURCES, staleAgainst } from "./icon-render.ts";
+
+/**
+ * Package the native macOS app: build/Hormes.app.
+ *
+ * The bundle holds the Swift binary and the hormes-hands helper; the daemon still
+ * runs from this checkout through tsx (Contents/Resources/hormes.json says where),
+ * so a rebuild of the engine is `git pull`. The bundle exists for what only a bundle
+ * can have: a Dock icon and a stable TCC identity for the microphone, screen
+ * recording and accessibility grants (the helper inherits it because the app is its
+ * responsible process).
+ */
+
+const OUT = join(REPO_ROOT, "build");
+/** The bundle is assembled and signed here, then installed; build/Hormes.app becomes a symlink. */
+const STAGE_APP = join(OUT, "stage", "Hormes.app");
+const APP = STAGE_APP;
+const INSTALLED = "/Applications/Hormes.app";
+const LINK = join(OUT, "Hormes.app");
+const MAC = join(REPO_ROOT, "apps", "mac");
+const RESOURCES_SRC = join(MAC, "Resources");
+
+function run(cmd: string, args: readonly string[], opts: { cwd?: string; quiet?: boolean } = {}): string {
+  console.log(`[build-mac] ${cmd} ${args.join(" ")}`);
+  const out = execFileSync(cmd, [...args], { cwd: opts.cwd ?? REPO_ROOT, encoding: "utf8", stdio: opts.quiet ? ["ignore", "pipe", "inherit"] : ["ignore", "inherit", "inherit"] });
+  return typeof out === "string" ? out : "";
+}
+
+function need(path: string, hint: string): void {
+  if (!existsSync(path)) {
+    console.error(`[build-mac] missing ${path}; ${hint}`);
+    process.exit(1);
+  }
+}
+
+// 1. Prerequisites we can produce ourselves.
+const hands = join(OUT, "hormes-hands");
+if (handsIsStale(hands)) run("pnpm", ["build:hands"]);
+need(hands, "pnpm build:hands failed");
+
+/** The bundle freezes a copy of the helper, so rebuild it whenever its sources are newer. */
+function handsIsStale(bin: string): boolean {
+  if (!existsSync(bin)) return true;
+  const built = statSync(bin).mtimeMs;
+  const nativeDir = join(REPO_ROOT, "packages", "hands", "native");
+  const sources = readdirSync(nativeDir).filter((f) => f.endsWith(".swift")).map((f) => join(nativeDir, f));
+  sources.push(join(REPO_ROOT, "scripts", "build-hands.ts"));
+  return sources.some((f) => statSync(f).mtimeMs > built);
+}
+
+const icns = join(OUT, "Hormes.icns");
+if (iconIsStale(icns)) run("pnpm", ["build:icon"]);
+need(icns, "pnpm build:icon failed");
+
+/**
+ * The bundle freezes a copy of the icns too, so rebuild it whenever its renderer is newer.
+ * It used to be built only when MISSING: build/Hormes.icns dated from before the Bayer
+ * and round-orb changes and the Dock showed that stale tile for days.
+ */
+function iconIsStale(file: string): boolean {
+  const mtime = (p: string): number | undefined => (existsSync(p) ? statSync(p).mtimeMs : undefined);
+  return staleAgainst(mtime(file), ICON_SOURCES.map((f) => mtime(join(REPO_ROOT, "scripts", f))));
+}
+
+need(join(RESOURCES_SRC, "Info.plist"), "apps/mac/Resources/Info.plist is part of the repo");
+need(join(RESOURCES_SRC, "entitlements.plist"), "apps/mac/Resources/entitlements.plist is part of the repo");
+
+// 2. Build the Swift package.
+run("swift", ["build", "-c", "release", "--package-path", MAC]);
+const binDir = run("swift", ["build", "-c", "release", "--package-path", MAC, "--show-bin-path"], { quiet: true }).trim();
+const binary = join(binDir, "Hormes");
+need(binary, "swift build produced no Hormes binary");
+
+// 3. Assemble the bundle (in a staging dir; the only launchable copy lives in /Applications).
+rmSync(join(OUT, "stage"), { recursive: true, force: true });
+const contents = join(APP, "Contents");
+const macos = join(contents, "MacOS");
+const resources = join(contents, "Resources");
+mkdirSync(macos, { recursive: true });
+mkdirSync(resources, { recursive: true });
+
+copyFileSync(binary, join(macos, "Hormes"));
+chmodSync(join(macos, "Hormes"), 0o755);
+copyFileSync(hands, join(macos, "hormes-hands"));
+chmodSync(join(macos, "hormes-hands"), 0o755);
+copyFileSync(icns, join(resources, "Hormes.icns"));
+copyFileSync(join(RESOURCES_SRC, "Info.plist"), join(contents, "Info.plist"));
+writeFileSync(join(contents, "PkgInfo"), "APPL????");
+
+const manifest = {
+  repo: REPO_ROOT,
+  node: process.execPath,
+  tsx: join(REPO_ROOT, "node_modules", "tsx", "dist", "cli.mjs"),
+  daemon: join(REPO_ROOT, "packages", "daemon", "src", "main.ts"),
+};
+for (const [k, v] of Object.entries(manifest)) need(v, `hormes.json field "${k}" points nowhere; run pnpm install`);
+writeFileSync(join(resources, "hormes.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+
+// 4. Sign: helper first, then the app. Any real identity (Apple-issued or a local
+// self-signed certificate) gives the bundle a designated requirement that survives
+// rebuilds, so TCC keeps the microphone/screen/accessibility grants. Ad-hoc signing
+// keys them to the code hash, which changes every build.
+function pickIdentity(): string | undefined {
+  const pinned = process.env["HORMES_SIGN_IDENTITY"];
+  if (pinned) return pinned === "-" ? undefined : pinned;
+  try {
+    const out = execFileSync("security", ["find-identity", "-v", "-p", "codesigning"], { encoding: "utf8" });
+    const names = [...out.matchAll(/"([^"]+)"/g)].map((m) => m[1] ?? "").filter(Boolean);
+    return (
+      names.find((n) => n.startsWith("Apple Development")) ??
+      names.find((n) => n.startsWith("Developer ID Application")) ??
+      names[0]
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+const entitlements = join(RESOURCES_SRC, "entitlements.plist");
+const identity = pickIdentity();
+const sign = identity ?? "-";
+// Timestamps only make sense for Apple-issued certificates (and need the network).
+const appleIssued = identity !== undefined && /^(Apple Development|Developer ID Application)/.test(identity);
+const common = identity ? ["--force", ...(appleIssued ? ["--timestamp"] : []), "--options", "runtime"] : ["--force"];
+run("codesign", [...common, "--sign", sign, join(macos, "hormes-hands")]);
+run("codesign", [...common, "--entitlements", entitlements, "--sign", sign, APP]);
+run("codesign", ["--verify", "--strict", "--verbose=1", APP]);
+
+// 5. Install IN PLACE. Exactly one launchable Hormes exists on this Mac — /Applications —
+// so the Dock, LaunchServices' recents and TCC never see two identities. Its directory
+// is never recreated: the Dock's pinned tile keeps a bookmark keyed on that directory's
+// inode, and rm + cp gave it a new one every build (that was the second Dock tile).
+// rsync renames each changed file over the old name (never --inplace: the running app
+// keeps its mapped, signed Mach-O), --delete-after drops what the stage no longer has,
+// and it is the INSTALLED copy that is verified. build/Hormes.app stays a symlink to it.
+// A rollback snapshot is opt-in: HORMES_INSTALL_SNAPSHOT=1 archives the installed bundle
+// to build/previous/Hormes.app.zip before the rsync and prints the ditto/rsync line that
+// puts it back. It is a zip, never a directory — LaunchServices registers any directory
+// holding an Info.plist as a bundle, a second Hormes. Without the flag nothing is
+// snapshotted: the install is in place and keeps the inode, so the rollback is
+// `git checkout <previous> && pnpm build:mac`.
+// The order (plan → snapshot → rsync → verify → parity → inode → unstage → relink) and
+// every fail path live in performInstall, pinned by install-bundle.test.ts with a
+// scripted exec; this file only supplies the real commands and filesystem.
+const PREVIOUS = process.env["HORMES_INSTALL_SNAPSHOT"] === "1" ? join(OUT, "previous", "Hormes.app.zip") : undefined;
+const io: InstallIO = {
+  exec: (cmd, args) => {
+    console.log(`[build-mac] ${cmd} ${args.join(" ")}`);
+    return defaultExec(cmd, args, { timeoutMs: 120_000 });
+  },
+  probe: probeTarget,
+  mkdirp: (p) => mkdirSync(p, { recursive: true }),
+  rmTree: (p) => rmSync(p, { recursive: true, force: true }),
+  relink: (target, link) => {
+    try {
+      const st = lstatSync(link);
+      if (st.isSymbolicLink() || st.isDirectory()) rmSync(link, { recursive: true, force: true });
+    } catch {
+      // nothing there
+    }
+    symlinkSync(target, link);
+  },
+  compare: compareTrees,
+  warn: (line) => console.warn(`[build-mac] ${line}`),
+};
+const outcome = performInstall({ stage: APP, installed: INSTALLED, ...(PREVIOUS !== undefined ? { previous: PREVIOUS } : {}), link: LINK, cleanup: join(OUT, "stage"), bundleId: HORMES_BUNDLE_ID, uid: process.getuid?.() ?? -1 }, io);
+if (!outcome.ok) {
+  console.error(`[build-mac] ${outcome.what}`);
+  for (const l of outcome.lines) console.error(`           ${l}`);
+  console.error(`           the signed stage is kept at ${APP} for inspection`);
+  process.exit(1);
+}
+const installNote = outcome.line;
+
+// 6. One Hormes: refresh the LaunchServices record, unregister stale Hormes bundle
+// paths (the database only — nothing in the Trash is touched), and READ the Dock. The
+// Dock is only rewritten by `pnpm hormes dock --fix` or HORMES_INSTALL_HYGIENE=fix;
+// HORMES_INSTALL_HYGIENE=0 skips the whole pass (headless CI, or a Dock left alone).
+const hygiene = process.env["HORMES_INSTALL_HYGIENE"];
+let oneHormes = "one hormes  skipped (HORMES_INSTALL_HYGIENE=0)";
+if (hygiene !== "0") oneHormes = runHygiene({ mode: hygiene === "fix" ? "fix" : "install", log: (line) => console.log(`[build-mac] ${line}`) }).line;
+
+const size = statSync(join(INSTALLED, "Contents", "MacOS", "Hormes")).size;
+console.log(`
+  built      ${INSTALLED}
+  binary     ${(size / (1024 * 1024)).toFixed(1)} MiB
+  daemon     ${manifest.node} ${manifest.tsx} ${manifest.daemon}
+  signed     ${identity ?? "ad-hoc (TCC grants reset on every rebuild; create a code-signing certificate in Keychain Access or set HORMES_SIGN_IDENTITY)"}
+
+  ${installNote}
+  ${oneHormes}
+  link:      build/Hormes.app → ${INSTALLED}${outcome.rollback ? `\n  ${outcome.rollback}` : ""}
+  run:       open -a Hormes
+  logs:      tail -f ~/.hormes/daemon.log
+`);
