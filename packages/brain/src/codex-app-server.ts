@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { LineSplitter, logger } from "@hormes/core";
 import type { Effort } from "@hormes/protocol";
-import { codexBuiltinsOffArgs, codexDisableUserServersArgs, codexMcpConfigArgs, codexPromptTrimArgs, toml, type CodexMcpConfig } from "./codex-config.ts";
+import { codexDisableUserServersArgs, codexMcpConfigArgs, codexPromptTrimArgs, toml, type CodexMcpConfig } from "./codex-config.ts";
 
 /**
  * A warm Codex: one `codex app-server` process, one thread, many turns.
@@ -24,15 +24,7 @@ import { codexBuiltinsOffArgs, codexDisableUserServersArgs, codexMcpConfigArgs, 
  *   ← server requests (they carry an id and must be answered): item/commandExecution/requestApproval,
  *      item/fileChange/requestApproval, item/permissions/requestApproval, item/tool/requestUserInput,
  *      mcpServer/elicitation/request, item/tool/call — every one is declined here; the only way
- *      Codex acts is the `hormes` MCP server, which the runner gates. Codex's own shell,
- *      image reader and connectors are switched off in the argv (`codexBuiltinsOffArgs`):
- *      approval "never" over a read-only sandbox let the shell read every secret store.
- *   ← thread/closed {threadId}: the thread is gone; a turn on it fails now and a fresh thread
- *      replaces it (a rollover, so the brain carries the recent exchanges over).
- *
- * Every item, delta and error notification names its `turnId`; one that is not the active
- * turn's (a turn given up locally whose server side ran on) is dropped, never handed to the
- * next turn's handlers.
+ *      Codex acts is the `hormes` MCP server, which the runner gates.
  *
  * Items: {type: "agentMessage", text, phase}, {type: "reasoning", summary[], content[]},
  * {type: "mcpToolCall", server, tool, status, arguments, result, error, durationMs},
@@ -40,10 +32,10 @@ import { codexBuiltinsOffArgs, codexDisableUserServersArgs, codexMcpConfigArgs, 
  *
  * `-c mcp_servers={…}` does NOT replace the user's table (their servers still
  * start alongside); `-c mcp_servers.<name>.enabled=false` per server does switch
- * them off. The plugin runtime (`codex_apps`: User's ChatGPT connectors — Drive,
+ * them off. The plugin runtime (`codex_apps`: Kevin's ChatGPT connectors — Drive,
  * Sites, agents; 134 tools, deletes and shares among them) is a *feature*, not a
- * server: `--disable apps` (= `-c features.apps=false`) switches it off, and both
- * argvs always do (this one twice). His `notify` hook is silenced too (`-c notify=[]`), so
+ * server: `--disable apps` (= `-c features.apps=false`) switches it off, and the
+ * argv below always does. His `notify` hook is silenced too (`-c notify=[]`), so
  * Hormes's turns never fire it. Closing stdin ends the process cleanly.
  *
  * A stop while `turn/start` is still unanswered is remembered (`interruptRequested`)
@@ -52,7 +44,7 @@ import { codexBuiltinsOffArgs, codexDisableUserServersArgs, codexMcpConfigArgs, 
  * when the server never says so. Resolving locally at once would leave a zombie
  * turn acting through the bridge with no delegation attached.
  *
- * The thread's lifetime (app-server transport). `thread/tokenUsage/
+ * The thread's lifetime (2026-09-12, docs/REDESIGN.md §15). `thread/tokenUsage/
  * updated` carries `total` (the thread's cumulative bill: 19.4k → 38.8k → 58.2k
  * over three trivial turns) and `last` (the last model request: ~23–33k, the size
  * of the context as it stands). Rollover used to judge `total` against the window,
@@ -73,7 +65,7 @@ export const PRIMER_TEXT = "Reply with the single word ok. Do not call any tools
 
 export interface AppServerOptions extends CodexMcpConfig {
   readonly bin: string;
-  /** Codex's working root: an empty directory of Hormes's, not User's home. */
+  /** Codex's working root: an empty directory of Hormes's, not Kevin's home. */
   readonly cwd: string;
   readonly env: NodeJS.ProcessEnv;
   readonly codexHome: string;
@@ -87,7 +79,7 @@ export interface AppServerOptions extends CodexMcpConfig {
    * 4.4 s narration generation measured before the first tool). Unset = Codex's.
    */
   readonly baseInstructions?: string | undefined;
-  /** `-c service_tier=…` ("priority" is the model's 2× speed tier; User's config pins "default"). Unset = the config.toml's. */
+  /** `-c service_tier=…` ("priority" is the model's 2× speed tier; Kevin's config pins "default"). Unset = the config.toml's. */
   readonly serviceTier?: string | undefined;
   /** Switch off the prompt blocks a coding session gets (skills catalog, escalation text, plugins list); default true. */
   readonly trimPrompt?: boolean | undefined;
@@ -212,12 +204,11 @@ export function appServerEffort(effort: Effort): "low" | "medium" | "high" | "xh
 }
 
 /**
- * The argv of the resident process: the bridge mounted, Codex's own shell and
- * image reader off, the user's own servers off, the plugin runtime (`codex_apps`,
- * his ChatGPT connectors) off, his `notify` hook off, the effort set. Without
- * `--disable apps` the brain could call Drive/Sites/agent tools under
- * approvalPolicy "never" with nothing in Hormes judging them; without the
- * builtins off, its shell could read any file the read-only sandbox lets it.
+ * The argv of the resident process: the bridge mounted, the user's own servers
+ * off, the plugin runtime (`codex_apps`, his ChatGPT connectors) off, his
+ * `notify` hook off, the effort set. Without `--disable apps` the brain could
+ * call Drive/Sites/agent tools under approvalPolicy "never" with nothing in
+ * Hormes judging them.
  */
 export function appServerArgs(o: AppServerOptions): string[] {
   return [
@@ -228,7 +219,6 @@ export function appServerArgs(o: AppServerOptions): string[] {
     "apps",
     "-c",
     "notify=[]",
-    ...codexBuiltinsOffArgs(),
     ...codexMcpConfigArgs(o),
     ...(o.disableUserServers === false ? [] : codexDisableUserServersArgs(o.codexHome)),
     ...(o.trimPrompt === false ? [] : codexPromptTrimArgs()),
@@ -256,12 +246,6 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
   /** How many threads this process has opened (the first at start, one more per rollover). */
   private threadsStarted = 0;
   private primes = { started: 0, completed: 0, interrupted: 0 };
-  /**
-   * Turns given up locally (the interrupt grace ran out, or turn/interrupt failed)
-   * whose server side may still be running: their late items are dropped even
-   * before the next turn's id is known. The last few only.
-   */
-  private readonly abandoned = new Set<string>();
 
   constructor(private readonly opts: AppServerOptions) {
     super();
@@ -505,37 +489,9 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
       });
   }
 
-  /**
-   * Leave the current thread behind for good and open a fresh one in the background
-   * (a rollover, so the brain carries what it kept). For a thread whose history holds
-   * what no later turn may read: Codex's own shell or another MCP server ran on it,
-   * with nothing redacting the output. The id goes at once, so no turn starts on it
-   * again; until the fresh thread is up a task finds no thread and runs on exec. A
-   * replacement already starting is joined: it is a fresh thread either way.
-   */
-  retireThread(why: string): void {
-    const from = this.threadId;
-    if (!from) return;
-    this.threadId = undefined;
-    this.usage = undefined;
-    log.warn(`thread ${from.slice(0, 8)} retired (${why}); a fresh one replaces it`);
-    if (this.running && !this.stopped) void this.rollOver(why);
-  }
-
-  /**
-   * A thread the server closed, or a replacement that could not start: open a fresh
-   * one in the background (a rollover, so the brain carries history). The caller
-   * does not wait; the brain runs the task at hand on exec meanwhile.
-   */
-  reopenThread(why: string): void {
-    if (!this.running || this.threadId || this.rolling || this.active) return;
-    void this.rollOver(why);
-  }
-
   /** One turn on the thread. Resolves on turn/completed; rejects only when the request itself fails. */
   turn(input: readonly UserInput[], handlers: TurnHandlers, turnOpts: TurnOptions = {}): Promise<TurnResult> {
-    if (!this.running) return Promise.reject(new Error("codex app-server is not running"));
-    if (!this.threadId) return Promise.reject(new Error("codex app-server has no thread (the server closed it)"));
+    if (!this.running || !this.threadId) return Promise.reject(new Error("codex app-server is not running"));
     if (this.active) return Promise.reject(new Error("a turn is already running"));
     const threadId = this.threadId;
     const effort = turnOpts.effort ?? this.opts.effort;
@@ -547,8 +503,6 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
           const turnId = (r as { turn?: { id?: string } }).turn?.id;
           if (!turnId) throw new Error("turn/start returned no turn id");
           active.turnId = turnId;
-          // Given up before its id was known: its items are dropped from now on.
-          if (this.active !== active && active.interruptRequested) this.giveUp(active);
           // A stop that arrived while turn/start was in flight goes out now — even when
           // the grace period has already settled the turn locally, the server must hear it.
           if (active.interruptRequested) void this.sendInterrupt(active, threadId);
@@ -564,7 +518,7 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
   }
 
   /**
-   * User said stop: interrupt the running turn; turn/completed follows with
+   * Kevin said stop: interrupt the running turn; turn/completed follows with
    * status "interrupted". Before turn/start has answered the request is remembered
    * and sent the moment the turn id is known; the turn stays active meanwhile so a
    * zombie never runs unwatched. If the server never ends the turn, it is given up
@@ -578,7 +532,7 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
     active.graceTimer = setTimeout(() => {
       if (this.active !== active) return;
       log.warn(`the turn did not end within ${Math.round((this.opts.interruptGraceMs ?? 5000) / 1000)}s of the interrupt; giving it up locally${active.turnId ? "" : " (turn/start never answered)"}`);
-      this.giveUp(active);
+      this.active = undefined;
       active.resolve({ status: "interrupted", turnId: active.turnId });
     }, this.opts.interruptGraceMs ?? 5000);
     active.graceTimer.unref?.();
@@ -594,7 +548,7 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
       log.warn(`turn/interrupt failed: ${(e as Error).message}`);
       if (this.active === active) {
         this.clearGrace(active);
-        this.giveUp(active);
+        this.active = undefined;
         active.resolve({ status: "interrupted", turnId: active.turnId });
       }
     }
@@ -603,25 +557,6 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
   private clearGrace(active: ActiveTurn): void {
     if (active.graceTimer) clearTimeout(active.graceTimer);
     active.graceTimer = undefined;
-  }
-
-  /** The turn is over for this client while its server side may run on: its id joins the dropped ones. */
-  private giveUp(active: ActiveTurn): void {
-    if (this.active === active) this.active = undefined;
-    if (!active.turnId) return;
-    this.abandoned.add(active.turnId);
-    while (this.abandoned.size > 16) this.abandoned.delete(this.abandoned.values().next().value!);
-  }
-
-  /**
-   * Whether a notification that names `turnId` belongs to the active turn. Before
-   * turn/start has answered the active id is unknown: only a turn already given up
-   * is refused then. A notification with no turn id is the thread's, not a turn's.
-   */
-  private isActiveTurn(active: ActiveTurn, turnId: unknown): boolean {
-    if (typeof turnId !== "string" || !turnId) return true;
-    if (active.turnId) return turnId === active.turnId;
-    return !this.abandoned.has(turnId);
   }
 
   /** Close stdin (the app-server exits on it), then SIGKILL if it lingers. */
@@ -739,13 +674,7 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
   }
 
   private onNotification(method: string, params: Record<string, unknown>): void {
-    let active = this.active;
-    // A turn's items, deltas and errors carry its id: another turn's (one given up
-    // locally whose server side ran on) reach no handler of the turn now running.
-    if (active && (method.startsWith("item/") || method === "error" || method === "warning") && !this.isActiveTurn(active, params["turnId"])) {
-      log.debug(`dropped ${method} for ${String(params["turnId"])}: not the active turn ${active.turnId || "(starting)"}`);
-      active = undefined;
-    }
+    const active = this.active;
     switch (method) {
       case "item/started":
         active?.handlers.onItemStarted?.((params["item"] ?? {}) as AppServerItem);
@@ -790,21 +719,12 @@ export class CodexAppServer extends EventEmitter<AppServerEvents> {
         active?.handlers.onError?.(err?.message ?? "Codex reported an error", params["willRetry"] === true);
         return;
       }
-      case "thread/closed": {
-        if (params["threadId"] !== this.threadId || !this.threadId) return;
-        log.warn(`the server closed thread ${this.threadId.slice(0, 8)}; a fresh one replaces it`);
-        this.threadId = undefined;
-        // A turn on the closed thread will never complete: it fails now, not at the wall clock.
-        if (active) {
-          this.clearGrace(active);
-          this.giveUp(active);
-          active.resolve({ status: "failed", error: "the server closed the thread", turnId: active.turnId });
+      case "thread/closed":
+        if (params["threadId"] === this.threadId) {
+          log.warn("the thread was closed by the server");
+          this.threadId = undefined;
         }
-        // Not the next task's to pay for: the replacement starts now, and the rollover
-        // event tells the brain to carry the recent exchanges over.
-        if (this.running && !this.stopped) void this.rollOver("closed by the server");
         return;
-      }
       default:
         return;
     }

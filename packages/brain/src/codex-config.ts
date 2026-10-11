@@ -4,12 +4,11 @@ import { logger } from "@hormes/core";
 
 /**
  * The `-c key=value` overrides both Codex entry points share: the `hormes` MCP
- * server (Hormes's tools over the bridge), Codex's own shell, image reader and
- * connectors switched off (`codexBuiltinsOffArgs`), the prompt blocks Codex would add for
+ * server (Hormes's tools over the bridge), the prompt blocks Codex would add for
  * a coding session and Hormes does not want (`codexPromptTrimArgs`), and, for
  * the app-server, which of the user's own MCP servers to switch off — `codex
  * app-server` has no `--ignore-user-config`, so the CODEX_HOME config.toml loads
- * and User's computer-use, browser and REPL servers would let Codex act on the
+ * and Kevin's computer-use, browser and REPL servers would let Codex act on the
  * Mac around Hormes's policy. Since 2026-09-12 that CODEX_HOME is Hormes's own
  * (`prepareCodexHome`), so the disabling is a belt for the fallback case only.
  */
@@ -26,7 +25,7 @@ export const CODEX_HOME_DIRNAME = "codex-home";
 export interface CodexHomeOptions {
   /** Hormes's state dir (~/.hormes); the home is `<stateDir>/codex-home`. */
   readonly stateDir: string;
-  /** User's real Codex home (his login, his model line): ~/.codex by default. */
+  /** Kevin's real Codex home (his login, his model line): ~/.codex by default. */
   readonly sourceHome: string;
 }
 
@@ -50,13 +49,13 @@ export function codexConfigTopLevel(text: string, keys: readonly string[]): Reco
   return out;
 }
 
-/** The model lines Hormes copies from User's config.toml — and nothing else. */
+/** The model lines Hormes copies from Kevin's config.toml — and nothing else. */
 export const CODEX_HOME_COPIED_KEYS = ["model", "model_reasoning_effort", "service_tier"] as const;
 
 /**
  * Build (or refresh) Hormes's own CODEX_HOME and say which home to use.
  *
- * Why: every fresh thread inherited everything in User's ~/.codex — the skills
+ * Why: every fresh thread inherited everything in Kevin's ~/.codex — the skills
  * catalog (~8.4k tokens: 260 of 718 skills listed and a budget warning per turn),
  * his global AGENTS.md (~0.7k tokens pointing at a wiki checkout that no longer
  * exists: 13 bootstrap calls and 22.5 s of one wiki-search delegation), the
@@ -106,7 +105,7 @@ export function prepareCodexHome(o: CodexHomeOptions): CodexHome {
     if (!st) symlinkSync(auth, link);
     // No AGENTS.md of anyone's.
     rmSync(join(home, "AGENTS.md"), { force: true });
-    // A config.toml of Hormes's: the model lines from User's, nothing else.
+    // A config.toml of Hormes's: the model lines from Kevin's, nothing else.
     let source = "";
     try {
       source = readFileSync(join(o.sourceHome, "config.toml"), "utf8");
@@ -116,7 +115,7 @@ export function prepareCodexHome(o: CodexHomeOptions): CodexHome {
     const copied = codexConfigTopLevel(source, CODEX_HOME_COPIED_KEYS);
     const lines = [
       "# Written by Hormes (packages/brain/src/codex-config.ts) at every brain start; edits here are lost.",
-      `# The user's own Codex config is ${join(o.sourceHome, "config.toml")}; only its model lines are copied.`,
+      `# Kevin's own Codex config is ${join(o.sourceHome, "config.toml")}; only its model lines are copied.`,
       "# No plugins, marketplaces, notify hook, MCP servers or skills belong here: Hormes's tools arrive as -c overrides.",
       ...CODEX_HOME_COPIED_KEYS.filter((k) => copied[k] !== undefined).map((k) => `${k} = ${toml(copied[k]!)}`),
       "",
@@ -178,48 +177,6 @@ export function codexPromptTrimArgs(): string[] {
 }
 
 /**
- * Codex's own tools that reach past Hormes, by feature key: its shell
- * (`shell_tool`), its image reader (`view_image`) and the plugin runtime (`apps`:
- * the user's ChatGPT connectors, Drive, Sites and agents among them, 134 tools
- * with deletes and shares). The read-only sandbox stops writes, not reads, and
- * approval "never" asks nobody: a read of ~/.ssh or ~/.hormes/env through
- * Codex's shell reached the model with no policy, no secret-store refusal and no
- * redactor in between (RAIL-4, launch audit 2026-10-05). With these off, the only
- * way Codex reads or acts is the `hormes` MCP server, whose calls land in the
- * ToolRunner.
- *
- * `apps` rides both argvs. `--ignore-user-config` skips config.toml, not a
- * feature's default, and `apps` defaults on, so exec needs it too. The
- * app-server's own `--disable apps` says the same thing twice.
- *
- * Checked on 0.159.2 with `codex features list -c features.<key>=false` under a
- * temp HOME and CODEX_HOME (no login, outbound network denied, no turn): all
- * three read back false. `unified_exec` reads back true whatever `-c` says, so
- * it is not passed; it only picks which shell tool to build while `shell_tool`
- * is on. The tool list itself is built for a turn, so it was not rendered here.
- * The opt-in check in codex-launch.test.ts (HORMES_CODEX_TOOLS_CHECK) renders it
- * with one `codex exec` turn against a localhost stand-in, and RAIL-4 stays
- * closed pending that run. Meanwhile a Codex that still runs a command is caught
- * at run time: the turn fails and its thread is retired (codex.ts, `ownShell`).
- */
-export const CODEX_BUILTINS_OFF = ["shell_tool", "view_image", "apps"] as const;
-
-/**
- * Codex's own hosted web search, off (W3-4 review fix). 0.159.2 has a top-level `web_search` key ("disabled",
- * "cached", "indexed", "live"; the deprecated `features.web_search_*` flags read false). When it is on, the Responses
- * `web_search` tool runs on OpenAI's side, past classifyUrl and the redactor, as the Responses brain's hosted search
- * did before W3-4 removed it. Its default cannot be read without a turn (`codex features list` does not show it and
- * `codex debug prompt-input` renders no tools), so it is switched off by name: `-c web_search="disabled"` parses on
- * 0.159.2 (an unknown value fails: "unknown variant"). The hormes MCP server's own web_search, through the runner,
- * is the search every brain has.
- */
-export const CODEX_WEB_SEARCH_OFF = 'web_search="disabled"';
-
-export function codexBuiltinsOffArgs(): string[] {
-  return [...CODEX_BUILTINS_OFF.flatMap((feature) => ["-c", `features.${feature}=false`]), "-c", CODEX_WEB_SEARCH_OFF];
-}
-
-/**
  * A TOML basic string; JSON's escapes are a subset of TOML's. The one character JSON
  * leaves raw and TOML forbids in a basic string is DEL (U+007F): escaped here so no
  * path or id can make the `-c` value unparseable.
@@ -236,25 +193,22 @@ export interface CodexMcpConfig {
   /** Where the bridge's tool.run messages go. */
   readonly socketPath: string;
   /**
-   * The thread this Codex process is the brain of (its `t_…` id). Rides into the bridge's
-   * env as `HORMES_THREAD`, so every tool.run names the thread and the daemon routes it to
-   * that thread's lane runner instead of the main brain's. Absent (or empty) for the main brain.
+   * The worker this Codex process is the brain of (its `w_…` id). Rides into the bridge's
+   * env as `HORMES_WORKER`, so every tool.run names the worker and the daemon routes it to
+   * that worker's lane runner instead of the main brain's. Absent (or empty) for the main brain.
    */
-  readonly thread?: string | undefined;
-  /**
-   * What the bridge calls the person Hormes works for (the engine's effective name). Rides
-   * into the bridge's env as `HORMES_USER_NAME`, so the tool descriptions and the server
-   * instructions Codex reads say the user's name. Absent (or empty) = the bridge's default.
-   */
-  readonly userName?: string | undefined;
+  readonly worker?: string | undefined;
   /** MCP server start / per-tool budgets, in seconds. */
   readonly startupTimeoutSec?: number | undefined;
   readonly toolTimeoutSec?: number | undefined;
 }
 
-/** The bridge's environment as a TOML inline table: the daemon socket, the thread id when this brain is a thread's, and the user's name when one is set. */
-export function codexBridgeEnv(o: Pick<CodexMcpConfig, "socketPath" | "thread" | "userName">): string {
-  const pairs = [`HORMES_SOCKET=${toml(o.socketPath)}`, ...(o.thread ? [`HORMES_THREAD=${toml(o.thread)}`] : []), ...(o.userName ? [`HORMES_USER_NAME=${toml(o.userName)}`] : [])];
+/**
+ * The bridge's environment as a TOML inline table: the daemon socket, and the worker id
+ * when this brain is a worker's. The one-key form is byte-identical to what it always was.
+ */
+export function codexBridgeEnv(o: Pick<CodexMcpConfig, "socketPath" | "worker">): string {
+  const pairs = [`HORMES_SOCKET=${toml(o.socketPath)}`, ...(o.worker ? [`HORMES_WORKER=${toml(o.worker)}`] : [])];
   return `{${pairs.join(", ")}}`;
 }
 
@@ -281,7 +235,7 @@ export function codexMcpConfigArgs(o: CodexMcpConfig): string[] {
 }
 
 /**
- * The MCP servers User's config.toml declares (`[mcp_servers.<name>]`), by bare
+ * The MCP servers Kevin's config.toml declares (`[mcp_servers.<name>]`), by bare
  * name. Quoted names cannot be addressed through a `-c` dotted path (checked on
  * 0.153.4: `mcp_servers."x".enabled=false` fails with "invalid transport") and are
  * reported instead of guessed at.
