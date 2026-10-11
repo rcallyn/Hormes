@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, rmdirSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, relative } from "node:path";
-import { HANDS_OFF_APPS, REPO_ROOT, classifyAction, classifyAppleScript, classifyPath, classifyUrl, expandPath, logger, newId, shellCwdReason, type Decision } from "@hormes/core";
+import { HANDS_OFF_APPS, REPO_ROOT, classifyAction, classifyAppleScript, classifyPath, classifyUrl, expandPath, logger, newId, shellCwdReason, type Decision, Ledger } from "@hormes/core";
 import type { AgentRegistry } from "@hormes/agents";
 import { DaemonClient } from "@hormes/daemon";
 import { ComputerToolset, type ToolResult } from "@hormes/hands";
@@ -11,6 +12,7 @@ import { describeWindow, editText, listTree, readWindow, realPathOf, searchFiles
 import { SelfEditManager, type SelfEditOptions } from "./selfedit.ts";
 import { BackgroundJobs, DEFAULT_SHELL_TIMEOUT_MS, MAX_SHELL_TIMEOUT_MS, OUTPUT_CAP, SecretRedactor, describeShellResult, runAppleScript, runShell, truncateOutput } from "./shell.ts";
 import { fetchReadable, searchWeb } from "./web.ts";
+import { BrowserTools } from "./browser.ts";
 
 /**
  * Executes tool calls by name. Every brain routes every call through here so the
@@ -58,9 +60,25 @@ export interface RunnerOptions {
   readonly home?: string | undefined;
   readonly env?: NodeJS.ProcessEnv | undefined;
   readonly fetch?: typeof fetch | undefined;
+  /** The per-delegation cap on the shots archive (default SHOTS_CAP): the oldest files past it MOVE to <stateDir>/trash/shots. */
+  readonly shotsCap?: ShotsCap | undefined;
+  /**
+   * The ledger, for the `ledger.moved` row each eviction pass writes (one per day
+   * touched, `by: "retention"`, the path the files went to). Absent, the manifest
+   * line under trash/manifest.jsonl is the only record — the engine wires this.
+   */
+  readonly ledger?: Ledger | undefined;
 }
 
 export type ToolRunnerOptions = RunnerOptions;
+
+export interface ShotsCap {
+  readonly files: number;
+  readonly bytes: number;
+}
+
+/** At most this many screenshot files / bytes stay under <stateDir>/shots; the day-level retention sweep is the engine's. */
+export const SHOTS_CAP: ShotsCap = { files: 400, bytes: 1024 * 1024 * 1024 };
 
 export interface RunOutcome {
   readonly result: ToolResult;
@@ -76,14 +94,24 @@ export class ToolRunner {
   private task: BrainTask | undefined;
   /** Files read during the current task; overwriting one the brain never looked at asks first. */
   private readonly readThisTask = new Set<string>();
+  /** When the current task was attached; a stop kills the background jobs started since. */
+  private taskStartedAt = 0;
+  /** Timers for the arrow heads that follow a traced arrow; a stop or a clear drops them. */
+  private readonly pendingHeads = new Set<NodeJS.Timeout>();
   private readonly now: () => number;
   private readonly home: string;
   private readonly repoRoot: string;
   readonly jobs: BackgroundJobs;
   readonly selfEdit: SelfEditManager;
+  /** The browser fast path (page scripting when the browser allows it, accessibility otherwise). */
+  readonly browser: BrowserTools;
   /** Secret values (Hormes's keys, everything in ~/.hormes/env, secret-shaped strings) are struck from every result. */
   readonly redactor: SecretRedactor;
   private lastProgressAt = 0;
+  /** Screenshots archived during this task, by the sha-256 of their bytes: the same frame twice is one file. */
+  private readonly shotsThisTask = new Map<string, string>();
+  /** What lives under <stateDir>/shots, kept current as the runner writes (built from disk on first use). */
+  private shotsIndex: { files: { rel: string; mtimeMs: number; size: number }[]; bytes: number } | undefined;
 
   constructor(private readonly opts: RunnerOptions) {
     this.now = opts.now ?? Date.now;
@@ -91,6 +119,7 @@ export class ToolRunner {
     this.repoRoot = opts.repoRoot ?? REPO_ROOT;
     this.redactor = new SecretRedactor(opts.env ?? process.env, this.home, this.now);
     this.jobs = new BackgroundJobs(opts.stateDir);
+    this.browser = new BrowserTools({ hands: opts.toolset.hands, toolset: opts.toolset, now: this.now });
     this.selfEdit = new SelfEditManager({
       repoRoot: opts.repoRoot ?? REPO_ROOT,
       worktreesDir: join(opts.stateDir, "worktrees"),
@@ -105,9 +134,34 @@ export class ToolRunner {
     this.sink = sink;
     if (task && task !== this.task) {
       this.task = task;
+      this.taskStartedAt = this.now();
       this.readThisTask.clear();
+      this.shotsThisTask.clear();
     }
     if (!sink) this.task = undefined;
+  }
+
+  /**
+   * True while a brain (or the engine's eyes / a reflex) has a sink attached: the
+   * daemon refuses an out-of-process `tool.run` otherwise, so a Codex turn that
+   * outlived its delegation (a stop during turn/start) cannot act unwatched.
+   */
+  get attached(): boolean {
+    return this.sink !== undefined || this.task !== undefined;
+  }
+
+  /**
+   * Kevin pressed stop: end what this task set in motion outside the brain's own
+   * turn — the background shell jobs it started (the task's signal already ends a
+   * foreground command and a self-edit) and the arrow heads still to be drawn.
+   * Returns what was stopped, for the log.
+   */
+  abortTask(reason: string): { jobs: number } {
+    const jobs = this.taskStartedAt ? this.jobs.stopSince(this.taskStartedAt) : 0;
+    for (const t of this.pendingHeads) clearTimeout(t);
+    this.pendingHeads.clear();
+    if (jobs) log.info(`${reason}: stopped ${jobs} background job(s) this task started`);
+    return { jobs };
   }
 
   async run(name: string, input: unknown): Promise<RunOutcome> {
@@ -157,16 +211,117 @@ export class ToolRunner {
     }
   }
 
+  /**
+   * Archive a screenshot under <stateDir>/shots/<day>/. Identical bytes within one
+   * delegation (a screen that did not change between two looks) are archived once and
+   * the first path is reused. Past the cap (files or bytes, `shotsCap`) the oldest files
+   * MOVE to <stateDir>/trash/shots/<day>/ by rename(2) — never unlinked; the day-level
+   * retention sweep owns the trash from there. Nothing here is awaited by anyone on the
+   * voice path: the runner archives after the tool has answered.
+   */
   private archive(pngBase64: string): string {
-    const day = new Date(this.now()).toISOString().slice(0, 10);
+    const bytes = Buffer.from(pngBase64, "base64");
+    const sha = createHash("sha256").update(bytes).digest("hex");
+    const seen = this.shotsThisTask.get(sha);
+    if (seen && existsSync(join(this.opts.stateDir, seen))) return seen;
+    const day = Ledger.dayFor(this.now()); // the ledger's LOCAL day, so retention and the pinned/open guards line up
     const rel = join("shots", day, `${newId("shot")}.png`);
     try {
+      // The index is read from disk before this file lands, so the file is counted once.
+      const idx = this.shots();
       mkdirSync(join(this.opts.stateDir, "shots", day), { recursive: true });
-      writeFileSync(join(this.opts.stateDir, rel), Buffer.from(pngBase64, "base64"));
+      writeFileSync(join(this.opts.stateDir, rel), bytes);
+      this.shotsThisTask.set(sha, rel);
+      idx.files.push({ rel, mtimeMs: this.now(), size: bytes.length });
+      idx.bytes += bytes.length;
+      this.evictShots();
     } catch (e) {
       log.warn(`could not archive screenshot: ${(e as Error).message}`);
     }
     return rel;
+  }
+
+  /** The shots index: read from disk once (every <day>/<file>.png under shots/), then kept current. */
+  private shots(): { files: { rel: string; mtimeMs: number; size: number }[]; bytes: number } {
+    if (this.shotsIndex) return this.shotsIndex;
+    const root = join(this.opts.stateDir, "shots");
+    const files: { rel: string; mtimeMs: number; size: number }[] = [];
+    let bytes = 0;
+    if (existsSync(root)) {
+      for (const day of readdirSync(root, { withFileTypes: true })) {
+        if (!day.isDirectory()) continue;
+        for (const f of readdirSync(join(root, day.name), { withFileTypes: true })) {
+          if (!f.isFile()) continue;
+          try {
+            const st = statSync(join(root, day.name, f.name));
+            files.push({ rel: join("shots", day.name, f.name), mtimeMs: st.mtimeMs, size: st.size });
+            bytes += st.size;
+          } catch {
+            // gone between readdir and stat: not ours to count
+          }
+        }
+      }
+    }
+    files.sort((a, b) => a.mtimeMs - b.mtimeMs || a.rel.localeCompare(b.rel));
+    this.shotsIndex = { files, bytes };
+    return this.shotsIndex;
+  }
+
+  /**
+   * Oldest first, past either cap, moved (rename) into the trash; the live day folder is
+   * removed only once it is empty. The Trash's unit is the whole day (core's trash.ts):
+   * a day folder the cap has already started lives in both places, so its later move
+   * MERGES into what is there and a restore merges back — the Trash reads the folders,
+   * not a record, so nothing is lost either way. Every file moved gets its line in
+   * trash/manifest.jsonl (the Trash's own record shape), and each day touched in one
+   * pass gets one `ledger.moved` row when a ledger is wired.
+   */
+  private evictShots(): void {
+    const cap = this.opts.shotsCap ?? SHOTS_CAP;
+    const idx = this.shots();
+    let moved = 0;
+    const at = this.now();
+    const days = new Map<string, string>(); // day → the trash day folder its files went to
+    while (idx.files.length > 0 && (idx.files.length > cap.files || idx.bytes > cap.bytes)) {
+      const oldest = idx.files.shift()!;
+      idx.bytes -= oldest.size;
+      const from = join(this.opts.stateDir, oldest.rel);
+      const to = join(this.opts.stateDir, "trash", oldest.rel);
+      try {
+        mkdirSync(join(to, ".."), { recursive: true });
+        renameSync(from, to);
+        moved++;
+        const dayDir = join(from, "..");
+        const day = oldest.rel.split(/[\\/]/)[1] ?? "";
+        days.set(day, join(to, ".."));
+        this.manifest({ at, day, what: "shots", to: "trash", from, path: to, by: "retention" });
+        if (readdirSync(dayDir).length === 0) rmdirSync(dayDir);
+      } catch (e) {
+        log.warn(`could not move ${oldest.rel} to the trash: ${(e as Error).message}`);
+        // The index no longer matches the disk; rebuild it next time.
+        this.shotsIndex = undefined;
+        break;
+      }
+    }
+    for (const [day, path] of days) {
+      try {
+        this.opts.ledger?.append({ at, type: "ledger.moved", day, what: "shots", to: "trash", path, by: "retention" });
+      } catch (e) {
+        log.warn(`shots: ledger.moved row for ${day} not written: ${(e as Error).message}`);
+      }
+    }
+    if (moved) log.info(`shots: moved ${moved} oldest screenshot${moved === 1 ? "" : "s"} to the trash (cap ${cap.files} files / ${Math.round(cap.bytes / 1_048_576)} MB)`);
+  }
+
+  /** One line in <stateDir>/trash/manifest.jsonl, in the Trash's record shape (a convenience for Finder; the ledger row is the record). */
+  private manifest(line: { at: number; day: string; what: "shots"; to: "trash"; from: string; path: string; by: "retention" }): void {
+    try {
+      const dir = join(this.opts.stateDir, "trash");
+      mkdirSync(dir, { recursive: true });
+      appendFileSync(join(dir, "manifest.jsonl"), `${JSON.stringify(line)}\n`);
+    } catch (e) {
+      log.warn(`shots: manifest line not written: ${(e as Error).message}`);
+    }
   }
 
   private async dispatch(name: string, args: Record<string, unknown>): Promise<ToolResult> {
@@ -208,6 +363,18 @@ export class ToolRunner {
         return this.appleScript(args);
       case "open_url":
         return this.openUrl(args);
+      case "browser_read":
+        return this.browser.read(args);
+      case "browser_find":
+        return this.browser.find(args);
+      case "browser_click":
+        return this.browser.click(args);
+      case "browser_type":
+        return this.browser.type(args);
+      case "browser_navigate":
+        return this.browser.navigate(args);
+      case "browser_tabs":
+        return this.browser.tabs(args);
       case "clipboard_read":
         return this.clipboardRead();
       case "clipboard_write":
@@ -333,8 +500,14 @@ export class ToolRunner {
     return classifyPath({ path, access, home: this.home, realPath: realPathOf(path), repoRoot: this.repoRoot, writableRoots: this.writableRoots(), request: this.request, ...extra });
   }
 
-  private ask(description: string, member: string, input: Record<string, unknown>, decision: Decision, extra = ""): ToolResult {
-    const pending = this.opts.toolset.confirmations.ask(description, member, input);
+  /**
+   * The runner's own questions (a shell command, a file outside Hormes's places, a script, an
+   * agent in the checkout, a self-apply) are one-offs: the yes is spent on that action. The
+   * grant context is forwarded all the same — the policy decides what a yes keeps (`Decision.grant`),
+   * and today it names a class only for the hands' hands-off question, never for these.
+   */
+  private ask(description: string, member: string, input: Record<string, unknown>, decision: Decision, extra = "", app = ""): ToolResult {
+    const pending = this.opts.toolset.confirmations.ask(description, member, input, decision.grant && app ? { app, actionClass: decision.grant } : undefined);
     return { kind: "needs-confirmation", pendingId: pending.id, question: `About to ${description}.${extra ? ` ${extra}` : ""} ${decision.reason}. Ask Kevin to confirm out loud, then stop; do not retry until he says yes.` };
   }
 
@@ -370,7 +543,7 @@ export class ToolRunner {
         if (last) this.progress(`${command.split(/\s+/)[0]}: ${last}`);
       },
     });
-    return { kind: "text", text: describeShellResult(r) };
+    return { kind: "text", text: describeShellResult(r, undefined, command) };
   }
 
   // --------------------------------------------------------------- files
@@ -639,23 +812,39 @@ export class ToolRunner {
     const fade = `fades in ${Math.round((ttlMs ?? 6000) / 1000)} s`;
     const label = typeof args["label"] === "string" && args["label"].trim() ? { label: args["label"].trim().slice(0, 60) } : {};
     const ttl = ttlMs !== undefined ? { ttlMs } : {};
+    // By default the blob flies over and draws the shape by hand (orb.trace); `quick`
+    // stamps it on the layer at once, for when speed matters more than the show.
+    const quick = args["quick"] === true;
+    const how = quick ? "stamped" : "the blob is drawing it";
     switch (name) {
       case "show_clear":
+        for (const t of this.pendingHeads) clearTimeout(t);
+        this.pendingHeads.clear();
         this.overlay({ cmd: "clear" });
         return { kind: "text", text: "cleared the drawings" };
       case "show_circle": {
         const p = this.toPoints(numberArg(args, "x"), numberArg(args, "y"));
         const radius = Math.max(4, this.toLength(numberArg(args, "radius")));
-        this.overlay({ cmd: "circle", x: p.x, y: p.y, radius, ...label, ...ttl, tone: "accent" });
-        return { kind: "text", text: `drew a circle at ${fmt(p)} (global points), radius ${Math.round(radius)}; ${fade}` };
+        if (quick) this.overlay({ cmd: "circle", x: p.x, y: p.y, radius, ...label, ...ttl, tone: "accent" });
+        else this.overlay({ cmd: "orb.trace", points: circlePoints(p, radius), closed: true, ...label, ...ttl, tone: "accent", reason: "show_circle" });
+        return { kind: "text", text: `drew a circle at ${fmt(p)} (global points), radius ${Math.round(radius)}; ${how}; ${fade}` };
       }
       case "show_arrow": {
         const [fx, fy] = pairArg(args, "from");
         const [tx, ty] = pairArg(args, "to");
         const from = this.toPoints(fx, fy);
         const to = this.toPoints(tx, ty);
-        this.overlay({ cmd: "arrow", from, to, ...label, ...ttl, tone: "accent" });
-        return { kind: "text", text: `drew an arrow from ${fmt(from)} to ${fmt(to)} (global points); ${fade}` };
+        if (quick) this.overlay({ cmd: "arrow", from, to, ...label, ...ttl, tone: "accent" });
+        else {
+          // The blob traces the shaft; the head is stamped the moment the trace should have landed.
+          this.overlay({ cmd: "orb.trace", points: [from, to], closed: false, ...ttl, tone: "accent", reason: "show_arrow" });
+          const head = setTimeout(() => {
+            this.pendingHeads.delete(head);
+            this.overlay({ cmd: "arrow", from: headStart(from, to), to, ...label, ...ttl, tone: "accent" });
+          }, traceDurationMs([from, to]));
+          this.pendingHeads.add(head);
+        }
+        return { kind: "text", text: `drew an arrow from ${fmt(from)} to ${fmt(to)} (global points); ${how}; ${fade}` };
       }
       case "show_rect": {
         const raw = args["rect"];
@@ -663,8 +852,9 @@ export class ToolRunner {
         const [x, y, w, h] = raw as [number, number, number, number];
         const origin = this.toPoints(Math.min(x, x + w), Math.min(y, y + h));
         const rect: Rect = { x: origin.x, y: origin.y, w: Math.max(1, this.toLength(Math.abs(w))), h: Math.max(1, this.toLength(Math.abs(h))) };
-        this.overlay({ cmd: "rect", rect, ...label, ...ttl, tone: "accent" });
-        return { kind: "text", text: `framed ${Math.round(rect.w)}×${Math.round(rect.h)} at ${fmt(rect)} (global points); ${fade}` };
+        if (quick) this.overlay({ cmd: "rect", rect, ...label, ...ttl, tone: "accent" });
+        else this.overlay({ cmd: "orb.trace", points: rectPoints(rect), closed: true, ...label, ...ttl, tone: "accent", reason: "show_rect" });
+        return { kind: "text", text: `framed ${Math.round(rect.w)}×${Math.round(rect.h)} at ${fmt(rect)} (global points); ${how}; ${fade}` };
       }
       case "show_text": {
         const text = String(args["text"] ?? "").trim();
@@ -680,8 +870,9 @@ export class ToolRunner {
           if (!Array.isArray(pt) || pt.length !== 2 || !pt.every(isFiniteNumber)) throw new Error(`points[${i}] must be [x, y]`);
           return this.toPoints(pt[0] as number, pt[1] as number);
         });
-        this.overlay({ cmd: "stroke", points, ...label, ...ttl, tone: "accent" });
-        return { kind: "text", text: `drew a stroke through ${points.length} points, ${fmt(points[0]!)} to ${fmt(points[points.length - 1]!)} (global points); ${fade}` };
+        if (quick) this.overlay({ cmd: "stroke", points, ...label, ...ttl, tone: "accent" });
+        else this.overlay({ cmd: "orb.trace", points, closed: false, ...label, ...ttl, tone: "accent", reason: "show_stroke" });
+        return { kind: "text", text: `drew a stroke through ${points.length} points, ${fmt(points[0]!)} to ${fmt(points[points.length - 1]!)} (global points); ${how}; ${fade}` };
       }
       default:
         return { kind: "error", message: `unknown drawing tool ${name}` };
@@ -733,6 +924,43 @@ function ttlOf(args: Record<string, unknown>): number | undefined {
 
 function fmt(p: { x: number; y: number }): string {
   return `${Math.round(p.x)},${Math.round(p.y)}`;
+}
+
+/** A circle as the blob draws it: 40 points around, starting at the top, closed by the layer. */
+export function circlePoints(center: Point, radius: number, n = 40): Point[] {
+  const out: Point[] = [];
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
+    out.push({ x: center.x + Math.cos(a) * radius, y: center.y + Math.sin(a) * radius });
+  }
+  return out;
+}
+
+/** A rectangle's corners, clockwise from the top-left; closed by the layer. */
+export function rectPoints(r: Rect): Point[] {
+  return [
+    { x: r.x, y: r.y },
+    { x: r.x + r.w, y: r.y },
+    { x: r.x + r.w, y: r.y + r.h },
+    { x: r.x, y: r.y + r.h },
+  ];
+}
+
+/** How long the blob takes to trace a path: a flight to the start plus ~1.4 points per ms along it, capped. */
+export function traceDurationMs(points: readonly Point[]): number {
+  let length = 0;
+  for (let i = 1; i < points.length; i++) length += Math.hypot((points[i]!.x - points[i - 1]!.x), (points[i]!.y - points[i - 1]!.y));
+  return Math.min(3000, Math.round(350 + length / 1.4));
+}
+
+/** Where the arrow head's shaft starts: 28 points before the tip along the line, so the stamped head sits on the traced line's end. */
+export function headStart(from: Point, to: Point): Point {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 1) return from;
+  const back = Math.min(28, len);
+  return { x: to.x - (dx / len) * back, y: to.y - (dy / len) * back };
 }
 
 function summarize(result: ToolResult): unknown {

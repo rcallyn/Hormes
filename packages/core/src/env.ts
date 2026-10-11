@@ -182,7 +182,7 @@ export function readConfig(): HormesConfig {
     openaiApiKey: env["OPENAI_API_KEY"] || undefined,
     anthropicApiKey: env["ANTHROPIC_API_KEY"] || undefined,
     liveModel: env["HORMES_LIVE_MODEL"] || "gpt-live-1",
-    liveVoice: env["HORMES_VOICE"] || "cedar",
+    liveVoice: env["HORMES_VOICE"] || "ballad",
     brain: brain !== undefined && BRAINS.includes(brain) ? brain : "auto",
     brainModel: env["HORMES_BRAIN_MODEL"] || "",
     codexBin: env["HORMES_CODEX_BIN"] || undefined,

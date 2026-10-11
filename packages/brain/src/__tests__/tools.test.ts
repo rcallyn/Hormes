@@ -11,7 +11,7 @@ import { htmlToText, parseDuckDuckGo } from "../web.ts";
 import { globToRegExp } from "../files.ts";
 import { redactSecrets, runShell, secretValues, truncateOutput } from "../shell.ts";
 import { zodShape } from "../claude.ts";
-import { ALL_TOOL_SPECS, SELF_SPECS, SYSTEM_SPECS, specByName } from "../tools.ts";
+import { ALL_TOOL_SPECS, AGENT_SPECS, OBSERVATION_CLAUSE, SELF_SPECS, SYSTEM_SPECS, THREAD_SPECS, THREAD_TOOL_NAMES, WORKER_SPECS, WORKER_TOOL_ALIASES, specByName, threadToolName } from "../tools.ts";
 import { progressLine } from "../responses.ts";
 import { FakeHands, makeRunner, makeSink, makeTask } from "./fakes.ts";
 
@@ -144,6 +144,18 @@ test("file tools: list_dir descends to a depth and skips node_modules; search_fi
   assert.ok(!swift.includes("a.ts"));
   assert.match(resultText((await runner.run("search_files", { root, pattern: "zzz-nothing" })).result), /no matches/);
   assert.match(resultText((await runner.run("search_files", { root, pattern: "(" })).result), /not a valid regular expression/);
+  // A model without a parameter schema writes (?i): honoured, not "Invalid group"; an all-lowercase
+  // pattern is case-insensitive on its own, an uppercase letter asks for that case; the secret store stays out.
+  writeFileSync(join(root, "src", "Design.md"), "Design System\nno design here\n");
+  const ci = resultText((await runner.run("search_files", { root, pattern: "(?i)design", glob: "*.md" })).result);
+  assert.match(ci, /2 matches/);
+  assert.match(ci, /Design\.md:1: Design System/);
+  assert.match(resultText((await runner.run("search_files", { root, pattern: "design", glob: "*.md" })).result), /2 matches/);
+  assert.match(resultText((await runner.run("search_files", { root, pattern: "Design", glob: "*.md" })).result), /1 match\b/);
+  assert.match(resultText((await runner.run("search_files", { root, pattern: "(?im)^design", glob: "*.md" })).result), /1 match\b/);
+  const secret = resultText((await runner.run("search_files", { root, pattern: "(?i)SECRET" })).result);
+  assert.ok(!secret.includes(".env") && !secret.includes("needle"), secret);
+  assert.match(resultText((await runner.run("search_files", { root, pattern: "(?i)(" })).result), /not a valid regular expression/);
   assert.match(resultText((await runner.run("list_dir", { path: join(home, ".ssh") })).result), /refused/);
 
   const g = globToRegExp("src/**/*.swift");
@@ -206,7 +218,8 @@ test("run_shell: anything non-destructive runs with secrets scrubbed, output is 
   assert.ok(m, resultText(bg.result));
   const pid = Number(m![1]);
   assert.ok(runner.jobs.pids().includes(pid));
-  await new Promise((r) => setTimeout(r, 300));
+  // A login shell under a loaded test run can take a moment to echo; wait for the line, up to 3 s.
+  for (let i = 0; i < 30 && !/started/.test(readFileSync(m![2]!, "utf8")); i++) await new Promise((r) => setTimeout(r, 100));
   assert.match(readFileSync(m![2]!, "utf8"), /started/);
   assert.equal(resultText((await runner.run("run_shell", { command: `kill ${pid}` })).result), "(no output)");
   await new Promise((r) => setTimeout(r, 200));
@@ -320,6 +333,103 @@ test("tool table: the new specs are complete, zod-shaped, and have progress line
   assert.equal(progressLine("web_fetch", { url: "https://example.com/x" }), "Fetching example.com.");
   assert.equal(progressLine("self_apply", {}), "Applying the change to myself.");
   assert.match(specByName("self_apply")!.description, /apply the change to Hormes and restart it\?/);
+  // What the other brains and the MCP listing read says what was measured: applescript is a slow process, never
+  // for the front app or a page; search_files honours (?i) and smart case; read_focused_text fails in Chromium.
+  assert.match(specByName("applescript")!.description, /often seconds — never for what a fast tool answers: frontmost_app for the front app .*browser_\* tools/);
+  assert.match(specByName("search_files")!.description, /Case-insensitive when the pattern has no uppercase letter.*\(\?i\)/);
+  assert.match(specByName("read_focused_text")!.description, /Fails in Chromium browsers .*use browser_read or browser_find there/);
+  assert.match(specByName("frontmost_app")!.description, /about 20 ms/);
+  assert.match(specByName("click_element")!.description, /that is the verification, no screenshot needed/);
+  assert.match(specByName("type")!.description, /OK means the keystrokes were delivered/);
+  // Results that only echo the request are not sold as verification, and no description carries a
+  // quick-shot pixel size (screen.ts's QUICK_SHOT_BUDGET changes without this file knowing).
+  assert.match(specByName("focus_app")!.description, /only echoes the name; its now: line says what is actually in front/);
+  assert.match(specByName("browser_navigate")!.description, /loading, not loaded; browser_read confirms/);
+  assert.ok(!/\b1280\b/.test(JSON.stringify(specByName("screenshot"))), "no stale quick-shot size in the screenshot spec");
+});
+
+test("tool table: the four thread specs replace the worker specs after the agents (67 stays), carry the split rule, the same-turn rule and 'do not thread_wait', cap thread_wait at 240 s, accept worker_* as aliases by name, have progress lines, and are not the runner's without a scheduler", async () => {
+  assert.deepEqual(THREAD_SPECS.map((s) => s.name), ["thread_start", "thread_wait", "thread_read", "thread_stop"]);
+  const names = ALL_TOOL_SPECS.map((s) => s.name);
+  assert.equal(names.indexOf("thread_start"), names.indexOf("agent_start") + 1, "THREAD_SPECS follow AGENT_SPECS in the table");
+  assert.equal(ALL_TOOL_SPECS.length, 67);
+  assert.equal(AGENT_SPECS.length, 5, "a Thread is not an Agent: the agent tools are unchanged");
+  assert.ok(!names.some((n) => n.startsWith("worker_")), "the worker_* names are gone from the spec list");
+  assert.equal(WORKER_SPECS, THREAD_SPECS, "the deprecated alias still compiles for one release");
+  // Aliases: the scheduler answers the old names for one release; the mapping is by name only.
+  assert.deepEqual(WORKER_TOOL_ALIASES, { worker_start: "thread_start", worker_wait: "thread_wait", worker_read: "thread_read", worker_stop: "thread_stop" });
+  for (const [old, now] of Object.entries(WORKER_TOOL_ALIASES)) assert.equal(threadToolName(old), now);
+  assert.equal(threadToolName("thread_read"), "thread_read");
+  assert.equal(threadToolName("left_click"), undefined);
+  assert.deepEqual([...THREAD_TOOL_NAMES].sort(), ["thread_read", "thread_start", "thread_stop", "thread_wait", "worker_read", "worker_start", "worker_stop", "worker_wait"]);
+  // The rule the standing orders do not carry: one thread per independent app, in the same turn as the
+  // brain's own first action; do not thread_wait; a thread's speak_progress speaks once with its name.
+  const start = specByName("thread_start")!;
+  assert.match(start.description, /One thread per independent app/);
+  assert.match(start.description, /in the SAME turn as your own first action/);
+  assert.match(start.description, /Keep the part that needs the screen yourself/);
+  assert.match(start.description, /split off only work that does not depend on yours/);
+  assert.match(start.description, /never touches the pointer, keyboard or front app/);
+  assert.match(start.description, /applescript \(Apple events/);
+  assert.match(start.description, /browser_\* tools, files, run_shell and the web/);
+  assert.match(start.description, /lane 'screen' waits its turn for the pointer and keyboard/);
+  assert.match(start.description, /At most 3 alongside you/);
+  assert.match(start.description, /Hormes tells Kevin the split in one line, so do not announce it/);
+  // The serializer's rule, in the model's words: a thread_start rides alongside the first action and is never halted by its question.
+  assert.match(start.description, /may be issued alongside your first action in one exec: it never waits for it and is never held back by its question/);
+  assert.match(start.description, /Do not thread_wait: end your turn/);
+  assert.match(start.description, /finish line for you, so never repeat it/);
+  assert.match(start.description, /speak_progress speaks once, with your name/);
+  const startShape = zodShape(start);
+  assert.deepEqual(Object.keys(startShape).sort(), ["budget", "lane", "name", "task"]);
+  assert.ok(startShape["lane"]!.safeParse("background").success && startShape["lane"]!.safeParse("screen").success && !startShape["lane"]!.safeParse("both").success);
+  assert.ok(startShape["budget"]!.safeParse(undefined).success, "budget is optional");
+  assert.ok(startShape["budget"]!.safeParse({ steps: 10, seconds: 60 }).success, "budget parses as an object");
+  assert.ok(!startShape["budget"]!.safeParse("10").success && !startShape["budget"]!.safeParse({ steps: "ten" }).success);
+  const startBudget = start.parameters.properties["budget"] as { type: string; properties: Record<string, { minimum: number; maximum: number }> };
+  assert.deepEqual([startBudget.properties["steps"]!.minimum, startBudget.properties["steps"]!.maximum, startBudget.properties["seconds"]!.minimum, startBudget.properties["seconds"]!.maximum], [1, 40, 10, 300], "the engine's caps, as the model sees them");
+  assert.match((start.parameters.properties["name"] as { description: string }).description, /≤ 16 characters, unique among live threads/);
+  const wait = specByName("thread_wait")!;
+  assert.match(wait.description, /default 120, at most 240/);
+  assert.match(wait.description, /Rarely right/);
+  assert.match(wait.description, /end your turn instead/);
+  assert.match(wait.description, /what Kevin was already told so you do not repeat it/);
+  const waitTimeout = wait.parameters.properties["timeout"] as { minimum: number; maximum: number };
+  assert.deepEqual([waitTimeout.minimum, waitTimeout.maximum], [1, 240], "shorter than the 300 s wall clock the main brain runs under");
+  assert.match(specByName("thread_read")!.description, /queued, starting, thinking, acting, waiting for the screen, waiting on Kevin's yes, paused, done, failed, stopped/, "the one status vocabulary");
+  assert.match(specByName("thread_stop")!.description, /Kevin hears one line that it stopped/);
+  for (const n of ["thread_read", "thread_stop"]) assert.deepEqual(Object.keys(zodShape(specByName(n)!)), ["name"], n);
+  // Progress lines for the timeline exist for the old names (responses.ts is not this pass's file: the thread_* lines are a seam).
+  assert.equal(progressLine("worker_start", { name: "Spotify", task: "play Focus" }), "Starting Spotify on the side.");
+  // A plain ToolRunner has no scheduler: the thread tools (and their aliases) are the engine's runner's, not its.
+  const { runner } = makeRunner();
+  runner.attach(makeSink().sink, makeTask("play focus on spotify"));
+  for (const n of ["thread_start", "thread_wait", "thread_read", "thread_stop", "worker_start"]) {
+    const r = await runner.run(n, { name: "Spotify", task: "play Focus" });
+    assert.equal(r.result.kind, "error", n);
+    assert.match(resultText(r.result), new RegExp(`unknown tool ${n}`), `${n} is not available here`);
+  }
+});
+
+test("tool table: the six acting tools carry the observation clause once, word for word; the looks and the confirming tools do not", () => {
+  assert.match(OBSERVATION_CLAUSE, /^The result ends with a `now:` line — the front app, the focused element and what is under the pointer, read 150 ms after it landed: that is your verification; take a screenshot only when it says something you did not expect\.$/);
+  for (const n of ["left_click", "type", "key", "scroll", "open_app", "focus_app"]) {
+    const d = specByName(n)!.description;
+    assert.equal(d.split(OBSERVATION_CLAUSE).length, 2, `${n} carries the clause exactly once`);
+    assert.ok(d.length < 700, `${n}: still one paragraph (${d.length})`);
+  }
+  for (const n of ["screenshot", "zoom", "frontmost_app", "find_element", "click_element", "read_focused_text", "browser_read", "thread_start", "run_shell"]) assert.ok(!specByName(n)!.description.includes("now:"), `${n} says nothing about the line`);
+  // The pins from before, kept true: what the results do and do not say.
+  assert.match(specByName("type")!.description, /OK means the keystrokes were delivered/);
+  assert.match(specByName("type")!.description, /names the field when accessibility knows it/);
+  assert.match(specByName("type")!.description, /Refused in password fields/);
+  assert.match(specByName("focus_app")!.description, /only echoes the name; its now: line says what is actually in front/);
+  assert.match(specByName("click_element")!.description, /that is the verification, no screenshot needed/);
+  // The descriptions are static (byte-identical across processes for the prompt cache) while Settings.observe is an
+  // A/B: with the line off — or before the observer is wired — the model must not be told to trust a line that never
+  // comes, so the two tools whose old fallback the clause replaced keep it in one breath.
+  assert.match(specByName("focus_app")!.description, /when no now: line follows, frontmost_app confirms/);
+  assert.match(specByName("type")!.description, /when no now: line follows and what landed matters — one screenshot/);
 });
 
 test("gates read what Kevin said, never what Hormes said: named folders and named hosts", async (t) => {
