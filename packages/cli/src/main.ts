@@ -4,20 +4,24 @@ import { Ledger, readConfig, setLogLevel } from "@hormes/core";
 import { AgentRegistry, defaultConnectors } from "@hormes/agents";
 import { NativeHandsProcess } from "@hormes/hands";
 import { Engine } from "@hormes/engine";
-import { DaemonClient, type ClientMessage } from "@hormes/daemon";
-import { type AgentInfo, type Delegation, type Effort, type EngineEvent, type MemoryItem, type MemoryKind, type MemoryState, type MemorySummary, type PermissionInfo, type Problem, type SleepCause, type Thread, type TranscriptItem, type Worker } from "@hormes/protocol";
-import { MEMORY_ID, agentsByStatus, agoWords, memoryLine, render, runChecks, summarizePermissions } from "./doctor.ts";
-import { runHygiene, type DockAudit, type HygieneReport } from "./install/index.ts";
+import { DaemonClient, type ClientMessage, type DaemonMessage } from "@hormes/daemon";
+import { runHygiene, type DockAudit, type HygieneReport } from "@hormes/install";
+import { type AgentInfo, type AudioSettings, type AudioState, type LiveAudio, type BrainKind, type Delegation, type Effort, type EngineCommand, type EngineEvent, type MemoryItem, type MemoryKind, type MemoryState, type MemorySummary, type Permissions, type Problem, type SetupStatus, type SleepCause, type Snapshot, type Thread, type TranscriptItem, grantOf } from "@hormes/protocol";
+import { MEMORY_ID, agentsByStatus, agoWords, audioStatusLines, memoryLine, playbackInputs, readAudioProfiler, render, runChecks, summarizePermissions } from "./doctor.ts";
+import { localStatusLine, runBrain, runModels, type BrainDaemon } from "./local-cli.ts";
 import { bench } from "./bench.ts";
 import { benchBrain } from "./bench-brain.ts";
 import { ledgerSpeed, renderSpeed } from "./ledger-speed.ts";
 import { reflexMisses, renderMisses } from "./reflex-miss.ts";
-import { resolveThread, threadsLines, workersFallbackLines } from "./threads-cli.ts";
+import { resolveThread, threadsLines } from "./threads-cli.ts";
+import { LIST_STATES, ROW_VERBS, automationLine, landedAutomation, automationsLines, automationsSummary, parseClockAutomation, parseRecipeArgs, recipeVerdict, recipesLines, resolveAutomation, type RowVerb } from "./automations-cli.ts";
+import { PERMISSION_KINDS, type Automation, type AutomationState, type PermissionKind, type ShellRecipe } from "@hormes/protocol";
 
 const HELP = `
-hormes — voice-first computer use for Kevin's Mac
+hormes: voice-first computer use for your Mac
 
-  pnpm hormes doctor                 keys, brain, hands, agents, app (signing, wake word), toolchain
+  pnpm hormes doctor                 keys, brain, hands, permissions, audio (voice processing · hears · speaks · other mic clients · recording · released at sleep · leak), local (server · model · embeddings), memory, privacy (where words go), agents, app (signing, wake word), toolchain
+  pnpm hormes doctor --test-audio    also run apps/mac/Scripts/audio-probe.sh --test --json: the graph as the app builds it, a 1 s chime through the player, the leak figure (refused while Hormes is awake; nothing paid)
   pnpm hormes live                   headless session in this terminal (ffmpeg mic, ffplay speaker)
   pnpm hormes probe "<utterance>"    synthesize the utterance, run it through the whole stack, print the timeline
   pnpm hormes agents                 list the agent sessions on this Mac (Claude Code, Codex, …)
@@ -27,25 +31,48 @@ hormes — voice-first computer use for Kevin's Mac
                                       Nothing is deleted; today, the open session's day and any day of a pinned or open conversation stay, and the answer says why
   pnpm hormes ledger restore <day>   move a day back from the Trash
   pnpm hormes ledger sweep           run the retention sweep now (Settings ledgerRetentionDays / shotsRetentionDays, 0 = never; the daemon logs what it would move first)
-  pnpm hormes ledger search "<words>" [--limit N]   what was heard and said, and the delegations' requests and summaries, over the live days, newest first (50 by default, 200 at most)
+  pnpm hormes ledger search "<words>" [--limit N]   what was heard and said, and the delegations' requests and summaries, over every live day, newest first (50 by default, 200 at most).
+                                      The daemon reads 32 MB of day files a request; the search asks again from where the last page stopped
   pnpm hormes ledger --speed [--days N]   where the time went over the last N days (1): acting steps followed by a screenshot, results carrying the now: line,
                                       tool round trips by class (read-only target p95 ≤ 80 ms), generation gaps by what came before, first action, threads
-  pnpm hormes reflex-miss [--days N]  the short commands Kevin said that the grammar did not catch, grouped by head word (7 days) — the grammar grows from these
-  pnpm hormes memory [list] [--state live|forgotten|archived|merged|all] [--limit N]   what Hormes durably knows about Kevin: one sentence per item, over the daemon (50 by default, 200 at most)
-  pnpm hormes memory search "<words>" [--limit N]   the items closest to the words (embeddings when a key is present, keywords without)
+  pnpm hormes reflex-miss [--days N]  the short commands you said that the grammar did not catch, grouped by head word (7 days); the grammar grows from these
+  pnpm hormes memory [list] [--state live|forgotten|archived|merged|all] [--limit N]   what Hormes durably knows about you: one sentence per item, over the daemon (50 by default, 200 at most)
+  pnpm hormes memory search "<words>" [--limit N]   the items closest to the words. Embeddings while memory is on with an embedder (an OpenAI key or a local model);
+                                      keywords otherwise, or when the words hold a secret, and then nothing leaves the Mac
   pnpm hormes memory forget <id>    hide an item from every prompt; it stays in Hormes's own record under Forgotten. Nothing is deleted
   pnpm hormes memory restore <id>   bring a forgotten or archived item back into use
-  pnpm hormes memory add "<text>" [--kind preference|fact|episode|procedure|contact|place]   remember one thing now, in Kevin's words (redacted and refused like anything extracted)
+  pnpm hormes memory add "<text>" [--kind preference|fact|episode|procedure|contact|place]   remember one thing now, in your words (redacted and refused like anything extracted)
   pnpm hormes memory run            read the closed conversations not read yet, now (it runs on its own at a quiet moment; never while a voice session is open)
-  pnpm hormes status                 talk to a running daemon (hormesd or the app) and print its state (--permissions: every grant as a row; agents by status —
+  pnpm hormes models [--json] [--server URL]   the models on this Mac's local server (Ollama / LM Studio / llama.cpp): id · size · ctx · tools/vision/thinking/embedding · fit · which the brain and memory use
+                                        (the embedding model memory uses has its own row); a cloud tag (remote_host set) runs on ollama.com and is not listed. No daemon needed.
+                                        Nothing is pulled: an empty list prints the \`ollama pull …\` line to run (Ollama), or says to load a tool-capable model (LM Studio, llama.cpp)
+  pnpm hormes brain                    the brain setting, what runs now, and where words go (the four data-path rows)
+  pnpm hormes brain local [<model>] [--server URL]   pick a local model as the brain through the running daemon (memory follows); empty model = best fit; prints the status line when it lands
+  pnpm hormes brain <auto|codex|claude-code|anthropic-api|openai-responses|openai-compatible> [<model>] [--server URL]
+  pnpm hormes automations [list] [--state armed|snoozed|deferred|paused|fired|failed|done|trashed|all]   what is set to fire while Hormes is asleep, over the daemon, one row each:
+                                      glyph · name · when · actions · id · next fire (or snoozed / paused / failed: why); nothing is billed for any of it
+  pnpm hormes automations add "<words>"   arm one from the clock ladder, parsed by core's parseWhen without a brain: "at 7:10 weekdays chime 'Wake up'", "in 12m chime pasta",
+                                      "weekdays 09:00 open Notes", "tomorrow 15:00 say 'call mum'". Free kinds only (chime · say · notify · open); run recipe, press and wake the brain
+                                      are set up by voice or in the Console, where the yes is heard. The policy judges the draft before it is armed; a refusal comes back as a toast
+  pnpm hormes automations snooze <id|name> [--minutes 10] · done · skip · pause · resume · rename <id|name> "<name>"
+  pnpm hormes automations run <id|name>   fire it now so you hear it, but the daemon refuses unless you are there (a session open, or presence recent)
+  pnpm hormes automations trash <id|name> · restore <id|name>   Move to Trash / Restore (the newest eight trashed rows are under --state trashed; an older one restores by its id). Nothing is deleted
+  pnpm hormes recipes [list]         the approved shell recipes: name · the gate's word (run · asks · refused · fronts) · command · approved · cwd · timeout
+  pnpm hormes recipes add <name> "<command>" [--cwd DIR] [--timeout 120]   save one (through the daemon; it writes settings.json) and print the shell gate's verdict first;
+                                      a confirm-tier command saves with \`asks\` and can never be armed: nobody is there to say yes when it runs
+  pnpm hormes recipes trash <name>   Move to Trash (kept in Settings with trashedAt; a recipe.trashed row); a row that names it fails at its next fire and says so
+  pnpm hormes recipes restore <name> Restore it from the Trash (a recipe.restored row); nothing is ever deleted
+  pnpm hormes status                 talk to a running daemon (hormesd or the app) and print its state (phase, session, brain, the local server and whether it is the brain; --permissions: every grant as a row; agents by status:
                                       working · idle · blocked · done · ended (no live process) · unknown (evidence missing) · offline; threads N (M live): the lines of work
-                                      with name · status · lane · steps · id; memory: counts and the last learn)
+                                      with name · status · lane · steps · id; memory: counts and the last learn; automations N (M armed) · next · ringing;
+                                      audio: voice processing and its knobs, the rung, what the graph hears and speaks through with the rate that tells hands-free from
+                                      full quality, the echo guard's counters, from the app's read-back; with no app connected, system_profiler's defaults (skipped with --no-levels))
   pnpm hormes say "<text>"           send typed text to the running daemon as if spoken
-  pnpm hormes cmd <go|pause|stop|interrupt|wake|resume|mute|unmute|agent.refresh>   send a command to the running daemon
+  pnpm hormes cmd <go|pause|resume|stop|interrupt|mute|unmute|agent.refresh>   send a command to the running daemon (go opens the session)
+  pnpm hormes cmd request-permission <kind|all>   ask the app to put up the system prompt for one grant (notifications, screenRecording, …); the doctor's banners row names it, and you answer macOS yourself
   pnpm hormes cmd sleep [cause]      go to sleep: return to the notch and close the session (cause: said|idle|pause-decayed|brain-changed|dock|command|stop|shutdown; default command)
   pnpm hormes cmd thread.stop <id|name>   stop one thread (its id or name from \`hormes status\`; "main" parks the main turn); the others and the session carry on
   pnpm hormes cmd thread.pause <id|name> | thread.resume <id|name>   hold one thread's brain turn and release its screen; run its continuation turn
-  pnpm hormes cmd worker.stop <id>   the older name for thread.stop by id
   pnpm hormes dock [--fix] [--json]  one Hormes: the Dock tiles and LaunchServices records for /Applications/Hormes.app, read-only.
                                       --fix removes Hormes's recent tiles, rebuilds the pin, unregisters stale bundle paths (the Trash's contents are not touched)
                                       and restarts the Dock only when it changed something. The daemon reads the Dock itself 20 s after it starts
@@ -54,33 +81,38 @@ hormes — voice-first computer use for Kevin's Mac
   pnpm hormes bench                  time the tool path: round trips, quick screenshot, delegation → first action, reflex, the ear's 250 ms path, stop (no API spend)
   pnpm hormes bench --brain          the five representative commands on the REAL brain (Codex here) with a stand-in Live and canned hands:
                                       delegation → first thinking / first tool / first action / done, model steps, tool calls, rollovers,
-                                      bootstrap calls (docs/LATENCY.md). Nothing on the Mac is touched; the turns cost Kevin's ChatGPT plan.
+                                      bootstrap calls (docs/LATENCY.md). Nothing on the Mac is touched; the turns cost your ChatGPT plan.
 
 flags
   --speak        (probe) also play the voice through ffplay
   --timeout N    (probe) seconds to wait after the utterance (default 25)
   --runs N       (bench) samples per metric (default 5); (bench --brain) runs per command on the brain path (default 2)
-  --codex        (bench) drive the real Codex brain for the delegation runs (a couple of tiny turns on Kevin's login)
+  --codex        (bench) drive the real Codex brain for the delegation runs (a couple of tiny turns on your login)
   --fake-hands   (bench) answer the helper's requests in-process instead of the Swift helper
   --no-gate      (bench) do not exit non-zero when the ear's p95 to dispatch is over 250 ms with the real helper
-  --effort E     (bench --brain) run the brain at effort low|medium|high|xhigh|max (default: the configured effort) — one flag for an A/B
-  --observe off  (bench --brain) run with Settings.observe off: acting results without the now: line — the A/B for the observation lever
+  --no-duck      (bench) skip the Swift duck probe
+  --effort E     (bench --brain) run the brain at effort low|medium|high|xhigh|max (default: the configured effort), one flag for an A/B
+  --observe off  (bench --brain) run with Settings.observe off: acting results without the now: line, the A/B for the observation lever
   --compare F    (bench --brain) print median deltas per command against a previous --out report
   --days N       (ledger --speed, reflex-miss) how many day files back, today included
   --no-reflex    (bench --brain) skip the reflexes-on phase: brain path only
-  --allow-api-spend  (bench --brain) run even when Codex is not signed in — the auto brain then costs REAL API dollars; off by default the bench refuses
+  --allow-api-spend  (bench --brain) run even when Codex is not signed in, so the auto brain costs REAL API dollars; off by default the bench refuses
   --only a,b     (bench --brain) restrict to these command ids (wiki-search, open-safari, whats-on-screen, click-search-type, scroll-down)
   --out FILE     (bench --brain) also write the JSON report to FILE
   --json         (bench) print the table as JSON; (bench --brain) print the whole report as JSON
   --shots / --both   (ledger trash) move the day's screenshots instead of / as well as its ledger file
   --limit N      (ledger search, memory list/search) how many hits (default 50 / 50 / 30, at most 200)
-  --state S      (memory list) live (default) | forgotten | archived | merged | all
+  --state S      (memory list) live (default) | forgotten | archived | merged | all; (automations list) armed | snoozed | deferred | paused | fired | failed | done | trashed | all (default; the Trash tail only under trashed)
   --kind K       (memory add) preference | fact | episode | procedure | contact | place (the store classifies when absent)
+  --minutes N    (automations snooze) how long (default Settings.automations.snoozeMinutes, 10)
+  --cwd DIR      (recipes add) the recipe's working directory (never inside ~/.hormes)
+  --timeout N    (recipes add) seconds before the recipe is stopped (default 120, at most 600)
+  --server URL   (models, brain) the local server's root instead of the three loopback ports (a second Ollama, a LAN box); (brain) pins it in Settings
   --debug        verbose logs
 `;
 
 const args = process.argv.slice(2);
-const VALUE_FLAGS = new Set(["--timeout", "--runs", "--effort", "--out", "--only", "--limit", "--state", "--kind", "--days", "--compare", "--observe"]);
+const VALUE_FLAGS = new Set(["--timeout", "--runs", "--effort", "--out", "--only", "--limit", "--state", "--kind", "--days", "--compare", "--observe", "--server", "--minutes", "--cwd"]);
 const flags = new Set(args.filter((a) => a.startsWith("--")));
 const positional: string[] = [];
 for (let i = 0; i < args.length; i++) {
@@ -104,7 +136,7 @@ function printEvent(e: EngineEvent, seenSteps: Set<string>, seenItems: Map<strin
     if (!item.final) continue;
     if (seenItems.get(item.id) === item.text) continue;
     seenItems.set(item.id, item.text);
-    console.log(`  ${item.speaker === "kevin" ? "you    " : "hormes"}: ${item.text}   [${item.startMs}-${item.endMs}ms]`);
+    console.log(`  ${item.speaker === "user" ? "you    " : "hormes"}: ${item.text}   [${item.startMs}-${item.endMs}ms]`);
   }
   for (const d of e.snapshot.delegations) {
     if (!seenSteps.has(d.id)) {
@@ -123,7 +155,7 @@ function printEvent(e: EngineEvent, seenSteps: Set<string>, seenItems: Map<strin
     if (d.status !== "running" && !seenSteps.has(key)) {
       seenSteps.add(key);
       const t = d.timings;
-      console.log(`  ■ ${d.status} in ${(t.doneAt ?? 0) - t.delegatedAt}ms (thinking@${t.firstThinkingAt ? t.firstThinkingAt - t.delegatedAt : "-"} commentary@${t.firstCommentaryAt ? t.firstCommentaryAt - t.delegatedAt : "-"})${d.summary ? ` — ${d.summary}` : ""}`);
+      console.log(`  ■ ${d.status} in ${(t.doneAt ?? 0) - t.delegatedAt}ms (thinking@${t.firstThinkingAt ? t.firstThinkingAt - t.delegatedAt : "-"} commentary@${t.firstCommentaryAt ? t.firstCommentaryAt - t.delegatedAt : "-"})${d.summary ? `: ${d.summary}` : ""}`);
     }
   }
 }
@@ -178,7 +210,7 @@ async function live(): Promise<void> {
       }
     });
     await engine.ready();
-    console.log(`\n  brain: ${engine.brainInfo.kind} — ${engine.brainInfo.detail}`);
+    console.log(`\n  brain: ${engine.brainInfo.kind} (${engine.brainInfo.detail})`);
     await engine.wake();
     const stopMic = mic((pcm) => engine.feedMic(pcm));
     console.log("  listening. talk to it; Ctrl-C to quit.\n");
@@ -211,7 +243,7 @@ async function probe(text: string): Promise<void> {
     engine.on("event", (e) => printEvent(e, seenSteps, seenItems));
     if (out) engine.on("audio", (pcm2) => out.write(pcm2));
     await engine.ready();
-    console.log(`  brain: ${engine.brainInfo.kind} — ${engine.brainInfo.detail}`);
+    console.log(`  brain: ${engine.brainInfo.kind} (${engine.brainInfo.detail})`);
     const t0 = Date.now();
     await engine.wake();
     console.log(`  session up in ${Date.now() - t0}ms; streaming audio`);
@@ -230,7 +262,7 @@ async function probe(text: string): Promise<void> {
     const snap = engine.snapshot();
     console.log(`\n  summary: ${snap.transcript.length} utterances, ${snap.delegations.length} delegation(s), phase ${snap.phase}, billed ${snap.session?.usageSeconds ?? 0}s`);
     const problems = snap.problems;
-    if (problems.length) console.log(`  problems:\n    - ${problems.join("\n    - ")}`);
+    if (problems.length) console.log(`  problems:\n    - ${problems.map((p) => p.text).join("\n    - ")}`);
   });
 }
 
@@ -243,7 +275,7 @@ async function agents(): Promise<void> {
   console.log("");
   if (list.length === 0) console.log("  no agents right now\n");
   // `detail` carries no relative time any more; the hint says why a row reads as it does (archived, quiet, ended, unseen …).
-  for (const a of list) console.log(`  ${a.id.padEnd(28)} ${a.status.padEnd(8)} ${a.name}${a.cwd ? `  (${a.cwd})` : ""}${a.hint ? `  [${a.hint}]` : ""}${a.detail ? `  — ${a.detail}` : ""}`);
+  for (const a of list) console.log(`  ${a.id.padEnd(28)} ${a.status.padEnd(8)} ${a.name}${a.cwd ? `  (${a.cwd})` : ""}${a.hint ? `  [${a.hint}]` : ""}${a.detail ? `  (${a.detail})` : ""}`);
   console.log("");
 }
 
@@ -261,11 +293,23 @@ async function hands(op: string | undefined, json: string | undefined): Promise<
   }
 }
 
+/**
+ * The day files, read and nothing more: no Engine, so no helper, no brain, no key check and no row written (LM-1).
+ * An Engine built here would end a running daemon's live threads `failed` in today's file.
+ */
+function readLedger(): Ledger {
+  return new Ledger(readConfig().stateDir);
+}
+
+/** "20:15:00": a row's time on this Mac's clock, as the day file it sits in is named (LM-8). */
+function localClock(at: number): string {
+  return new Date(at).toTimeString().slice(0, 8);
+}
+
 function ledger(date: string | undefined): void {
-  const engine = new Engine();
   const at = date ? Date.parse(`${date}T12:00:00`) : Date.now();
-  for (const row of engine.ledger.read(at)) {
-    const t = new Date(row.at).toISOString().slice(11, 19);
+  for (const row of readLedger().read(at)) {
+    const t = localClock(row.at);
     if (row.type === "heard" || row.type === "said") console.log(`${t} ${row.type === "heard" ? "you    " : "hormes"}: ${(row.item as TranscriptItem).text}`);
     else if (row.type === "delegation.created") console.log(`${t} ▶ ${(row.delegation as Delegation).request}`);
     else if (row.type === "delegation.step") console.log(`${t}    ${row.step.kind} ${row.step.tool?.name ?? row.step.text ?? ""}`);
@@ -306,7 +350,7 @@ async function ledgerCommand(rest: string[]): Promise<void> {
       return;
     }
     default:
-      throw new Error(`unknown ledger verb: ${verb} — a day (YYYY-MM-DD), or trash | restore | sweep | search`);
+      throw new Error(`unknown ledger verb: ${verb} (a day as YYYY-MM-DD, or trash | restore | sweep | search)`);
   }
 }
 
@@ -320,26 +364,53 @@ interface Hit {
   text: string;
 }
 
-/** `ledger.search` over the socket; one line per hit, newest first. */
+/**
+ * `ledger.search` over the socket, page by page (the daemon reads a bounded slice of day files per request and says
+ * where it stopped, `older`), until `limit` hits or nothing older is left; one line per hit, newest first. An older
+ * page that does not answer keeps the hits so far, and the last line names the days left unread.
+ */
 async function search(query: string, limit: number): Promise<void> {
   const client = await daemon();
-  const id = `cli_${process.pid}_${Date.now()}`;
-  let hits: Hit[];
-  try {
-    hits = await new Promise<Hit[]>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("the daemon did not answer the search within 5 s")), 5000);
-      client.on("message", (m) => {
+  const hits: Hit[] = [];
+  let pages = 0;
+  const page = (before: string | undefined): Promise<{ hits: Hit[]; older?: string }> =>
+    new Promise((resolve, reject) => {
+      const id = `cli_${process.pid}_${Date.now()}_${++pages}`;
+      const answer = (m: DaemonMessage): void => {
         if (m.type !== "ledger.hits" || m.id !== id) return;
         clearTimeout(timer);
-        resolve(m.hits as Hit[]);
-      });
-      client.sendJson({ type: "ledger.search", id, query, limit });
+        client.off("message", answer);
+        resolve({ hits: m.hits as Hit[], ...(m.older !== undefined ? { older: m.older } : {}) });
+      };
+      const timer = setTimeout(() => {
+        client.off("message", answer);
+        reject(new Error("the daemon did not answer the search within 5 s"));
+      }, 5000);
+      client.on("message", answer);
+      client.sendJson({ type: "ledger.search", id, query, limit: limit - hits.length, ...(before !== undefined ? { before } : {}) });
     });
+  /** The `before` of an older page that did not answer: the days before it went unread. */
+  let unread: string | undefined;
+  try {
+    let before: string | undefined;
+    do {
+      let p: { hits: Hit[]; older?: string };
+      try {
+        p = await page(before);
+      } catch (e) {
+        if (before === undefined) throw e;
+        unread = before;
+        break;
+      }
+      hits.push(...p.hits);
+      before = p.older;
+    } while (before !== undefined && hits.length < limit);
   } finally {
     client.close();
   }
+  const gap = unread !== undefined ? `  Days before ${unread} were not searched. The daemon did not answer in 5 s.\n` : "";
   if (hits.length === 0) {
-    console.log(`\n  nothing for "${query}"\n`);
+    console.log(`\n  nothing for "${query}"\n${gap}`);
     return;
   }
   console.log("");
@@ -350,7 +421,7 @@ async function search(query: string, limit: number): Promise<void> {
     const mark = h.state === "trashed" || h.state === "archived" ? ` (${h.state})` : "";
     console.log(`  ${when}  ${h.kind.padEnd(7)} ${h.sessionId.padEnd(16)} ${h.text.length > 120 ? `${h.text.slice(0, 119)}…` : h.text}${mark}`);
   }
-  console.log(`\n  ${hits.length} hit${hits.length === 1 ? "" : "s"}${hits.length >= limit ? ` · limit ${limit} (--limit N for more)` : ""}\n`);
+  console.log(`\n  ${hits.length} hit${hits.length === 1 ? "" : "s"}${hits.length >= limit ? ` · limit ${limit} (--limit N for more)` : ""}\n${gap}`);
 }
 
 /** Every MemoryKind / MemoryState, checked against the protocol's unions so a new one cannot go unlisted here. */
@@ -358,7 +429,7 @@ const MEMORY_KINDS: readonly MemoryKind[] = Object.keys({ preference: 0, fact: 0
 const MEMORY_STATES: readonly (MemoryState | "all")[] = Object.keys({ live: 0, forgotten: 0, merged: 0, archived: 0, all: 0 } satisfies Record<MemoryState | "all", 0>) as (MemoryState | "all")[];
 
 /**
- * `hormes memory …`: what Hormes durably knows about Kevin, over the daemon (the
+ * `hormes memory …`: what Hormes durably knows about User, over the daemon (the
  * daemon owns the store). list/search are read frames; forget, restore, add and run
  * are EngineCommands whose toasts say what happened. Forget is a state Restore
  * undoes; nothing here deletes anything. A bad id or an unknown state/kind is
@@ -401,18 +472,18 @@ async function memoryCommand(rest: string[]): Promise<void> {
       await sendCommand({ type: "memory.run" }, 3000);
       return;
     default:
-      throw new Error(`unknown memory verb: ${verb} — list | search | forget | restore | add | run`);
+      throw new Error(`unknown memory verb: ${verb} (list | search | forget | restore | add | run)`);
   }
 }
 
-/** How long the CLI waits for `memory.items`; a daemon from before the memory module never answers, and this says so. */
+/** How long the CLI waits for `memory.items` before it says the daemon did not answer. */
 const MEMORY_ITEMS_WAIT_MS = 5000;
 
 /**
  * One `memory.list` / `memory.search` round trip over the daemon wire (`memory.list
  * {id, state?, limit?}` / `memory.search {id, query, limit?}` → `memory.items {id,
- * items}`; the items are MemoryItem[] without vectors). An older daemon never
- * answers: the wait says so rather than hanging.
+ * items}`; the items are MemoryItem[] without vectors). A daemon that does not answer
+ * is named by the wait rather than hung on.
  */
 async function memoryItems(frame: { type: "memory.list"; state: MemoryState | "all"; limit: number } | { type: "memory.search"; query: string; limit: number }): Promise<MemoryItem[]> {
   const client = await daemon();
@@ -449,7 +520,7 @@ function printMemoryItems(items: readonly MemoryItem[], empty: string, tail: str
 
 async function memoryList(state: MemoryState | "all", limit: number): Promise<void> {
   const items = await memoryItems({ type: "memory.list", state, limit });
-  printMemoryItems(items, state === "live" ? "nothing remembered yet — Hormes learns after a conversation closes" : `nothing under ${state}`, `${items.length >= limit ? ` · limit ${limit} (--limit N for more)` : ""} · forget <id> hides one (nothing is deleted); restore <id> brings it back`);
+  printMemoryItems(items, state === "live" ? "nothing remembered yet (Hormes learns after a conversation closes)" : `nothing under ${state}`, `${items.length >= limit ? ` · limit ${limit} (--limit N for more)` : ""} · forget <id> hides one (nothing is deleted); restore <id> brings it back`);
 }
 
 async function memorySearch(query: string, limit: number): Promise<void> {
@@ -473,7 +544,7 @@ async function daemon(): Promise<DaemonClient> {
   try {
     await client.connect({ pid: process.pid, audio: false });
   } catch {
-    throw new Error(`no daemon on ${cfg.socketPath} — start Hormes.app or \`pnpm hormesd\``);
+    throw new Error(`no daemon on ${cfg.socketPath} (start Hormes.app or \`pnpm hormesd\`)`);
   }
   return client;
 }
@@ -495,33 +566,38 @@ async function status(): Promise<void> {
     setTimeout(done, 1500);
   });
   client.close();
-  const s = snap as { phase: string; session?: { id: string; usageSeconds: number; voice?: string; accent?: string }; transcript: { speaker: string; text: string }[]; delegations: unknown[]; agents: Pick<AgentInfo, "status">[]; workers?: Worker[]; threads?: Thread[]; memory?: MemorySummary; problems: string[]; problemsTyped?: Problem[]; brainReady: boolean; handsReady: boolean; permissions?: { microphone: string; screenRecording: string; accessibility: string; all?: PermissionInfo[] }; trash?: { path: string; days: number; bytes: number }; hiddenAgents?: string[] };
+  const s = snap as { phase: string; session?: { id: string; usageSeconds: number; voice?: string; accent?: string }; transcript: { speaker: string; text: string }[]; delegations: unknown[]; agents: Pick<AgentInfo, "status">[]; threads: Thread[]; memory?: MemorySummary; problems: Problem[]; brainReady: boolean; handsReady: boolean; permissions: Permissions; trash?: { path: string; days: number; bytes: number }; hiddenAgents?: string[]; setup?: SetupStatus; settings?: { brain?: BrainKind; brainModel?: string; audio?: AudioSettings }; automations?: Automation[]; nextFire?: Snapshot["nextFire"]; ringing?: Snapshot["ringing"]; audioState?: AudioState; liveAudio?: LiveAudio };
   console.log(`\n  phase      ${s.phase}`);
   // The voice and accent are the session's own (picked at connect; a change is heard at the next wake).
   console.log(`  session    ${s.session ? `${s.session.id} · ${Math.round(s.session.usageSeconds)}s billed${s.session.voice ? ` · ${s.session.voice} · English${s.session.accent && s.session.accent !== "none" ? ` (${s.session.accent})` : ""}` : ""}` : "none"}`);
   console.log(`  brain      ${s.brainReady ? "ready" : "not ready"}   hands ${s.handsReady ? "ready" : "not ready"}`);
-  // The app's read of every grant (TCC keys them on Hormes.app); without the app, the four the daemon's helper reads.
+  // The local model server, whatever the brain kind: what is running on this Mac, and the model the brain runs there only when the setting is `local`.
+  console.log(localStatusLine(s.setup?.local, s.settings?.brain, s.settings?.brainModel ?? ""));
+  // One row per grant, read by the app (TCC keys them on Hormes.app) or, without the app, by the daemon's helper for the four it can read.
+  // The headline names the three the voice and the hands stand on; the summary counts the rest.
   const perms = s.permissions;
-  if (perms?.all?.length) console.log(`  permissions  ${summarizePermissions(perms.all)}`);
-  else if (perms) console.log(`  permissions  mic ${perms.microphone} · screen recording ${perms.screenRecording} · accessibility ${perms.accessibility} (an older daemon: no list)`);
-  if (flags.has("--permissions") && perms?.all) for (const p of perms.all) console.log(`    ${p.grant === "granted" ? "✔" : p.grant === "denied" ? "✘" : "?"} ${p.label.padEnd(20)} ${p.grant.padEnd(8)} ${p.ask === "settings" ? "System Settings" : p.ask === "perApp" ? "per app" : "prompt"}${p.required ? " · required" : ""}${p.detail ? ` · ${p.detail}` : ""}`);
+  console.log(`  permissions  mic ${grantOf(perms, "microphone")} · screen recording ${grantOf(perms, "screenRecording")} · accessibility ${grantOf(perms, "accessibility")} · ${summarizePermissions(perms.all)}`);
+  if (flags.has("--permissions")) for (const p of perms.all) console.log(`    ${p.grant === "granted" ? "✔" : p.grant === "denied" ? "✘" : "?"} ${p.label.padEnd(20)} ${p.grant.padEnd(8)} ${p.ask === "settings" ? "System Settings" : p.ask === "perApp" ? "per app" : "prompt"}${p.required ? " · required" : ""}${p.detail ? ` · ${p.detail}` : ""}`);
+  // The audio graph (design12) as the app last read it back: the knobs, the rung, hears / speaks with the rate that tells hands-free from full quality, the guard's counters.
+  // No app connected: one read-only system_profiler line for the defaults (≈ 1 s; skipped with --no-levels, like the levels wait).
+  // The playback lines (voice PLAN W1.5): the open session's Live figures, else the ledger's newest audio.playout row
+  // (the whole block with no app connected, the live line with no session open). The day files are read only then.
+  const playback = playbackInputs(s.liveAudio, readLedger, Date.now());
+  for (const line of audioStatusLines(s.audioState, s.settings?.audio, s.audioState || flags.has("--no-levels") ? undefined : readAudioProfiler(), playback)) console.log(line);
   if (levels) console.log(`  levels     mic ${levels.input.toFixed(3)}   speaker ${levels.output.toFixed(3)}`);
   // Agents by status: `ended` is a session with no live process (however old); `unknown` means the process evidence was missing, not "old".
   const byStatus = agentsByStatus(s.agents);
   console.log(`  agents     ${s.agents.length}${byStatus ? ` (${byStatus})` : ""}${s.hiddenAgents?.length ? ` (${s.hiddenAgents.length} hidden)` : ""}   delegations ${s.delegations.length}   utterances ${s.transcript.length}`);
   console.log(`  memory     ${memoryLine(s.memory)}`);
-  // Threads are the lines of work (not agents: those are Kevin's coding sessions): main and the spawned ones, live and those finished within the linger window.
-  // An older daemon has no thread table: its workers list is all it has, and the line says so.
-  for (const line of s.threads ? threadsLines(s.threads) : workersFallbackLines(s.workers ?? [])) console.log(line);
-  // The Trash: whole day files Hormes moved out of the way; emptying it is Kevin's, in Finder.
+  // Threads are the lines of work (not agents: those are User's coding sessions): main and the spawned ones, live and those finished within the linger window.
+  for (const line of threadsLines(s.threads)) console.log(line);
+  // Automations: what fires while asleep (nothing billed) — count by state, the next fire, the ring. A daemon from before the field has none.
+  console.log(automationsSummary(s.automations ?? [], { ...(s.nextFire ? { nextFire: s.nextFire } : {}), ...(s.ringing ? { ringing: s.ringing } : {}) }, Date.now()));
+  // The Trash: whole day files Hormes moved out of the way; emptying it is User's, in Finder.
   if (s.trash) console.log(`  trash      ${s.trash.days === 0 ? "empty" : `${s.trash.days} ${s.trash.days === 1 ? "day" : "days"} · ${human(s.trash.bytes)}`} · ${s.trash.path}`);
-  for (const t of s.transcript.slice(-6)) console.log(`    ${t.speaker === "kevin" ? "you    " : "hormes"}: ${t.text}`);
+  for (const t of s.transcript.slice(-6)) console.log(`    ${t.speaker === "user" ? "you    " : "hormes"}: ${t.text}`);
   // Each line with its kind and the one thing to press for it (the Console's button; `dock` → Fix the Dock = `pnpm hormes dock --fix`).
-  const typed = s.problemsTyped ?? [];
-  const problemLine = (text: string): string => {
-    const p = typed.find((t) => t.text === text);
-    return `    - ${text}${p ? ` (${p.kind}${p.remedy ? ` · ${p.remedy.label}` : ""})` : ""}`;
-  };
+  const problemLine = (p: Problem): string => `    - ${p.text} (${p.kind}${p.remedy ? ` · ${p.remedy.label}` : ""})`;
   if (s.problems.length) console.log(`  problems\n${s.problems.map(problemLine).join("\n")}`);
   console.log("");
 }
@@ -556,6 +632,178 @@ async function threadCommand(sub: "thread.stop" | "thread.pause" | "thread.resum
   await sendCommand({ type: sub, threadId }, 800);
 }
 
+/** How long `automations add` and `recipes add` wait for the daemon to echo the row it armed or saved. */
+const AUTOMATION_WAIT_MS = 5000;
+
+/**
+ * Send one command and wait for the snapshot that shows it landed (`until`), collecting the
+ * toasts meanwhile — a refusal from the set-up gate arrives as a toast, never as a question.
+ * The `landedAfter` idiom of `hormes brain`: only snapshots AFTER the command count.
+ */
+async function commandThenSnapshot(cmd: EngineCommand, until: (s: Snapshot) => boolean, waitMs: number): Promise<{ snapshot: Snapshot | undefined; toasts: string[] }> {
+  const client = await daemon();
+  const toasts: string[] = [];
+  try {
+    const landed = new Promise<Snapshot | undefined>((resolve) => {
+      let sent = false;
+      const timer = setTimeout(() => resolve(undefined), waitMs);
+      client.on("message", (m) => {
+        if (m.type === "toast") {
+          toasts.push(`${m.tone === "info" ? "·" : "!"} ${m.text}`);
+          // A warn after the send is the refusal ("not armed: …"); nothing landed, so the wait ends here.
+          if (sent && m.tone !== "info") {
+            clearTimeout(timer);
+            resolve(undefined);
+          }
+        }
+        if (m.type !== "snapshot" || !sent) return;
+        const snap = m.snapshot as Snapshot;
+        if (!until(snap)) return;
+        clearTimeout(timer);
+        resolve(snap);
+      });
+      client.sendJson({ type: "command", command: cmd });
+      sent = true;
+    });
+    return { snapshot: await landed, toasts };
+  } finally {
+    client.close();
+  }
+}
+
+/** The daemon's automation rows from one snapshot; a daemon from before the field has none. */
+async function readAutomations(): Promise<{ rows: Automation[]; snapshot: Snapshot }> {
+  const snap = (await readSnapshot()) as unknown as Snapshot;
+  return { rows: [...(snap.automations ?? [])], snapshot: snap };
+}
+
+/**
+ * `hormes automations …`: what the daemon carries out while asleep. `list` is a read of the
+ * snapshot; `add` parses the clock ladder here (core's `parseWhen`, no brain), sends
+ * `automation.set` and waits for the row to appear; every other verb resolves an id-or-name
+ * through the pure `resolveAutomation` and sends its one EngineCommand. Words: Snooze · Done ·
+ * Skip · Pause · Resume · Rename · Run now · Move to Trash · Restore — never delete, and no flag
+ * stands in for a yes: the free kinds need none and the asking kinds are set up where the yes is heard.
+ */
+async function automationsCommand(rest: string[]): Promise<void> {
+  const [verb, ...args] = rest;
+  switch (verb) {
+    case undefined:
+    case "list": {
+      const state = flagValue("state") ?? "all";
+      if (!LIST_STATES.includes(state as AutomationState | "all")) throw new Error(`usage: hormes automations list [--state ${LIST_STATES.join("|")}]`);
+      const { rows, snapshot } = await readAutomations();
+      console.log("");
+      for (const line of automationsLines(rows, snapshot, Date.now(), state as AutomationState | "all")) console.log(line);
+      console.log("");
+      return;
+    }
+    case "add": {
+      const words = args.join(" ").trim();
+      const draft = parseClockAutomation(words, Date.now());
+      if ("error" in draft) throw new Error(`${draft.error}\n  usage: hormes automations add "<when> <chime|say|notify|open> <what>"`);
+      // The stamp before the send: only a row created after it — armed, the CLI's — is the one this command set (`landedAutomation`).
+      const sentAt = Date.now();
+      // The wire carries the phrase, not the parse: core's parseWhen is the one grammar and the engine runs it;
+      // the local parse above only gives the offline error text and the echo.
+      const { when: _parsedLocally, ...wire } = draft;
+      const { snapshot, toasts } = await commandThenSnapshot({ type: "automation.set", automation: wire, by: "cli" }, (s) => landedAutomation(s.automations ?? [], draft.name, sentAt) !== undefined, AUTOMATION_WAIT_MS);
+      console.log(`\n  sent automation.set · ${draft.echo}`);
+      for (const t of toasts) console.log(`  ${t}`);
+      const row = snapshot ? landedAutomation(snapshot.automations ?? [], draft.name, sentAt) : undefined;
+      if (row) console.log(automationLine(row, Date.now()));
+      else if (toasts.length === 0) console.log(`  the daemon did not show the row within ${AUTOMATION_WAIT_MS / 1000} s, but \`hormes automations\` lists what is set`);
+      console.log("");
+      return;
+    }
+    default: {
+      if (!(ROW_VERBS as readonly string[]).includes(verb)) throw new Error(`unknown automations verb: ${verb} (list | add | ${ROW_VERBS.join(" | ")})`);
+      const arg = args[0];
+      if (!arg) throw new Error(`usage: hormes automations ${verb} <id|name>${verb === "snooze" ? " [--minutes 10]" : verb === "rename" ? ' "<name>"' : ""}  (both are on \`hormes automations\`${verb === "restore" ? "; `--state trashed` lists the newest eight, an older row by its id" : ""})`);
+      await automationVerb(verb as RowVerb, arg, args.slice(1).join(" ").trim());
+    }
+  }
+}
+
+/** One row verb → one EngineCommand; the row is named back before the send when the table knows it. */
+async function automationVerb(verb: RowVerb, arg: string, extra: string): Promise<void> {
+  const { rows, snapshot } = await readAutomations();
+  const { id, target } = resolveAutomation(rows, arg);
+  if (target) console.log(`  ${target.name} · ${target.state} · ${id}`);
+  switch (verb) {
+    case "snooze": {
+      const minutes = flagValue("minutes") === undefined ? snapshot.settings?.automations?.snoozeMinutes ?? 10 : Number(flagValue("minutes"));
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 720) throw new Error(`--minutes is whole minutes, 1 to 720 (got ${flagValue("minutes")})`);
+      await sendCommand({ type: "automation.snooze", id, minutes }, 800);
+      return;
+    }
+    case "rename": {
+      const name = extra.trim();
+      if (!name || name.length > 24) throw new Error('usage: hormes automations rename <id|name> "<name>"  (24 chars at most)');
+      await sendCommand({ type: "automation.rename", id, name, by: "cli" }, 800);
+      return;
+    }
+    case "run":
+      // The daemon fires it only with User there (a session open, or presence recent); otherwise a toast says so.
+      await sendCommand({ type: "automation.run", id }, 2500);
+      return;
+    case "trash":
+      console.log("  Move to Trash: the row is hidden and restorable (hormes automations restore <id>); nothing is deleted");
+      await sendCommand({ type: `automation.${verb}`, id }, 800);
+      return;
+    default:
+      await sendCommand({ type: `automation.${verb}`, id }, 800);
+  }
+}
+
+/**
+ * `hormes recipes …`: the approved shell recipes in Settings, over the daemon (it owns
+ * settings.json; a tool never writes it). `add` prints the shell gate's verdict before it sends
+ * — a confirm-tier command is saved with `asks` and can never be armed. `trash` is a
+ * `recipe.trashed` row that keeps the recipe in Settings with `trashedAt`; `restore` brings it back. Nothing here deletes anything.
+ */
+async function recipesCommand(rest: string[]): Promise<void> {
+  const [verb, ...args] = rest;
+  const recipesOf = (s: Snapshot): readonly ShellRecipe[] => s.settings?.automations?.recipes ?? [];
+  switch (verb) {
+    case undefined:
+    case "list": {
+      const snap = (await readSnapshot()) as unknown as Snapshot;
+      console.log("");
+      for (const line of recipesLines(recipesOf(snap), Date.now())) console.log(line);
+      console.log("");
+      return;
+    }
+    case "add": {
+      const recipe = parseRecipeArgs(args[0], args.slice(1).join(" "), flagValue("cwd"), flagValue("timeout"), Date.now());
+      const v = recipeVerdict(recipe);
+      console.log(`\n  shell gate: ${v.word}, ${v.reason}`);
+      if (v.word !== "run") console.log(`  saved with \`asks\`: a row that names it is refused at set-up and fails at fire; nobody is there to say yes`);
+      const { snapshot, toasts } = await commandThenSnapshot({ type: "recipe.set", recipe }, (s) => recipesOf(s).some((r) => r.name === recipe.name && r.command === recipe.command), AUTOMATION_WAIT_MS);
+      console.log(`  sent recipe.set ${recipe.name}`);
+      for (const t of toasts) console.log(`  ${t}`);
+      if (snapshot) for (const line of recipesLines(recipesOf(snapshot).filter((r) => r.name === recipe.name), Date.now())) console.log(line);
+      else if (toasts.length === 0) console.log(`  the daemon did not show the recipe within ${AUTOMATION_WAIT_MS / 1000} s, but \`hormes recipes\` lists what is saved`);
+      console.log("");
+      return;
+    }
+    case "trash": {
+      const name = args[0];
+      if (!name) throw new Error("usage: hormes recipes trash <name>  (Move to Trash; the recipe stays in Settings with trashedAt and `recipes restore <name>` brings it back; nothing is deleted)");
+      await sendCommand({ type: "recipe.trash", name }, 800);
+      return;
+    }
+    case "restore": {
+      const name = args[0];
+      if (!name) throw new Error("usage: hormes recipes restore <name>  (Restore a recipe from the Trash; rows that name it run again at their next fire)");
+      await sendCommand({ type: "recipe.restore", name }, 800);
+      return;
+    }
+    default:
+      throw new Error(`unknown recipes verb: ${verb} (list | add | trash | restore)`);
+  }
+}
+
 /** Every SleepCause, checked against the protocol's union so a new cause cannot go unlisted here. */
 const SLEEP_CAUSES: readonly SleepCause[] = Object.keys({ said: 0, idle: 0, "pause-decayed": 0, "brain-changed": 0, dock: 0, command: 0, stop: 0, shutdown: 0 } satisfies Record<SleepCause, 0>) as SleepCause[];
 
@@ -563,6 +811,53 @@ const SLEEP_CAUSES: readonly SleepCause[] = Object.keys({ said: 0, idle: 0, "pau
 function jsonReport(r: HygieneReport): unknown {
   const audit = (a: DockAudit | undefined): unknown => (a ? { hormes: a.hormes, pinned: a.pinned, recent: a.recent, changes: a.changes, modCount: a.modCount } : undefined);
   return { ...r, dock: { ...r.dock, before: audit(r.dock.before), after: audit(r.dock.after) } };
+}
+
+/**
+ * The daemon as `hormes brain` sees it (local-cli.ts `BrainDaemon`), over one connection: the
+ * snapshot the connect answered with (the brain before the pick), a command followed by the
+ * snapshots until the pick has landed, and `close()` when the verb is done. The daemon owns
+ * settings.json; nothing here writes it.
+ */
+async function brainDaemon(): Promise<BrainDaemon> {
+  const client = await daemon();
+  const snapshots: Snapshot[] = [];
+  const waiters = new Set<(s: Snapshot) => void>();
+  client.on("message", (m) => {
+    if (m.type !== "snapshot") return;
+    const snap = m.snapshot as Snapshot;
+    snapshots.push(snap);
+    for (const w of waiters) w(snap);
+  });
+  const nextMatching = (until: (s: Snapshot) => boolean, waitMs: number): Promise<Snapshot | undefined> =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        waiters.delete(w);
+        resolve(undefined);
+      }, waitMs);
+      const w = (s: Snapshot): void => {
+        if (!until(s)) return;
+        clearTimeout(timer);
+        waiters.delete(w);
+        resolve(s);
+      };
+      waiters.add(w);
+    });
+  return {
+    // The snapshot the connect answered with (or the next one): the state before any command, on the connection the command then uses.
+    snapshot: async () => {
+      const got = snapshots.at(-1) ?? (await nextMatching(() => true, 1500));
+      if (!got) throw new Error("the daemon sent no snapshot");
+      return got;
+    },
+    command: async (cmd: EngineCommand, until, waitMs) => {
+      // Only snapshots after the command count: the one the connect answered with shows the old setting.
+      const pending = nextMatching(until, waitMs);
+      client.sendJson({ type: "command", command: cmd });
+      return await pending;
+    },
+    close: () => client.close(),
+  };
 }
 
 /** Send one command; stay `listenMs` for the toasts it raises (a move says what moved and why anything stayed). */
@@ -583,7 +878,7 @@ const [command, ...rest] = positional;
 try {
   switch (command) {
     case "doctor": {
-      const { text, blocking } = render(await runChecks());
+      const { text, blocking } = render(await runChecks({ testAudio: flags.has("--test-audio") }));
       console.log(text);
       process.exit(blocking > 0 ? 1 : 0);
     }
@@ -602,24 +897,37 @@ try {
       break;
     case "ledger":
       if (flags.has("--speed")) {
-        // The day files are read here, no daemon needed (the Engine's Ledger opens the state dir).
+        // The day files are read here, no daemon needed.
         const days = Math.max(1, Number(flagValue("days") ?? 1) || 1);
-        for (const line of renderSpeed(ledgerSpeed(new Engine().ledger, days))) console.log(line);
+        for (const line of renderSpeed(ledgerSpeed(readLedger(), days))) console.log(line);
         break;
       }
       await ledgerCommand(rest);
       break;
     case "reflex-miss": {
       const days = Math.max(1, Number(flagValue("days") ?? 7) || 7);
-      const { days: picked, groups } = reflexMisses(new Engine().ledger, days);
+      const { days: picked, groups } = reflexMisses(readLedger(), days);
       for (const line of renderMisses(picked, groups)) console.log(line);
       break;
     }
     case "memory":
       await memoryCommand(rest);
       break;
+    case "models":
+      // Read directly from the server (no daemon): nothing is pulled, loaded or unloaded.
+      await runModels({ json: flags.has("--json"), server: flagValue("server"), out: (line) => console.log(line) });
+      break;
+    case "brain":
+      await runBrain(rest, flagValue("server"), brainDaemon, (line) => console.log(line));
+      break;
     case "status":
       await status();
+      break;
+    case "automations":
+      await automationsCommand(rest);
+      break;
+    case "recipes":
+      await recipesCommand(rest);
       break;
     case "say":
       if (rest.length === 0) throw new Error('usage: hormes say "hello there"');
@@ -636,7 +944,7 @@ try {
         if (!(await benchBrain({ runs: Math.max(1, Number(flagValue("runs") ?? 2) || 2), ...(effort ? { effort: effort as Effort } : {}), noReflex: flags.has("--no-reflex"), allowApiSpend: flags.has("--allow-api-spend"), json: flags.has("--json"), ...(flagValue("out") ? { out: flagValue("out") } : {}), ...(only?.length ? { only } : {}), ...(observe ? { observe: observe === "on" } : {}), ...(flagValue("compare") ? { compare: flagValue("compare") } : {}) })).ok) process.exit(1);
         break;
       }
-      if (!(await bench({ runs: Math.max(1, Number(flagValue("runs") ?? 5) || 5), codex: flags.has("--codex"), fakeHands: flags.has("--fake-hands"), json: flags.has("--json"), gate: !flags.has("--no-gate") })).ok) process.exit(1);
+      if (!(await bench({ runs: Math.max(1, Number(flagValue("runs") ?? 5) || 5), codex: flags.has("--codex"), fakeHands: flags.has("--fake-hands"), json: flags.has("--json"), gate: !flags.has("--no-gate"), duck: !flags.has("--no-duck") })).ok) process.exit(1);
       break;
     case "cmd": {
       const sub = rest[0];
@@ -647,16 +955,17 @@ try {
         await sendCommand(arg ? { type: "sleep", cause: arg } : { type: "sleep" }, 800);
         break;
       }
-      if (sub === "worker.stop") {
-        if (!arg) throw new Error("usage: hormes cmd worker.stop <workerId>  (the id is on `hormes status`; the other workers and the session carry on)");
-        await sendCommand({ type: "worker.stop", workerId: arg }, 800);
-        break;
-      }
       if (sub === "thread.stop" || sub === "thread.pause" || sub === "thread.resume") {
         await threadCommand(sub, arg);
         break;
       }
-      if (!sub || !["go", "pause", "stop", "interrupt", "wake", "resume", "mute", "unmute", "agent.refresh"].includes(sub)) throw new Error("usage: hormes cmd <go|pause|stop|interrupt|wake|sleep [cause]|resume|mute|unmute|agent.refresh|thread.stop <id|name>|thread.pause <id|name>|thread.resume <id|name>|worker.stop <id>>  (stop closes the voice session — the meter stops; interrupt cancels the work but keeps listening)");
+      if (sub === "request-permission") {
+        // The app puts up macOS's own prompt for the grant; User answers it there. The doctor's `banners` row names this for Notifications.
+        if (arg === undefined || (arg !== "all" && !(PERMISSION_KINDS as readonly string[]).includes(arg))) throw new Error(`usage: hormes cmd request-permission <${PERMISSION_KINDS.join("|")}|all>`);
+        await sendCommand({ type: "request-permission", which: arg as PermissionKind | "all" }, 800);
+        break;
+      }
+      if (!sub || !["go", "pause", "resume", "stop", "interrupt", "mute", "unmute", "agent.refresh"].includes(sub)) throw new Error("usage: hormes cmd <go|pause|resume|stop|interrupt|sleep [cause]|mute|unmute|agent.refresh|thread.stop <id|name>|thread.pause <id|name>|thread.resume <id|name>>  (stop closes the voice session: the meter stops; interrupt cancels the work but keeps listening)");
       await sendCommand({ type: sub });
       break;
     }
