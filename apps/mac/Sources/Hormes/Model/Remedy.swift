@@ -70,7 +70,7 @@ extension EngineCommand {
             guard let day = str("day") else { return nil }
             self = .ledgerTrashDay(day: day, what: str("what") ?? "both")
         case "automation.run":
-            // "Run now" on a missed alarm; the engine refuses it unless Kevin is there to hear it.
+            // "Run now" on a missed alarm; the engine refuses it unless User is there to hear it.
             guard let id = str("id"), !id.isEmpty else { return nil }
             self = .automationRun(id: id)
         case "automation.resume":

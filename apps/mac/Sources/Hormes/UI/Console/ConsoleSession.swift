@@ -1,0 +1,752 @@
+import SwiftUI
+import Combine
+
+/// Window-local UI state for the Console: which tab is open, which agent row or
+/// past Hormes conversation is stepped into, the ledger day being viewed, the
+/// lightbox. Lives as long as the controller. Changes here are rare, so views may
+/// observe the whole object.
+@MainActor
+final class ConsoleSession: ObservableObject {
+    enum Tab: String, CaseIterable, Identifiable {
+        case now = "Now", settings = "Settings", ledger = "Ledger"
+        var id: String { rawValue }
+    }
+
+    /// How a past Hormes conversation reads: the stream's rows, or every ledger row as one log.
+    enum HormesView: String, CaseIterable, Identifiable {
+        case conversation = "Conversation", log = "Log"
+        var id: String { rawValue }
+    }
+
+    @Published var tab: Tab = .now
+
+    /// The agent session stepped into. Setting one of the three open ids clears the
+    /// other two: the centre shows one conversation, or Now.
+    @Published var openAgentId: String? {
+        didSet {
+            guard openAgentId != nil else { return }
+            if openHormesSessionId != nil { openHormesSessionId = nil }
+            if openThreadId != nil { openThreadId = nil }
+        }
+    }
+    /// The past Hormes conversation stepped into — a chain's id (its first session's);
+    /// nil is Now, the default.
+    @Published var openHormesSessionId: String? {
+        didSet {
+            guard openHormesSessionId != nil else { return }
+            if openAgentId != nil { openAgentId = nil }
+            if openThreadId != nil { openThreadId = nil }
+        }
+    }
+    /// The thread stepped into — "main" or a spawned thread's id — whose ThreadPane holds the
+    /// centre (paneKey "thread:<id>"). Set by the rail rows, a satellite blob's click
+    /// (AppState.openThread), ⌘⇧] / ⌘⇧[; cleared by Now, an agent or a past conversation.
+    @Published var openThreadId: String? {
+        didSet {
+            guard openThreadId != nil else { return }
+            if openAgentId != nil { openAgentId = nil }
+            if openHormesSessionId != nil { openHormesSessionId = nil }
+        }
+    }
+    /// The chain whose rows are on screen — set only once its read has landed, so an open
+    /// id alone (set early for the rail's highlight) never passes for a loaded conversation.
+    private(set) var loadedChainId: String?
+    /// The open chain's rows, rebuilt into the stream's entries and the log's lines.
+    @Published var hormesEntries: [StreamEntry] = []
+    @Published var hormesLog: [HormesLogLine] = []
+    @Published var hormesLoading = false
+    /// The open chain's read hit the daemon's cap (Ledger.readChain keeps the newest rows): the
+    /// oldest of a very long conversation are not on screen.
+    @Published private(set) var hormesTruncated = false
+    @Published var hormesView: HormesView = .conversation
+
+    // MARK: durability (the window, the daemon)
+
+    /// The Console window is on screen (ConsoleWindowController: show, close, minimise). A
+    /// hidden Console holds no tails: the window only `orderOut`s and its view tree survives,
+    /// so a pane's onDisappear never fired while hidden and its tail ran for hours. Panes
+    /// send `agent.close` when this turns false and `agent.open` when it turns true.
+    @Published var windowVisible = false
+    /// Bumped on every daemon (re)connect (AppDelegate → ConsoleWindowController.reconnected).
+    /// A restarted engine starts with no open conversations and the pane's identity does not
+    /// change across the restart, so nothing re-sent `agent.open` and the header dot pulsed
+    /// over a feed nothing fed; a pane watching this re-opens within a second. Settable so
+    /// the preview harness can stage a reconnect without a daemon.
+    @Published var reconnectCount = 0
+
+    func reconnected() { reconnectCount += 1 }
+
+    /// nil until the first load; then newest first.
+    @Published var ledgerDays: [String]?
+    @Published var ledgerLoading = false
+    @Published var ledgerError: String?
+    @Published var ledgerDay: String?
+    @Published var ledgerEntries: [StreamEntry] = []
+    @Published var ledgerStats: LedgerStats?
+    /// Every day the ledger has read this session, by day (`pick(day:)`): a day's figures when the daemon sent no
+    /// totals for it (a daemon before LM-6, a harness).
+    @Published private(set) var ledgerDayStats: [String: LedgerStats] = [:]
+    /// LM-6: every day's totals from the `ledger.days` answer (`LedgerDays`), by day: the Ledger rail's day rows and
+    /// month heads show these for every day, read or not. Refreshed with the list and after each pick.
+    @Published private(set) var ledgerTotals: [String: LedgerDayTotals] = [:]
+    /// A `ledger.days` ask that got no answer in time (a loaded Mac, a reconnect), or a `partial` one (the daemon
+    /// still reading some days' totals), is asked again this long after, up to `daysRetries` times in a row; what the
+    /// rail shows stays meanwhile (`askDays`).
+    static let daysRetryAfterMs: UInt64 = 2_000
+    static let daysRetries = 5
+    private var daysRetryTask: Task<Void, Never>?
+
+    @Published var lightbox: ConsoleLightboxItem?
+
+    /// Bumped by the window controller to focus the composer (⌘K).
+    @Published var composerFocusRequest = 0
+    /// Bumped on every Stop (the composer's button, ⌘.): the Stop button flashes red for the press.
+    @Published var stopFlash = 0
+
+    // MARK: cleanup (the rail's selection, the inline rename, the folded groups, the search)
+
+    /// Chains picked with ⌘-click / ⇧-click; the action strip shows when more than one.
+    @Published var selectedChainIds: Set<String> = []
+    /// The last plain pick, where a ⇧-click range starts.
+    var selectionAnchor: String?
+    /// The chain whose title is being edited inline (Return commits, Esc cancels).
+    @Published var renamingChainId: String?
+    /// The folded groups at the bottom of the rail: Archived (n), Trash (n), Hidden (n).
+    @Published var archivedOpen = false
+    @Published var trashOpen = false
+    @Published var hiddenAgentsOpen = false
+
+    /// The search box in the rail's head: open, its text, and the hits for that text
+    /// (nil: nothing searched yet, or too short). Results are cached per query while the box is open.
+    @Published var searchOpen = false
+    @Published var searchQuery = ""
+    @Published var searchHits: [LedgerHit]?
+    /// The ledger is still being asked: the first page, or an older one (`landOlder`). The rail's "Searching…".
+    @Published var searching = false
+    /// Why the ledger's hits are missing (titles still match locally); nil while they come.
+    @Published var searchGap: SearchGap?
+    var searchUnavailable: Bool { searchGap != nil }
+
+    /// What stands between the box and the ledger's hits — named, so the line blames the right half.
+    enum SearchGap: Equatable {
+        /// The daemon did not answer `ledger.search` in time (it may predate the message).
+        case daemon
+        /// This build never installed `AppState.ledgerSearchHandler` (the app's wiring, not the daemon).
+        case app
+        /// The newest pages landed, and an older one did not answer in time: the hits shown stand, the days before
+        /// went unread (`landOlder`).
+        case older
+
+        var line: String {
+            switch self {
+            case .daemon: return "Titles only. The daemon did not answer the search; it may predate it."
+            case .app: return "Titles only. Full search is not wired in this build."
+            case .older: return "Older days were not searched. The daemon did not answer in time."
+            }
+        }
+    }
+    /// Bumped to focus the field (⌘F, the head's button).
+    @Published var searchFocusRequest = 0
+    private var searchCache: [String: [LedgerHit]] = [:]
+    private var searchTask: Task<Void, Never>?
+    /// How many hits the box asks the ledger for, across its pages.
+    static let searchLimit = 60
+    /// The preview harness's `loading` scenario pinned every read in flight: `search` and `pick`
+    /// leave their loading state up instead of answering. Never set in the app.
+    private var holdForPreview = false
+    /// After a search hit opened a conversation: the row's wall-clock ms to scroll to.
+    @Published var hormesScrollTarget: Double?
+
+    /// The shortest query that goes to the ledger.
+    static let searchMinLength = 2
+    /// Typing settles for this long before the ledger is asked.
+    static let searchDebounceMs: UInt64 = 250
+
+    var isLedgerMode: Bool { ledgerDay != nil }
+    /// The centre shows the live stream: nothing stepped into, no ledger day.
+    var showsNow: Bool { openAgentId == nil && openHormesSessionId == nil && openThreadId == nil && !isLedgerMode }
+
+    /// Posted (userInfo `sessionId`, optional `view` = "log") to step the Console into the
+    /// Hormes conversation holding that session — the preview harness and any surface
+    /// that opens the Console on a conversation use it; the root view listens.
+    static let openHormesSessionNotification = Notification.Name("hormes.console.openHormesSession")
+
+    /// Posted by the preview harness to drive the rail's cleanup state without a mouse:
+    /// userInfo `search` (a query), `trashOpen` / `archivedOpen` / `hiddenOpen` (Bool),
+    /// `select` ([chain id]), `rename` (a chain id). The root view listens.
+    static let previewNotification = Notification.Name("hormes.console.preview")
+
+    func select(_ tab: Tab) {
+        self.tab = tab
+        if tab != .ledger, isLedgerMode { showLive() }
+    }
+
+    func showLive() {
+        ledgerDay = nil
+        ledgerEntries = []
+        ledgerStats = nil
+        // An abandoned read must not leave the flag stuck for the next pick.
+        ledgerLoading = false
+        if tab == .ledger { tab = .now }
+    }
+
+    /// Back to Now: no conversation open, no thread pane, no ledger day.
+    func showNow() {
+        openAgentId = nil
+        openThreadId = nil
+        closeHormes()
+        if isLedgerMode { showLive() }
+    }
+
+    func openAgent(_ id: String) {
+        openAgentId = id
+    }
+
+    /// Step into a thread's pane ("main" is the main conversation as a thread; Now stays the
+    /// stream). A ledger day underneath steps out: the pane is live, the day was the record.
+    func openThread(_ id: String) {
+        openThreadId = id
+        if isLedgerMode { showLive() }
+    }
+
+    /// ⌘⇧] / ⌘⇧[: the next / previous thread in `order` (the rail's, AppState.railOrder). From
+    /// Now, next is the first and previous the last; from a thread it steps, and past either end
+    /// it comes back to Now — so the keys walk Now → threads → Now. Nothing without threads.
+    func stepThread(by delta: Int, order: [String]) {
+        guard !order.isEmpty else { return }
+        guard let current = openThreadId, let i = order.firstIndex(of: current) else {
+            openThread(delta >= 0 ? order[0] : order[order.count - 1])
+            return
+        }
+        let next = i + delta
+        if next < 0 || next >= order.count { showNow() } else { openThread(order[next]) }
+    }
+
+    func closeHormes() {
+        openHormesSessionId = nil
+        loadedChainId = nil
+        hormesScrollTarget = nil
+        hormesEntries = []
+        hormesLog = []
+        hormesLoading = false
+        hormesTruncated = false
+    }
+
+    // MARK: selection
+
+    /// A click on a chain row. ⌘ toggles the row in the selection, ⇧ extends from the
+    /// anchor over `visible` (the rail's order, top to bottom); either returns true and the
+    /// row is not opened. A plain click clears the selection and returns false — the caller opens.
+    @discardableResult
+    func pickChain(_ id: String, modifiers: NSEvent.ModifierFlags, visible: [String]) -> Bool {
+        if modifiers.contains(.command) {
+            if selectedChainIds.contains(id) { selectedChainIds.remove(id) } else { selectedChainIds.insert(id) }
+            selectionAnchor = id
+            return true
+        }
+        if modifiers.contains(.shift), let anchor = selectionAnchor, let a = visible.firstIndex(of: anchor), let b = visible.firstIndex(of: id) {
+            selectedChainIds.formUnion(visible[min(a, b)...max(a, b)])
+            return true
+        }
+        if !selectedChainIds.isEmpty { selectedChainIds.removeAll() }
+        selectionAnchor = id
+        return false
+    }
+
+    func clearSelection() {
+        selectedChainIds.removeAll()
+    }
+
+    // MARK: search
+
+    func openSearch() {
+        searchOpen = true
+        searchFocusRequest += 1
+    }
+
+    /// Closes the box: the query, the hits and the cache go; the rail is itself again.
+    func closeSearch() {
+        searchTask?.cancel()
+        searchTask = nil
+        searchOpen = false
+        searchQuery = ""
+        searchHits = nil
+        searching = false
+        searchGap = nil
+        searchCache.removeAll()
+    }
+
+    /// The box's text changed. Titles match locally at once (the rail does that from the
+    /// query); the ledger is asked for body hits after the typing settles, once per query.
+    func search(_ query: String, from state: AppState) {
+        searchQuery = query
+        searchTask?.cancel()
+        if holdForPreview { searchHits = nil; searchGap = nil; searching = true; return }
+        let q = ConsoleSession.searchKey(query)
+        guard q.count >= ConsoleSession.searchMinLength else {
+            searchHits = nil
+            searching = false
+            return
+        }
+        if let cached = searchCache[q] {
+            searchHits = cached
+            searching = false
+            return
+        }
+        // No handler at all is the app's gap, not the daemon's: say so, and skip the wait.
+        guard state.ledgerSearchInstalled else {
+            searchHits = []
+            searchGap = .app
+            searching = false
+            return
+        }
+        searching = true
+        let owner = self
+        searchTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: ConsoleSession.searchDebounceMs * 1_000_000)
+            guard !Task.isCancelled else { return }
+            let current = { !Task.isCancelled && owner.searchOpen && ConsoleSession.searchKey(owner.searchQuery) == q }
+            // Page by page (search older): the daemon reads a bounded slice of day files per request, so a year of
+            // history never holds it for one long read, and the hits land as each page answers. The box keeps
+            // reading older pages until it has its hits or nothing older is left (a harness answers one page).
+            var page = await state.ledgerSearchPage(q, limit: ConsoleSession.searchLimit, before: nil)
+            guard current() else { return }
+            owner.land(q, page, complete: page?.older == nil)
+            while let before = page?.older, let shown = owner.searchHits, shown.count < ConsoleSession.searchLimit {
+                page = await state.ledgerSearchPage(q, limit: ConsoleSession.searchLimit - shown.count, before: before)
+                guard current() else { return }
+                owner.landOlder(q, page)
+            }
+        }
+    }
+
+    /// The first page landed (nil: nothing answered). `complete`: nothing older is left to read.
+    private func land(_ q: String, _ page: LedgerSearchPage?, complete: Bool) {
+        guard let page else {
+            searchHits = []
+            searchGap = .daemon
+            searching = false
+            return
+        }
+        searchHits = page.hits
+        searchGap = nil
+        if complete {
+            searchCache[q] = page.hits
+            searching = false
+        }
+    }
+
+    /// An older page landed (nil: it did not answer; the hits so far stand, and the gap line says the older days went
+    /// unread): its hits after the ones shown, the search done when nothing older is left or the box has its hits.
+    private func landOlder(_ q: String, _ page: LedgerSearchPage?) {
+        let shown = searchHits ?? []
+        guard let page else {
+            searchGap = .older
+            searching = false
+            return
+        }
+        let seen = Set(shown.map(\.id))
+        let all = shown + page.hits.filter { !seen.contains($0.id) }
+        searchHits = all
+        if page.older == nil || all.count >= ConsoleSession.searchLimit {
+            searchCache[q] = all
+            searching = false
+        }
+    }
+
+    /// The preview harness's `loading` scenario: the picked day's read and a search left in
+    /// flight for good, so the stream's "Reading…", the rail's "Reading" row and the Hormes
+    /// section's "Searching…" — the dither glyphs — are on screen to shoot. The query names
+    /// nothing a fake title contains, or the title matches would stand in for the indicator.
+    func pinLoadingForPreview() {
+        holdForPreview = true
+        ledgerEntries = []
+        ledgerStats = nil
+        ledgerLoading = true
+        searchTask?.cancel()
+        searchTask = nil
+        searchOpen = true
+        searchQuery = "vercel"
+        searchHits = nil
+        searchGap = nil
+        searching = true
+    }
+
+    /// Trimmed and lower-cased: what the cache and the daemon see.
+    static func searchKey(_ query: String) -> String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// The rail is showing search results, not the sections.
+    var isSearching: Bool { searchOpen && ConsoleSession.searchKey(searchQuery).count >= ConsoleSession.searchMinLength }
+
+    /// Steps into a past Hormes conversation: the chain's rows, oldest first — a resume
+    /// continues the paused one, so the chain reads as one conversation. One `ledger.chain`
+    /// request reads the whole chain (15 s budget); a daemon from before that message
+    /// answers nothing and the rows come one session at a time as before (5 s each). The
+    /// view mode (Conversation | Log) is kept between chains. `scrollTo` is a row's
+    /// wall-clock ms (a search hit): the feed opens on it.
+    func openHormes(_ chain: HormesChain, from state: AppState, scrollTo at: Double? = nil) async {
+        if openHormesSessionId == chain.id, loadedChainId == chain.id || hormesLoading {
+            // Its rows are on screen, or their read is in flight: only the scroll target moves
+            // (the read in flight lands and the pane opens on it). The open id alone is not
+            // enough — the rail sets it early for the highlight — hence `loadedChainId`.
+            hormesScrollTarget = at
+            return
+        }
+        // The rail's highlight glides to the row and the pane arrives behind the curtain — in the
+        // wipe's own animation (Motion.wipeAnimation), the curtain's length to the frame.
+        withAnimation(Motion.wipeAnimation) { openHormesSessionId = chain.id }
+        loadedChainId = nil
+        hormesScrollTarget = at
+        hormesEntries = []
+        hormesLog = []
+        hormesLoading = true
+        hormesTruncated = false
+        var rows: [LedgerRow] = []
+        var truncated = false
+        // nil is no answer (a disconnect, the request timeout); empty rows for a chain that has
+        // members is a daemon whose ledger has no readChain (`{rows: [], truncated: false}`)
+        // or a walk that missed the root — an empty conversation is not what Kevin opened.
+        if let answer = await state.hormesChainRows(chain.id), answer.covers(sessionCount: chain.sessions.count) {
+            rows = answer.rows
+            truncated = answer.truncated
+        } else {
+            for s in chain.sessions {
+                rows += await state.hormesSessionRows(s.id)
+            }
+        }
+        // Kevin may have moved on while we were reading.
+        guard openHormesSessionId == chain.id else { return }
+        hormesEntries = StreamBuilder.fromLedger(rows)
+        hormesLog = HormesLog.lines(rows)
+        hormesTruncated = truncated
+        hormesLoading = false
+        loadedChainId = chain.id
+    }
+
+    func loadDays(from state: AppState, force: Bool = false) async {
+        if ledgerDays != nil && !force { return }
+        ledgerLoading = true
+        ledgerError = nil
+        // The list with every day's totals beside it (LM-6), asked again while it does not come or comes partial.
+        await askDays(from: state, retriesLeft: ConsoleSession.daysRetries)
+        ledgerLoading = false
+    }
+
+    /// The totals again (a pick: the day being written moves, and a close or a carried decision can land on an
+    /// older one). The list comes with them; nothing changes when nothing answers, and it is asked again (`askDays`).
+    func refreshTotals(from state: AppState) async {
+        await askDays(from: state, retriesLeft: ConsoleSession.daysRetries)
+    }
+
+    /// One `ledger.days` ask (LM-6). An answer sets the list and the totals; a `partial` one keeps what a day showed
+    /// until its total comes. No answer keeps the list on screen (still "Loading…" before the first). Either way it is
+    /// asked again `daysRetryAfterMs` later, `retriesLeft` more times; after the last, a list never answered is empty, as
+    /// before. A newer ask cancels the waiting one.
+    func askDays(from state: AppState, retriesLeft: Int) async {
+        daysRetryTask?.cancel()
+        daysRetryTask = nil
+        let answer = await state.ledgerDays()
+        if let answer {
+            if ledgerDays != answer.days { ledgerDays = answer.days }
+            let totals = answer.partial ? ledgerTotals.merging(answer.totals) { _, new in new } : answer.totals
+            if ledgerTotals != totals { ledgerTotals = totals }
+            if !answer.partial { return }
+        } else if retriesLeft <= 0 {
+            if ledgerDays == nil { ledgerDays = [] }
+        }
+        guard retriesLeft > 0 else { return }
+        daysRetryTask = Task { @MainActor [weak self, weak state] in
+            try? await Task.sleep(nanoseconds: ConsoleSession.daysRetryAfterMs * 1_000_000)
+            guard !Task.isCancelled, let self, let state else { return }
+            self.daysRetryTask = nil
+            await self.askDays(from: state, retriesLeft: retriesLeft - 1)
+        }
+    }
+
+    func pick(day: String, from state: AppState) async {
+        // The day takes the centre: whatever conversation was stepped into steps out.
+        openAgentId = nil
+        openThreadId = nil
+        if openHormesSessionId != nil { closeHormes() }
+        ledgerDay = day
+        // Clear the previous day before the read so the feed shows its loading
+        // state instead of the old rows under the new banner.
+        ledgerEntries = []
+        ledgerStats = nil
+        ledgerLoading = true
+        if holdForPreview { return }
+        let rows = await state.ledgerRows(day: day)
+        // The user may have moved on while we were reading: either showLive()
+        // already reset the flag, or a newer pick owns it now.
+        guard ledgerDay == day else { return }
+        // A day's rows are the record where it was written: a decision a move carried into this day says so.
+        ledgerEntries = StreamBuilder.fromLedger(rows, reading: .day)
+        let stats = StreamBuilder.stats(rows)
+        ledgerStats = stats
+        ledgerDayStats[day] = stats
+        ledgerLoading = false
+        await refreshTotals(from: state)
+    }
+
+    /// A day's billed seconds as the rail shows them: the daemon's total (LM-6), else the figures of a read day, else
+    /// nil (not known yet).
+    static func billed(_ day: String, totals: [String: LedgerDayTotals], stats: [String: LedgerStats]) -> Double? {
+        totals[day]?.billedSeconds ?? stats[day]?.billedSeconds
+    }
+
+    /// The figures a month head sums: the days whose figures are known, and how many of the month's days that is.
+    static func monthStats(_ days: [String], totals: [String: LedgerDayTotals], stats: [String: LedgerStats]) -> (read: Int, billedSeconds: Double) {
+        let known = days.compactMap { billed($0, totals: totals, stats: stats) }
+        return (known.count, known.reduce(0, +))
+    }
+}
+
+// MARK: - Hormes conversations (pure)
+
+/// One of Hormes's conversations as the rail shows it: a session, or a resume
+/// chain (`resumedFrom` links) folded into one row. `sessions` oldest first; the
+/// chain's id is its first session's, so a row keeps its identity across resumes.
+struct HormesChain: Identifiable, Equatable {
+    let sessions: [HormesSessionSummary]
+
+    var id: String { sessions.first?.id ?? "" }
+    var root: HormesSessionSummary? { sessions.first }
+    var last: HormesSessionSummary? { sessions.last }
+    var day: String { root?.day ?? "" }
+    var startedAt: Double { root?.startedAt ?? 0 }
+    /// nil while the last session is still open.
+    var endedAt: Double? { last?.closedAt }
+    var isOpen: Bool { last?.closedAt == nil }
+    var reason: String? { last?.reason }
+    var usageSeconds: Double { sessions.reduce(0) { $0 + $1.usageSeconds } }
+    /// heard + said, the whole chain.
+    var messages: Int { sessions.reduce(0) { $0 + $1.heard + $1.said } }
+    var delegations: Int { sessions.reduce(0) { $0 + $1.delegations } }
+    var resumes: Int { max(0, sessions.count - 1) }
+    /// The first thing Kevin said anywhere in the chain; "" when nothing was heard.
+    var title: String { sessions.first(where: { !$0.title.isEmpty })?.title ?? "" }
+
+    // The chain's state from the ledger's tombstone rows. The engine stamps every session of
+    // a chain with the same state, name and pin; the root's is read first, any other's next.
+
+    /// "active" | "archived" | "trashed".
+    var state: String { root?.state ?? sessions.compactMap(\.state).first ?? "active" }
+    var isTrashed: Bool { state == "trashed" }
+    var isArchived: Bool { state == "archived" }
+    var isActive: Bool { !isTrashed && !isArchived }
+    /// Kevin's own name for it; nil when he gave none (or cleared it).
+    var name: String? {
+        let n = root?.name ?? sessions.compactMap(\.name).first
+        return (n?.isEmpty == false) ? n : nil
+    }
+    /// The rail's title: Kevin's name, else the first thing he said.
+    var displayTitle: String { name ?? title }
+    var pinned: Bool { root?.pinned ?? sessions.compactMap(\.pinned).first ?? false }
+    var trashedAt: Double? { root?.trashedAt ?? sessions.compactMap(\.trashedAt).first }
+    /// Nothing heard, said or delegated — the crash litter.
+    var isEmptyConversation: Bool { messages == 0 && delegations == 0 }
+
+    func contains(_ sessionId: String) -> Bool { sessions.contains { $0.id == sessionId } }
+
+    /// The chain as the rail shows it before the ledger confirms Kevin's click (AppState.chainOverrides).
+    func overlaid(_ o: ChainOverride) -> HormesChain {
+        HormesChain(sessions: sessions.map { s in
+            var s = s
+            if let state = o.state { s.state = state == "active" ? nil : state }
+            if let name = o.name { s.name = name }
+            if let pinned = o.pinned { s.pinned = pinned }
+            return s
+        })
+    }
+
+    /// Folds the ledger's list into chains, newest first by when each began. A session
+    /// whose `resumedFrom` is not in the list starts a chain of its own.
+    static func build(_ list: [HormesSessionSummary]) -> [HormesChain] {
+        var byId: [String: HormesSessionSummary] = [:]
+        for s in list where byId[s.id] == nil { byId[s.id] = s }
+        func rootId(_ s: HormesSessionSummary) -> String {
+            var current = s
+            var seen: Set<String> = [s.id]
+            while let from = current.resumedFrom, let previous = byId[from], !seen.contains(previous.id) {
+                seen.insert(previous.id)
+                current = previous
+            }
+            return current.id
+        }
+        var groups: [String: [HormesSessionSummary]] = [:]
+        for s in list { groups[rootId(s), default: []].append(s) }
+        return groups.values
+            .map { HormesChain(sessions: $0.sorted { $0.startedAt < $1.startedAt }) }
+            .sorted { $0.startedAt > $1.startedAt }
+    }
+}
+
+struct ConsoleLightboxItem: Identifiable, Equatable {
+    let url: URL
+    let caption: String
+    var id: String { url.path }
+}
+
+/// Side-effect hooks handed down through the environment so leaf views stay
+/// pure value types (and therefore cheap to diff) without observing AppState.
+struct ConsoleActions {
+    var send: (EngineCommand) -> Void = { _ in }
+    /// Stop everything — the command plus the feedback that does not wait for the
+    /// engine (ConsoleWindowController.handle(.stop)); the composer's button and ⌘. share it.
+    var stop: () -> Void = {}
+    var screenshotURL: (String) -> URL = { URL(fileURLWithPath: $0) }
+    var loadLedgerDays: () -> Void = {}
+    var pickLedgerDay: (String) -> Void = { _ in }
+    /// Settings › "Set up again…": the first-run wizard.
+    var openOnboarding: () -> Void = {}
+    /// The wake gate's passphrase (AppState.wakeActions, read at call time so the
+    /// gate may install them after the window exists). Set returns false when too short.
+    var setWakePassphrase: (String) -> Bool = { _ in false }
+    var clearWakePassphrase: () -> Void = {}
+    /// Now › "Circle something…": mark mode on the overlay (AppState.beginMarkMode).
+    var beginMarkMode: () -> Void = {}
+    /// A conversation's Reveal: the session's folder or file in Finder.
+    var reveal: (URL) -> Void = { _ in }
+    /// The Hormes section: step into a past conversation (the whole chain), or back to Now.
+    /// The root view fills these in — they need AppState, which leaf views never see.
+    var openHormesConversation: (HormesChain) -> Void = { _ in }
+    var showNow: () -> Void = {}
+    /// The cleanup verbs — Move to Trash, Archive, Restore, Rename, Pin, New conversation,
+    /// Clear, Hide, the retention sweep — as one undoable action each (AppState.performCleanup:
+    /// the commands, the overlay, the undo stack, the toast, the re-read). Filled in by the root.
+    var cleanup: (CleanupAction) -> Void = { _ in }
+    /// Edit › Undo for the newest cleanup action.
+    var undoCleanup: () -> Void = {}
+    /// The rail's search box: the query changed (ConsoleSession.search, debounced).
+    var search: (String) -> Void = { _ in }
+    /// A search hit: open the conversation holding that session, scrolled to the row.
+    var openHormesHit: (LedgerHit) -> Void = { _ in }
+    /// A remedy's `open`, or the trash folder: a URL opens, a path is shown in Finder.
+    var open: (String) -> Void = { target in
+        if let url = URL(string: target), url.scheme != nil, !target.hasPrefix("/") {
+            NSWorkspace.shared.open(url)
+        } else {
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: (target as NSString).expandingTildeInPath)])
+        }
+    }
+}
+
+// MARK: - The cleanup actions (pure)
+
+/// The verbs the rail and the panels offer, each built once here so every site sends the
+/// same commands, shows the same overlay and reads the same word in Edit › Undo and the
+/// toast. Nothing deletes: trash and archive are tombstone rows, restore is their inverse.
+extension CleanupAction {
+    private static func count(_ n: Int, _ one: String, _ many: String) -> String { n == 1 ? one : String(format: many, n) }
+
+    static func trash(_ chains: [HormesChain]) -> CleanupAction {
+        var a = CleanupAction(label: "Move to Trash", toast: count(chains.count, "Moved to Trash", "Moved %d to Trash"), symbol: "trash.fill",
+                              commands: chains.map { .conversationTrash(chainId: $0.id) },
+                              inverse: chains.map { chain in chain.isArchived ? .conversationArchive(chainId: chain.id) : .conversationRestore(chainId: chain.id) })
+        for c in chains {
+            a.chainAfter[c.id] = ChainOverride(state: "trashed")
+            a.chainBefore[c.id] = ChainOverride(state: c.state)
+        }
+        return a
+    }
+
+    static func archive(_ chains: [HormesChain]) -> CleanupAction {
+        var a = CleanupAction(label: "Archive", toast: count(chains.count, "Archived", "Archived %d"), symbol: "archivebox.fill",
+                              commands: chains.map { .conversationArchive(chainId: $0.id) },
+                              inverse: chains.map { chain in chain.isTrashed ? .conversationTrash(chainId: chain.id) : .conversationRestore(chainId: chain.id) })
+        for c in chains {
+            a.chainAfter[c.id] = ChainOverride(state: "archived")
+            a.chainBefore[c.id] = ChainOverride(state: c.state)
+        }
+        return a
+    }
+
+    /// Back from Archived or Trash; the inverse puts each one back where it was.
+    static func restore(_ chains: [HormesChain]) -> CleanupAction {
+        var a = CleanupAction(label: "Restore", toast: count(chains.count, "Restored", "Restored %d"), symbol: "arrow.uturn.backward",
+                              commands: chains.map { .conversationRestore(chainId: $0.id) },
+                              inverse: chains.map { chain in chain.isTrashed ? .conversationTrash(chainId: chain.id) : .conversationArchive(chainId: chain.id) })
+        for c in chains {
+            a.chainAfter[c.id] = ChainOverride(state: "active")
+            a.chainBefore[c.id] = ChainOverride(state: c.state)
+        }
+        return a
+    }
+
+    /// "" is back to the auto title.
+    static func rename(_ chain: HormesChain, to name: String) -> CleanupAction {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        var a = CleanupAction(label: "Rename", toast: trimmed.isEmpty ? "Name cleared" : "Renamed", symbol: "pencil",
+                              commands: [.conversationRename(chainId: chain.id, name: trimmed)],
+                              inverse: [.conversationRename(chainId: chain.id, name: chain.name ?? "")])
+        a.chainAfter[chain.id] = ChainOverride(name: trimmed)
+        a.chainBefore[chain.id] = ChainOverride(name: chain.name ?? "")
+        return a
+    }
+
+    static func pin(_ chain: HormesChain, _ pinned: Bool) -> CleanupAction {
+        var a = CleanupAction(label: pinned ? "Pin" : "Unpin", toast: pinned ? "Pinned" : "Unpinned", symbol: pinned ? "pin.fill" : "pin.slash.fill",
+                              commands: [.conversationPin(chainId: chain.id, pinned: pinned)],
+                              inverse: [.conversationPin(chainId: chain.id, pinned: !pinned)])
+        a.chainAfter[chain.id] = ChainOverride(pinned: pinned)
+        a.chainBefore[chain.id] = ChainOverride(pinned: !pinned)
+        return a
+    }
+
+    /// Hide / unhide an agent's row. Never a file operation: Claude Code and Codex own their stores.
+    static func hide(_ agent: AgentInfo, _ hidden: Bool) -> CleanupAction {
+        var a = CleanupAction(label: hidden ? "Hide" : "Unhide", toast: hidden ? "Hidden" : "Shown again", symbol: hidden ? "eye.slash.fill" : "eye.fill",
+                              commands: [.agentHide(agentId: agent.id, hidden: hidden)],
+                              inverse: [.agentHide(agentId: agent.id, hidden: !hidden)])
+        a.agentsAfter[agent.id] = hidden
+        a.agentsBefore[agent.id] = !hidden
+        a.refreshesHormes = false
+        return a
+    }
+
+    /// Clear the Now stream (the ledger keeps every row; the engine hides them from the live view).
+    static func clearNow(at: Double) -> CleanupAction {
+        var a = CleanupAction(label: "Clear", toast: "Cleared", symbol: "eraser.fill", commands: [.nowClear], inverse: [.nowRestore])
+        a.nowAfter = .cleared(at)
+        a.nowBefore = .restored
+        a.refreshesHormes = false
+        return a
+    }
+
+    /// The feed's own "Cleared · Undo": the items come back.
+    static func restoreNow(clearedAt: Double) -> CleanupAction {
+        var a = CleanupAction(label: "Restore", toast: "Restored", symbol: "arrow.uturn.backward", commands: [.nowRestore], inverse: [.nowClear])
+        a.nowAfter = .restored
+        a.nowBefore = .cleared(clearedAt)
+        a.refreshesHormes = false
+        return a
+    }
+
+    /// A fresh conversation: the open session closes like a stop, the next Go starts a new chain. Not undoable.
+    static var newConversation: CleanupAction {
+        var a = CleanupAction(label: "New Conversation", toast: "New conversation", symbol: "plus", commands: [.conversationNew], inverse: [])
+        a.nowAfter = .restored
+        return a
+    }
+
+    /// Run the retention sweep now (what it would move is logged first). Days come back one at a time with Restore.
+    static var sweep: CleanupAction {
+        var a = CleanupAction(label: "Sweep", toast: "Sweep running", symbol: "trash.fill", commands: [.ledgerSweep], inverse: [])
+        a.refreshesHormes = true
+        return a
+    }
+
+}
+
+private struct ConsoleActionsKey: EnvironmentKey {
+    static let defaultValue = ConsoleActions()
+}
+
+extension EnvironmentValues {
+    var consoleActions: ConsoleActions {
+        get { self[ConsoleActionsKey.self] }
+        set { self[ConsoleActionsKey.self] = newValue }
+    }
+}

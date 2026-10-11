@@ -4,14 +4,12 @@ import Foundation
 /// composer and the notch's field read one placeholder table; the Console's MarkThumb and the
 /// notch's thumb tooltip read one caption builder; the Ask box sends one question.
 public enum ComposerWords {
-    /// The field's placeholder: what typing does in this phase. Paused: resumes (the engine's
-    /// own rule). In session (or connecting): "Say something…". Asleep or in error: refused
-    /// unless typed lines wake, and the placeholder says which — a typed line under
-    /// `typedWakes` opens a paid session.
+    /// Quiet status text shared by the Console and notch fields.
     public static func placeholder(phase: Phase, paused: Bool, typedWakes: Bool) -> String {
-        if paused || phase == .paused { return "Paused: press Go or type to resume" }
-        if AppState.inSessionPhases.contains(phase) || phase == .connecting { return "Say something…" }
-        return typedWakes ? "Type to wake Hormes…" : "Type to Hormes… (asleep: press Go)"
+        if paused || phase == .paused { return "(paused)" }
+        if phase == .asleep { return "(asleep)" }
+        if phase == .error { return "(error)" }
+        return ""
     }
 
     /// Whether a submitted line stays in the field: asleep (or in error) with typed wakes off,

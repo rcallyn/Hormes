@@ -1,0 +1,440 @@
+import SwiftUI
+import AppKit
+
+// One thread's conversation in the centre column — as rich as Now, because it IS the same
+// feed: a 40pt header (the status glyph, the name, its status word, `00:12 · screen · 7 steps`
+// in mono, a live dot while it is busy, the acting-point thumbnail, Pause / Resume and Stop for
+// this thread only, and "‹ Now"), then StreamFeed over the thread's own entries (its delegation
+// cards with their steps, tool cards and screenshots; the lines it spoke; the system rows for
+// its start and end), with "Load earlier" at the top while more remains, then a composer that
+// talks to that thread (`thread.say`). A question the thread is waiting on sits above the
+// field with Allow / Deny (`thread.answer`) — clicks only; a bare Return is never a yes.
+// The pane opens its stream as one viewer (`thread.open {viewer}`) while the window shows it,
+// re-opens on a daemon reconnect, and closes it when it leaves — the ConversationPane idiom.
+
+private let iconGap: CGFloat = 8
+
+enum ThreadPaneWords {
+    static let lastShot = "last screenshot"
+    static let shotTip = "thread.shot."
+    static let askTip = "thread.ask."
+    /// The header's second line (the brief and the figures) under the 40 pt name line.
+    static let briefHeight: CGFloat = 20
+}
+
+struct ThreadPane: View, Equatable {
+    let thread: WorkThread
+    /// What the engine has sent for this thread (AppState.threadStores); nil until the first page.
+    let store: ThreadStore?
+    /// The engine's phase, for the main thread's composer (asleep: typing does not wake by default).
+    var phase: Phase = .asleep
+    /// The daemon client is connected: nothing can arrive while it is not.
+    var connected = true
+    /// Settings.typedWakes: a typed line while asleep opens a paid session (Kevin's word; default off).
+    var typedWakes = false
+    /// The snapshot carries `app.version` (ComposerHold.skewed): main's typed line is refused, so the words stay.
+    var skewed = false
+
+    @EnvironmentObject private var session: ConsoleSession
+    @Environment(\.consoleActions) private var actions
+    /// This pane's name on the wire (`thread.open {viewer}`): one per pane instance (the root keys
+    /// the pane to the thread's id), stable across the app's reconnects. Never per send.
+    @State private var viewer = UUID().uuidString
+
+    static func == (a: ThreadPane, b: ThreadPane) -> Bool {
+        a.thread == b.thread && a.store == b.store && a.phase == b.phase && a.connected == b.connected && a.typedWakes == b.typedWakes
+            && a.skewed == b.skewed
+    }
+
+    private var isMain: Bool { thread.id == "main" }
+
+    /// The streaming caret may show: the thread is live, the daemon connected, and — for main —
+    /// a session is open (its fragments arrive on this stream while Kevin speaks).
+    private var caretsOn: Bool {
+        guard connected, thread.status.isLive else { return false }
+        return isMain ? ConsoleTheme.sessionPhases.contains(phase) : true
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ThreadHeader(thread: thread, connected: connected, close: close)
+            ThreadFeed(thread: thread, store: store, caretsOn: caretsOn, viewer: viewer)
+            ThreadComposer(thread: thread, phase: phase, typedWakes: typedWakes, skewed: skewed,
+                           lastTypedId: isMain ? ComposerHold.lastTypedId(store?.entries.compactMap(\.item) ?? []) : nil, close: close)
+        }
+        // Allow / Deny on this feed's confirm rows answer THIS thread's question (StepRow).
+        .environment(\.consoleConfirm, ConsoleConfirm(threadId: thread.id))
+        .onAppear { if session.windowVisible { open() } }
+        .onDisappear(perform: closeTail)
+        .onChange(of: session.reconnectCount) {
+            if session.windowVisible { open() }
+        }
+        .onChange(of: session.windowVisible) { _, visible in
+            if visible { open() } else { closeTail() }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Thread \(thread.name), \(thread.status.words)")
+    }
+
+    private func open() { actions.send(.threadOpen(threadId: thread.id, viewer: viewer)) }
+    private func closeTail() { actions.send(.threadClose(threadId: thread.id, viewer: viewer)) }
+
+    /// Back to Now — the live stream, whatever ledger day was open underneath.
+    private func close() {
+        withAnimation(Motion.snappy) { session.showNow() }
+    }
+
+    /// The thread pane's empty line: opening, stale, or a thread that has said nothing yet.
+    static func emptyText(store: ThreadStore?, stale: Bool) -> String {
+        if let store { return store.total == 0 ? "Nothing yet." : "Nothing loaded yet." }
+        return stale ? "Nothing from the engine yet." : "Opening…"
+    }
+}
+
+// MARK: - Header
+
+/// 40pt, owns its bottom rule so it meets the two rail heads on one seam.
+private struct ThreadHeader: View {
+    let thread: WorkThread
+    let connected: Bool
+    let close: () -> Void
+
+    @Environment(\.consoleActions) private var actions
+    @EnvironmentObject private var session: ConsoleSession
+
+    private var meta: ConsoleTheme.ThreadMeta { ConsoleTheme.thread(thread.status) }
+    private var isMain: Bool { thread.id == "main" }
+    private var live: Bool { connected && thread.status.isBusy }
+
+    /// The figures whole (`fixedSize`): the live dot and `00:06 · screen · 4 steps` — never "screen…".
+    private var figures: some View {
+        HStack(spacing: 6) {
+            if live {
+                ConsoleDot(color: meta.color, live: true, size: 6)
+                    .consoleHelp(HelpCopy.liveThread)
+                    .accessibilityLabel("Live")
+                    .transition(.opacity)
+            }
+            elapsed
+        }
+        .fixedSize()
+        .animation(Motion.fade, value: live)
+    }
+
+    /// Where its hands last were: the thumbnail opens the shot (the shot is on the card too).
+    @ViewBuilder private var thumb: some View {
+        if let path = thread.lastScreenshotPath, !path.isEmpty {
+            let url = actions.screenshotURL(path)
+            ScreenshotThumb(url: url, onTap: { session.lightbox = ConsoleLightboxItem(url: url, caption: "\(thread.name) · last screenshot") }, width: 64)
+                .frame(height: 30)
+                .consoleHelp(id: ThreadPaneWords.shotTip + thread.id, spoken: ThreadPaneWords.lastShot) {
+                    ConsoleTipPreview(title: thread.name, subtitle: ThreadPaneWords.lastShot, url: url, meta: ConsoleTipPreview.fileMeta(url))
+                }
+                .transition(.opacity)
+        }
+    }
+
+    /// Pause / Resume and Stop act on THIS thread; the transport's Pause and Stop stay in the Now
+    /// composer. Main has no Pause of its own (the transport's is the session's). Every verb is
+    /// `fixedSize`: a verb never truncates.
+    private var verbs: some View {
+        HStack(spacing: 6) {
+            if !isMain, thread.status.isLive, thread.status != .idle {
+                if thread.status == .paused {
+                    Button { actions.send(.threadResume(threadId: thread.id)) } label: { Label("Resume", systemImage: ConsoleGlyph.play) }
+                        .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
+                        .fixedSize()
+                        .consoleHelp(HelpCopy.resumeThread(thread.name))
+                        .transition(.opacity)
+                } else {
+                    Button { actions.send(.threadPause(threadId: thread.id)) } label: { Label("Pause", systemImage: ConsoleGlyph.pause) }
+                        .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
+                        .fixedSize()
+                        .consoleHelp(HelpCopy.pauseThread(thread.name))
+                        .transition(.opacity)
+                }
+            }
+            if thread.canStop, thread.status.isLive {
+                Button { actions.send(.threadStop(threadId: thread.id)) } label: { Label("Stop", systemImage: ConsoleGlyph.stop) }
+                    .buttonStyle(ConsoleButtonStyle(kind: thread.status.isBusy ? .danger : .ghost, height: 24, small: true))
+                    .fixedSize()
+                    .consoleHelp(isMain ? HelpCopy.stop : HelpCopy.stopThread(thread.name))
+                    .accessibilityLabel("Stop \(thread.name)")
+                    .transition(.opacity)
+            }
+            Button(action: close) { Label("Now", systemImage: ConsoleGlyph.chevronLeft) }
+                .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
+                .fixedSize()
+                .consoleHelp(HelpCopy.backNow)
+                .accessibilityLabel("Back to Now")
+        }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: iconGap) {
+                ConsoleThreadGlyph(status: thread.status)
+                Text(thread.name)
+                    .font(ConsoleTheme.sans(13, .medium)).foregroundStyle(ConsoleTheme.fg)
+                    .lineLimit(1).truncationMode(.tail)
+                    .layoutPriority(2)
+                // The status word turns as the thread works, waits and finishes: a crossfade.
+                Text(meta.label)
+                    .font(ConsoleTheme.sans(12)).foregroundStyle(ConsoleTheme.fg2)
+                    .lineLimit(1).truncationMode(.tail)
+                    .contentTransition(.opacity)
+                    .animation(Motion.fade, value: meta.label)
+                    .layoutPriority(1)
+                // (The question itself is the composer's strip, not a header word: here it truncated to a letter.)
+                Spacer(minLength: 8)
+                // The trailing group gives way in order — the thumb, then the figures — so a verb never
+                // truncates and never runs under the rail: [figures · thumb · verbs] → [figures · verbs] → [verbs].
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) { figures; thumb; verbs }
+                    HStack(spacing: 6) { figures; verbs }
+                    verbs
+                }
+                .layoutPriority(3)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 40)
+            .animation(Motion.gentle, value: thread.status)
+            ThreadPaneBrief(thread: thread)
+            ConsoleHairline()
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    /// "00:12 · screen · 7 steps", the seconds rolling while the thread is live; frozen once it settles.
+    @ViewBuilder private var elapsed: some View {
+        if thread.status.isLive {
+            TimelineView(.periodic(from: .now, by: 1)) { ctx in
+                metaLine(now: ctx.date.timeIntervalSince1970 * 1000)
+            }
+        } else {
+            metaLine(now: thread.doneAt ?? thread.updatedAt)
+        }
+    }
+
+    private func metaLine(now: Double) -> some View {
+        let text = ConsoleFormat.threadMeta(thread, now: now)
+        return Text(text).font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.titanium)
+            .lineLimit(1)
+            .contentTransition(ConsoleMotion.numeric)
+            .animation(Motion.snappy, value: text)
+    }
+}
+
+/// The header's second line: the brief whole (what the thread was asked) and, in mono, the
+/// figures that were a tooltip — `started 14:37 · 1 turn · budget 25 steps / 180 s`.
+private struct ThreadPaneBrief: View {
+    let thread: WorkThread
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(thread.task.isEmpty ? thread.name : thread.task)
+                .font(ConsoleTheme.sans(11)).foregroundStyle(ConsoleTheme.fg2)
+                .lineLimit(1).truncationMode(.tail)
+            Spacer(minLength: 8)
+            Text(ConsoleTipCard.threadMetaLine(thread))
+                .font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.titanium)
+                .lineLimit(1).fixedSize()
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .frame(height: ThreadPaneWords.briefHeight)
+    }
+}
+
+// MARK: - Feed
+
+/// The stream's feed over the thread's entries, with "Load earlier" while more remains and the
+/// same empty states a conversation has (Opening… → Nothing from the engine yet → Try again).
+private struct ThreadFeed: View {
+    let thread: WorkThread
+    let store: ThreadStore?
+    let caretsOn: Bool
+    let viewer: String
+
+    @Environment(\.consoleActions) private var actions
+    /// `thread.open` went out a while ago and nothing came back.
+    @State private var stale = false
+    @State private var retries = 0
+
+    private var entries: [StreamEntry] { ThreadEntries.build(store) }
+
+    var body: some View {
+        let empty = StreamEmptyState(text: ThreadPane.emptyText(store: store, stale: stale), loading: store == nil && !stale)
+        StreamFeed(entries: entries, modeKey: "thread:\(thread.id)", emptyState: empty, caretsOn: caretsOn,
+                   earlier: earlier, retry: store == nil && stale ? reopen : nil)
+            .task(id: "\(store == nil)-\(retries)") {
+                stale = false
+                guard store == nil else { return }
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled else { return }
+                stale = true
+            }
+    }
+
+    /// "Load earlier" while the first entry of the thread is not held: the page before `startSeq`.
+    /// `remaining` is the record's entries not on screen (the steps folded into held cards are).
+    private var earlier: StreamEarlier? {
+        guard let store, !store.complete, let start = store.startSeq else { return nil }
+        return StreamEarlier(key: start, remaining: store.remaining) {
+            actions.send(.threadHistory(threadId: thread.id, before: start))
+        }
+    }
+
+    /// Ask for the page again as this pane's viewer: close first so the engine re-pages.
+    private func reopen() {
+        retries += 1
+        actions.send(.threadClose(threadId: thread.id, viewer: viewer))
+        actions.send(.threadOpen(threadId: thread.id, viewer: viewer))
+    }
+}
+
+// MARK: - Composer
+
+/// 48pt, owns its top rule: the field addressed to the thread ("Say something to Slack…"; for
+/// main "Type to Hormes…", and while asleep "Type to Hormes… (asleep: press Go)" — the engine
+/// refuses a typed line while asleep unless Settings.typedWakes, and the words stay in the
+/// field), Send while there is text. A question the thread waits on sits above the field with
+/// Allow / Deny (`thread.answer`): clicks only, never Return. A finished thread's field gives way
+/// to one line.
+private struct ThreadComposer: View {
+    let thread: WorkThread
+    let phase: Phase
+    let typedWakes: Bool
+    /// The builds differ (`app.version`): main's typed line is refused, and the words stay (ComposerHold.submitted).
+    let skewed: Bool
+    /// Main only: the newest line Kevin typed that reached the conversation (ComposerHold).
+    let lastTypedId: String?
+    let close: () -> Void
+
+    @Environment(\.consoleActions) private var actions
+    @EnvironmentObject private var session: ConsoleSession
+    @State private var text = ""
+    /// Main only: a line sent while the engine must resume or wake first stays until it lands (V6, ComposerHold).
+    @State private var held: ComposerHold.Held?
+    @FocusState private var focused: Bool
+
+    private var isMain: Bool { thread.id == "main" }
+    private var hasText: Bool { !text.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var asleep: Bool { phase == .asleep || phase == .error }
+
+    /// One line for a composer that is off: the thread is over, or the engine said it takes none.
+    private var off: String? {
+        if !thread.status.isLive { return "\(thread.name) is \(thread.status.words), so there is nothing more to say to it." }
+        if !thread.canSay && !isMain { return "\(thread.name) is not taking messages right now." }
+        return nil
+    }
+
+    private var placeholder: String {
+        if isMain {
+            if phase == .paused { return "Paused: press Go or type to resume" }
+            if asleep { return typedWakes ? "Type to wake Hormes…" : "Type to Hormes… (asleep: press Go)" }
+            return ConsoleTheme.sessionPhases.contains(phase) ? "Say something…" : "Type to Hormes…"
+        }
+        return "Say something to \(thread.name)…"
+    }
+
+    var body: some View {
+        let question = thread.status == .waitingKevin ? thread.question : nil
+        VStack(spacing: 0) {
+            ConsoleHairline()
+            if let question, !question.isEmpty {
+                ThreadQuestionStrip(threadId: thread.id, name: thread.name, question: question)
+                    .transition(Motion.appear)
+            }
+            HStack(spacing: 8) {
+                if let off {
+                    Group {
+                        ConsoleIcon(name: "circle.slash.fill", tint: ConsoleTheme.fg3)
+                        Text(off).font(ConsoleTheme.sans(12)).foregroundStyle(ConsoleTheme.fg3)
+                            .lineLimit(1).truncationMode(.tail)
+                            .consoleHelp(off)
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.opacity)
+                } else {
+                    Group {
+                        TextField(placeholder, text: $text)
+                            .consoleField(height: 32, focused: focused)
+                            .focused($focused)
+                            .onSubmit(submit)
+                            .onExitCommand(perform: close)
+                            .accessibilityLabel("Message \(thread.name)")
+                        // One filled accent per strip: while a question is up, Allow has it.
+                        Button(action: submit) {
+                            Image(systemName: ConsoleGlyph.send).font(.system(size: 13, weight: .semibold))
+                        }
+                        .buttonStyle(ConsoleButtonStyle(kind: hasText && question == nil ? .primary : .ghost, iconOnly: true, height: 32))
+                        .disabled(!hasText)
+                        .consoleHelp(isMain && asleep && !typedWakes ? HelpCopy.sendAsleep : HelpCopy.send)
+                        .accessibilityLabel("Send")
+                    }
+                    .transition(.opacity)
+                }
+            }
+            .padding(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+            .frame(minHeight: 48)
+        }
+        .animation(Motion.gentle, value: question)
+        .animation(Motion.fade, value: off)
+        .onChange(of: session.composerFocusRequest) { focused = true }
+        .onChange(of: lastTypedId) { held = ComposerHold.landed(held, lastTypedId: lastTypedId, text: &text) }
+        .onChange(of: text) { held = ComposerHold.edited(held, text: text) }
+        .onChange(of: phase) { held = ComposerHold.phaseChanged(held, phase: phase, text: &text) }
+    }
+
+    private func submit() {
+        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        actions.send(.threadSay(threadId: thread.id, text: t))
+        // A spawned thread takes the line as a follow-up turn: the field clears. Main is the conversation's composer
+        // (ComposerHold): asleep the engine refuses by default ("asleep — press Go") and the words stay; paused it
+        // resumes first, and the words stay until the line lands, so a resume that fails leaves them here.
+        if isMain {
+            held = ComposerHold.submitted(t, phase: phase, typedWakes: typedWakes, skewed: skewed, lastTypedId: lastTypedId, text: &text)
+        } else {
+            text = ""
+        }
+    }
+}
+
+/// The question a thread is waiting on, with Allow / Deny that send `thread.answer` for THAT
+/// thread — the engine arms only when the question is on the floor for it, else refuses with a
+/// toast. Clicks only: `ConsoleConfirm.returnIsAYes` is false and no shortcut is ever attached,
+/// so a bare Return in the field below can never be a yes.
+struct ThreadQuestionStrip: View {
+    let threadId: String
+    let name: String
+    let question: String
+
+    @Environment(\.consoleActions) private var actions
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: iconGap) {
+            ConsoleIcon(name: "hand.raised.fill", tint: ConsoleTheme.speaking)
+            Text(question)
+                .font(ConsoleTheme.sans(12, .medium)).lineSpacing(2).foregroundStyle(ConsoleTheme.fg)
+                .lineLimit(3).truncationMode(.tail)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                .consoleHelp(id: ThreadPaneWords.askTip + threadId, card: .question(name: name, question: question), edge: .below)
+                .contentTransition(.opacity)
+            Spacer(minLength: 8)
+            Button("Allow") { actions.send(.threadAnswer(threadId: threadId, yes: true)) }
+                .buttonStyle(ConsoleButtonStyle(kind: .primary, height: 26, small: true))
+                .layoutPriority(1)
+                .consoleHelp(HelpCopy.allowThread(name))
+            Button("Deny") { actions.send(.threadAnswer(threadId: threadId, yes: false)) }
+                .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 26, small: true))
+                .layoutPriority(1)
+                .consoleHelp(HelpCopy.denyThread(name))
+        }
+        .padding(EdgeInsets(top: 8, leading: 12, bottom: 0, trailing: 12))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(name) asks: \(question)")
+    }
+}

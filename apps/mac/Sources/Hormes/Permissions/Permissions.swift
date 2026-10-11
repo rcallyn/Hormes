@@ -125,7 +125,7 @@ enum PermissionsKit {
                 return URL(string: "x-apple.systempreferences:com.apple.preference.security?\(q)")!
             }
             // Notifications › Hormes. The `id` lands on the app's own row on macOS 13+.
-            let id = Bundle.main.bundleIdentifier ?? "com.kevinliu.hormes"
+            let id = Bundle.main.bundleIdentifier ?? "com.hormes.app"
             return URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(id)")!
         }
 
@@ -161,7 +161,7 @@ enum PermissionsKit {
     }
 
     /// The bundle TCC keys the grants on: this one when we run as an app, else the
-    /// installed one (the dev binary and the harnesses are not what Kevin drags in).
+    /// installed one (the dev binary and the harnesses are not what User drags in).
     static var appBundleURL: URL {
         let own = Bundle.main.bundleURL
         if own.pathExtension == "app" { return own }

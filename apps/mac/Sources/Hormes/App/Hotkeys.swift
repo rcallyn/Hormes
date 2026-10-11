@@ -18,14 +18,13 @@ import Carbon
 /// (⌥⇧J is Ô on the US layout, ⌥⇧C is Ç), and those characters stopped reaching the
 /// field. ⌃⌥ + a letter types no character. `Scripts/hotkey-check.sh` asks UCKeyTranslate.
 ///
-/// `defaults write com.kevinliu.hormes hotkeys.off -bool YES` turns every global hotkey off
+/// `defaults write com.hormes.app hotkeys.off -bool YES` turns every global hotkey off
 /// but ⌥⎋ (for a layout or an app that needs the combos); read at launch. ⌥⎋ stays. It is
 /// the one key that stops the hands while they hold the pointer and the keyboard, and it
 /// types nothing. ⌥⇧Space does go off: it types a no-break space, which a layout may need.
 /// The menus keep working, and so does the spoken "stop".
 ///
-/// This file needs only AppKit and Carbon. The orb harnesses (Scripts/orb-preview.sh,
-/// Scripts/orb-home-probe.sh) and Scripts/hotkey-check.sh compile it without the rest of App/.
+/// This file needs only AppKit and Carbon. Scripts/hotkey-check.sh compiles it without the rest of App/.
 @MainActor
 final class Hotkeys {
     enum Action: UInt32, CaseIterable {

@@ -5,6 +5,16 @@ import Combine
 /// `UI/` talks to a socket. Everything is main-actor so SwiftUI can observe it.
 @MainActor
 public final class AppState: ObservableObject {
+    @Published public var phone: HormesPhoneState = .empty
+    public var phoneCommand: (String, String?) -> Void = { _, _ in }
+    public var phoneConfigurePush: (String, String, String, String) -> Void = { _, _, _, _ in }
+    @Published public var work: HormesWorkState = .empty
+    public let workReplies = PassthroughSubject<HormesWorkReply, Never>()
+    public var workActionHandler: (HormesWorkCommand) -> Void = { _ in }
+    public var workCalendarHandler: () -> Void = {}
+    @Published public var workCalendarStatus = ""
+    public var workConsoleHandler: () -> Void = {}
+
     @Published public var snapshot: Snapshot = .empty {
         didSet {
             syncAutomations(from: snapshot)
@@ -20,7 +30,7 @@ public final class AppState: ObservableObject {
 
     /// Overlay commands arrive here in global points; each overlay window filters to its own display.
     public let overlayCommands = PassthroughSubject<OverlayCommand, Never>()
-    /// Strokes being drawn right now (by the blob, or by Kevin in mark mode): the same
+    /// Strokes being drawn right now (by the blob, or by User in mark mode): the same
     /// id is re-sent with a longer `points` as the line grows; `done` seals it and the
     /// overlay keeps it for `ttlMs`. Global points, y down. Orb → overlay, in-process.
     public let liveStrokes = PassthroughSubject<LiveStroke, Never>()
@@ -48,8 +58,8 @@ public final class AppState: ObservableObject {
     @Published public var permissionSweep: PermissionSweepProgress?
     /// Installed by the app (PermissionsCenter). UI code only ever calls the funcs below.
     public var permissionActions = PermissionActions()
-    /// Opens Setup on the Permissions step. Installed by the app.
-    public var openPermissionsSetupHandler: () -> Void = {}
+    /// Opens permissions in Console. Installed by the app.
+    public var openPermissionsHandler: () -> Void = {}
 
     /// The sweep: required kinds first, one prompt at a time, then the System Settings walk.
     public func requestAll() { permissionActions.requestAll() }
@@ -61,9 +71,9 @@ public final class AppState: ObservableObject {
     /// The settings walk's Next: the following pane.
     public func permissionSweepNext() { permissionActions.sweepNext() }
     public func permissionSweepCancel() { permissionActions.sweepCancel() }
-    /// Setup closed: stop watching System Settings now. A waiting step stays open for Next and Cancel.
+    /// Console hidden: stop watching System Settings now. A waiting step stays open for Next and Cancel.
     public func permissionSweepPark() { permissionActions.park() }
-    public func openPermissionsSetup() { openPermissionsSetupHandler() }
+    public func openPermissions() { openPermissionsHandler() }
 
     public var permissionsMissingRequired: [PermissionInfo] { permissionList.filter { $0.required && $0.grant != .granted } }
     public var permissionsGrantedCount: Int { permissionList.filter { $0.grant == .granted }.count }
@@ -86,7 +96,7 @@ public final class AppState: ObservableObject {
     /// out of order. It belongs above the fold; a later prepend brings it back as it is now.
     private var trimmedIds: [String: TrimmedIds] = [:]
     /// How many rows `prepend` has added since the last whole page, per agent (unset when
-    /// none). Kevin asked for those, so the cap grows by as many: the model holds at most
+    /// none). User asked for those, so the cap grows by as many: the model holds at most
     /// `maxTranscriptMessages + prependedCount[agentId]` rows, an upsert of the newest tool call
     /// no longer throws his page away, and as the conversation grows the window slides from the
     /// front one row per new row (the feed stays contiguous — a trim anywhere else would leave
@@ -97,13 +107,13 @@ public final class AppState: ObservableObject {
     /// The newest messages a pane keeps. A Console left open on a live session for hours
     /// used to grow without bound and lay out every row on every delta (40–95 % CPU on the
     /// main thread); past the cap the oldest go, `complete` turns false, and "Load earlier"
-    /// brings them back on request (`prepend` is Kevin asking, so it is never trimmed and
+    /// brings them back on request (`prepend` is User asking, so it is never trimmed and
     /// raises the cap by what it added — see `prependedCount`).
     public nonisolated static let maxTranscriptMessages = 400
     /// The agents whose conversations were opened, oldest first; `evictTranscripts` keeps the
     /// newest `threadStoreLRU` of them and whatever a pane still shows.
     var transcriptRecency: [String] = []
-    /// Mark mode (Kevin circles something on screen). Installed by the app.
+    /// Mark mode (User circles something on screen). Installed by the app.
     public var beginMarkModeHandler: () -> Void = {}
     public func beginMarkMode() { beginMarkModeHandler() }
     /// A mark was kept while asleep or paused (it waits for the next session): the app plays the `mark` earcon.
@@ -143,7 +153,7 @@ public final class AppState: ObservableObject {
     var threadPruneTask: Task<Void, Never>?
     /// The threads whose conversation was opened, oldest first (the LRU for `evictThreadStores`).
     var threadStoreRecency: [String] = []
-    /// Ids the Console is looking at right now: a finished thread on screen is never pruned under Kevin.
+    /// Ids the Console is looking at right now: a finished thread on screen is never pruned under User.
     public var heldThreadIds: Set<String> = []
     /// Opens a thread's Console pane (a satellite blob's click). Installed by the app (AppDelegate:
     /// `state.openThreadHandler = { id in console.openThread(id) }`, beside `openConsoleHandler`).
@@ -225,7 +235,7 @@ public final class AppState: ObservableObject {
             existing.complete = t.complete
             existing.total = max(existing.total, t.total)
             existing.cursor = AppState.mergedCursor(existing.cursor, t.cursor)
-            // Kevin asked for the page: it is held whole, and the cap grows by it.
+            // User asked for the page: it is held whole, and the cap grows by it.
             prependedCount[agentId] = (prependedCount[agentId] ?? 0) + fresh.count
             transcriptIndex[agentId] = index
             transcriptBase[agentId] = base
@@ -242,7 +252,7 @@ public final class AppState: ObservableObject {
 
     /// Drops the pending echoes with these words from the newest rows. Removing from the middle
     /// shifts what follows, so the index is renumbered from the first drop — a short tail: an
-    /// echo is never older than the few rows since Kevin pressed Send.
+    /// echo is never older than the few rows since User pressed Send.
     static func dropPendingEcho(_ messages: inout [AgentMessage], index: inout [String: Int], base: Int, words: String) {
         let from = max(0, messages.count - pendingEchoWindow)
         var first: Int?
@@ -261,7 +271,7 @@ public final class AppState: ObservableObject {
         for j in first..<messages.count { index[messages[j].id] = base + j }
     }
 
-    /// A message Kevin just sent into an agent's conversation, shown at once as a pending row
+    /// A message User just sent into an agent's conversation, shown at once as a pending row
     /// (0.6 opacity, `clock.fill`) before the tool's own file confirms it (EngineClient.send
     /// calls this for every `agent.send`). Dropped when the real user turn with the same words
     /// lands; a second echo with the same words while one is pending is skipped. Nothing here
@@ -327,7 +337,7 @@ public final class AppState: ObservableObject {
         transcripts[t.agentId] = next
     }
 
-    /// Drops the oldest past `cap` (`maxTranscriptMessages`, plus what Kevin loaded); the base
+    /// Drops the oldest past `cap` (`maxTranscriptMessages`, plus what User loaded); the base
     /// moves by as many, their ids leave the map and enter `trimmed`, and `complete` turns
     /// false (there is more before what is held). Always the front: the held rows stay one
     /// contiguous span of the file.
@@ -397,9 +407,9 @@ public final class AppState: ObservableObject {
     /// AppDelegate): the island's held mic, the Console's `Shared with …`, the fuse's `guardOn`. nil before the
     /// first read and in a harness without audio.
     @Published public var audioState: AudioStateInfo?
-    /// Kevin turns in a row that were Hormes's own words (the guard leaked): the fuse's counter.
+    /// User turns in a row that were Hormes's own words (the guard leaked): the fuse's counter.
     public private(set) var echoTurns = 0
-    /// The last final Kevin turn the fuse judged, so a republished snapshot does not count it twice.
+    /// The last final User turn the fuse judged, so a republished snapshot does not count it twice.
     private var echoCheckedId: String?
 
     /// Installed by the daemon client. UI code only ever calls `send`.
@@ -410,18 +420,22 @@ public final class AppState: ObservableObject {
     public var ledgerReadHandler: (String) async -> [LedgerRow] = { _ in [] }
     /// Console → app window management (open console, quit) also goes through here.
     public var openConsoleHandler: () -> Void = {}
-    /// Opens the first-run / setup window (UI/Onboarding). Installed by the app.
-    public var openOnboardingHandler: () -> Void = {}
+    public var openSettingsHandler: () -> Void = {}
 
     public init() {}
 
-    public func send(_ command: EngineCommand) { sendHandler(command) }
-    /// A signal the app observed on Kevin's behalf (an app quit, the Mac woke): data for the daemon's watchers, never a command.
+    public func send(_ command: EngineCommand) {
+        if case .threadAnswer(let id, true, nil) = command,
+           let approval = snapshot.approval, approval.threadId == id {
+            sendHandler(.threadAnswer(threadId: id, yes: true, pendingId: approval.id))
+        } else { sendHandler(command) }
+    }
+    /// A signal the app observed on User's behalf (an app quit, the Mac woke): data for the daemon's watchers, never a command.
     public func systemSignal(_ signal: SystemSignal) { signalHandler(signal) }
     public func ledgerDays() async -> LedgerDays? { await ledgerDaysHandler() }
     public func ledgerRows(day: String) async -> [LedgerRow] { await ledgerReadHandler(day) }
     public func openConsole() { openConsoleHandler() }
-    public func openOnboarding() { openOnboardingHandler() }
+    public func openSettings() { openSettingsHandler() }
 
     public func toast(_ text: String, tone: Toast.Tone = .info) {
         let t = Toast(id: UUID(), text: text, tone: tone)
@@ -446,14 +460,14 @@ public final class AppState: ObservableObject {
 
     /// The cost fuse: this many echo turns in a row → one `.mute`, then the counter starts over.
     public nonisolated static let echoFuseTurns = 3
-    /// A turn shorter than this is never called an echo (a "yes" is Kevin's, whatever Hormes said).
+    /// A turn shorter than this is never called an echo (a "yes" is User's, whatever Hormes said).
     public nonisolated static let echoMinWords = 3
 
-    /// Pure: a Kevin turn of `echoMinWords` or more, every word of it in Hormes's last utterance — the
+    /// Pure: a User turn of `echoMinWords` or more, every word of it in Hormes's last utterance — the
     /// software echo guard let Hormes hear himself. Case-folded, punctuation dropped.
-    public nonisolated static func isEchoTurn(kevin: String, hormes: String?) -> Bool {
+    public nonisolated static func isEchoTurn(user: String, hormes: String?) -> Bool {
         guard let hormes else { return false }
-        let heard = words(kevin)
+        let heard = words(user)
         guard heard.count >= echoMinWords else { return false }
         let said = Set(words(hormes))
         return heard.allSatisfy { said.contains($0) }
@@ -463,17 +477,17 @@ public final class AppState: ObservableObject {
         text.lowercased().split { !$0.isLetter && !$0.isNumber && $0 != "'" }.map(String.init)
     }
 
-    /// From `snapshot.didSet`: each NEW final Kevin turn while the guard holds the wire moves the counter — an echo
+    /// From `snapshot.didSet`: each NEW final User turn while the guard holds the wire moves the counter — an echo
     /// adds one, anything else clears it; at `echoFuseTurns` one `.mute` (a Live-side command that opens nothing)
     /// and a toast, and the count starts over. With the guard off nothing is counted.
     func noteEchoTurns(from s: Snapshot) {
-        guard let index = s.transcript.lastIndex(where: { $0.speaker == .kevin && $0.final }) else { return }
+        guard let index = s.transcript.lastIndex(where: { $0.speaker == .user && $0.final }) else { return }
         let turn = s.transcript[index]
         guard turn.id != echoCheckedId else { return }
         echoCheckedId = turn.id
         guard audioState?.guardOn == true else { echoTurns = 0; return }
         let said = s.transcript[..<index].last { $0.speaker == .hormes }?.text
-        guard AppState.isEchoTurn(kevin: turn.text, hormes: said) else { echoTurns = 0; return }
+        guard AppState.isEchoTurn(user: turn.text, hormes: said) else { echoTurns = 0; return }
         echoTurns += 1
         guard echoTurns >= AppState.echoFuseTurns else { return }
         echoTurns = 0
@@ -581,7 +595,7 @@ public final class AppState: ObservableObject {
 
     // MARK: - Memory
 
-    // What Hormes remembers about Kevin across sessions (@hormes/memory). The snapshot
+    // What Hormes remembers about User across sessions (@hormes/memory). The snapshot
     // carries only counts (`snapshot.memory`); the items' text is read on request through the
     // daemon (`memory.list` / `memory.search`) and never a vector. Forget and Restore are
     // states the engine keeps — nothing here deletes anything.
@@ -610,231 +624,16 @@ public final class AppState: ObservableObject {
     /// "Learn now": one extraction run over what closed since the last one (never a Codex turn).
     public func memoryRun() { send(.memoryRun) }
 
-    // MARK: - Cleanup
-
-    // Conversation cleanup, the Console's. Nothing here deletes anything: every action is
-    // an EngineCommand whose inverse is another one (trash ↔ restore, pin ↔ unpin, clear ↔
-    // restore), the ledger's tombstone rows are the truth and the Console re-reads them.
-    // What lives here is only what the UI needs between the click and the re-read: the
-    // last 20 actions for Undo, the one toast with Undo, an optimistic overlay so a row
-    // moves the moment Kevin acts, the agents he just hid, and when he cleared Now.
-
-    /// The last 20 actions, newest last; `undoCleanup()` pops.
-    @Published public var cleanupUndoStack: [CleanupAction] = []
-    /// Undone actions, for Edit › Redo; a new action clears it.
-    @Published public var cleanupRedoStack: [CleanupAction] = []
-    /// "Moved to Trash · Undo" for 8 s; nil when none.
-    @Published public var cleanupToast: CleanupToast?
-    /// What the rail shows before the ledger's re-read confirms it: chain id → its state /
-    /// name / pinned after the click. Pruned when the list agrees, or after 15 s.
-    @Published public var chainOverrides: [String: ChainOverride] = [:]
-    /// Agents Kevin hid or unhid before the snapshot agrees: agent id → hidden.
-    @Published public var hiddenAgentOverrides: [String: Bool] = [:]
-    /// Wall-clock ms when Kevin cleared the Now stream (`now.clear`); nil when not cleared.
-    /// The engine hides the items at its end too; this hides them at once and keeps the
-    /// feed's "Cleared · Undo" state until new items arrive or the session changes.
-    @Published public var nowClearedAt: Double?
-    /// Full-text search over the ledger, one page per call (`ledger.search {before}` → `ledger.hits {older}`): the
-    /// query, the most hits, and the day to read on from (nil: the newest page). Installed by the app (AppDelegate,
-    /// next to the Hormes-sessions handlers); nil is no answer (a disconnect, the request timeout), no hits is an
-    /// empty page.
-    public var ledgerSearchHandler: (_ query: String, _ limit: Int, _ before: String?) async -> LedgerSearchPage? = { _, _, _ in nil } {
-        didSet { ledgerSearchInstalled = true }
-    }
-    /// Whether anything installed the handler. False is the app's gap, not the daemon's: the
-    /// rail says so instead of blaming a daemon it never asked.
-    public private(set) var ledgerSearchInstalled = false
-    /// The window's undo manager (Edit › Undo, ⌘Z), read at call time; installed by the Console.
-    public var cleanupUndoManager: () -> UndoManager? = { nil }
-    /// One target per action for the undo manager (it holds targets weakly), kept while its
-    /// registration stands: undoing an action outside the manager drops exactly its own entry.
-    private var cleanupUndoTokens: [UUID: CleanupUndoToken] = [:]
-    private var cleanupToastTask: Task<Void, Never>?
-
-    public static let cleanupUndoDepth = 20
-    public static let cleanupToastSeconds: Double = 8
-    /// An override the ledger never confirmed (the row never came back over the socket) is dropped after this.
-    public static let chainOverrideTTL: TimeInterval = 15
-
-    public func ledgerSearchPage(_ query: String, limit: Int, before: String?) async -> LedgerSearchPage? { await ledgerSearchHandler(query, limit, before) }
-
-    /// Runs one cleanup action: its commands go out, the overlay shows the result at once,
-    /// the inverse is remembered (the stack and the window's undo manager) and the toast
-    /// offers Undo. The Hormes list is re-read after the engine has appended its row.
-    public func performCleanup(_ action: CleanupAction, toast: Bool = true) {
-        for cmd in action.commands { send(cmd) }
-        applyCleanup(action, forward: true)
-        cleanupUndoStack.append(action)
-        if cleanupUndoStack.count > AppState.cleanupUndoDepth {
-            let dropped = cleanupUndoStack.prefix(cleanupUndoStack.count - AppState.cleanupUndoDepth)
-            cleanupUndoStack.removeFirst(dropped.count)
-            // Past the depth: gone from Edit › Undo too (the manager's own stack has no cap).
-            for old in dropped { dropCleanupUndo(old.id) }
-        }
-        cleanupRedoStack.removeAll()
-        if !action.inverse.isEmpty, let um = cleanupUndoManager() {
-            registerCleanupUndo(action, on: um, redo: false)
-        }
-        if toast { showCleanupToast(action) } else if cleanupToast != nil { cleanupToast = nil }
-        if action.refreshesHormes { refreshHormesAfterCleanup() }
-    }
-
-    /// Undo the newest action (Edit › Undo, ⌘Z).
-    public func undoCleanup() {
-        if let last = cleanupUndoStack.last { undoCleanup(id: last.id) }
-    }
-
-    /// Undo one action wherever it sits in the stack (the toast's Undo may come after a
-    /// later action; the actions are independent, so out of order is fine).
-    ///
-    /// When the window's undo manager is not the one calling (the toast's Undo) and its top
-    /// entry is this very action, the manager is asked to undo instead, so its stacks stay
-    /// true: ⌘Z next undoes the action before this one, ⇧⌘Z redoes this one. Registering a
-    /// redo closure from outside `um.undo()` would land it on the UNDO stack on top of the
-    /// still-registered original — Edit › Undo would then re-perform the action.
-    public func undoCleanup(id: UUID) {
-        guard let index = cleanupUndoStack.firstIndex(where: { $0.id == id }) else { return }
-        let um = cleanupUndoManager()
-        if let um, !um.isUndoing, !um.isRedoing, cleanupUndoStack.last?.id == id, cleanupUndoTokens[id] != nil,
-           um.canUndo, um.undoActionName == cleanupUndoStack[index].label {
-            um.undo()
-            return
-        }
-        let action = cleanupUndoStack.remove(at: index)
-        guard !action.inverse.isEmpty else { return }
-        for cmd in action.inverse { send(cmd) }
-        applyCleanup(action, forward: false)
-        cleanupRedoStack.append(action)
-        if cleanupRedoStack.count > AppState.cleanupUndoDepth { cleanupRedoStack.removeFirst(cleanupRedoStack.count - AppState.cleanupUndoDepth) }
-        if let um {
-            if um.isUndoing {
-                // The manager is driving: its redo is this action again.
-                registerCleanupUndo(action, on: um, redo: true)
-            } else {
-                // Undone outside the manager (the toast, out of order): its entry there is stale.
-                dropCleanupUndo(action.id, on: um)
-            }
-        }
-        if cleanupToast?.id == action.id { cleanupToast = nil }
-        if action.refreshesHormes { refreshHormesAfterCleanup() }
-    }
-
-    public func redoCleanup() {
-        if let last = cleanupRedoStack.last { redoCleanup(id: last.id) }
-    }
-
-    public func redoCleanup(id: UUID) {
-        guard let index = cleanupRedoStack.firstIndex(where: { $0.id == id }) else { return }
-        let action = cleanupRedoStack.remove(at: index)
-        for cmd in action.commands { send(cmd) }
-        applyCleanup(action, forward: true)
-        cleanupUndoStack.append(action)
-        if let um = cleanupUndoManager() {
-            // Redone by the manager (⇧⌘Z): its undo goes back on. Redone from elsewhere: whatever
-            // the manager still held for it is stale first, then it is a fresh do.
-            if !um.isRedoing { dropCleanupUndo(action.id, on: um) }
-            registerCleanupUndo(action, on: um, redo: false)
-        }
-        if action.refreshesHormes { refreshHormesAfterCleanup() }
-    }
-
-    /// One registration on the window's undo manager, with the action's own token as the
-    /// target (`CleanupUndoToken`), so `dropCleanupUndo` can remove exactly this action's entries.
-    private func registerCleanupUndo(_ action: CleanupAction, on um: UndoManager, redo: Bool) {
-        let token = cleanupUndoTokens[action.id] ?? CleanupUndoToken(actionId: action.id, state: self)
-        cleanupUndoTokens[action.id] = token
-        if redo {
-            um.registerUndo(withTarget: token) { t in MainActor.assumeIsolated { t.state?.redoCleanup(id: t.actionId) } }
-        } else {
-            um.registerUndo(withTarget: token) { t in MainActor.assumeIsolated { t.state?.undoCleanup(id: t.actionId) } }
-        }
-        um.setActionName(action.label)
-    }
-
-    /// Forgets the action on the manager (both of its stacks) and lets its token go.
-    private func dropCleanupUndo(_ id: UUID, on um: UndoManager? = nil) {
-        guard let token = cleanupUndoTokens.removeValue(forKey: id) else { return }
-        (um ?? cleanupUndoManager())?.removeAllActions(withTarget: token)
-    }
-
-    /// The overlay after (or before) an action: chain rows, hidden agents, the cleared Now.
-    private func applyCleanup(_ action: CleanupAction, forward: Bool) {
-        let now = Date()
-        for (id, o) in (forward ? action.chainAfter : action.chainBefore) {
-            var next = chainOverrides[id]?.merged(o) ?? o
-            next.at = now
-            chainOverrides[id] = next
-        }
-        for (id, hidden) in (forward ? action.agentsAfter : action.agentsBefore) { hiddenAgentOverrides[id] = hidden }
-        if let mark = forward ? action.nowAfter : action.nowBefore {
-            switch mark {
-            case .cleared(let at): nowClearedAt = at
-            case .restored: nowClearedAt = nil
-            }
-        }
-    }
-
-    private func showCleanupToast(_ action: CleanupAction) {
-        let toast = CleanupToast(id: action.id, text: action.toast, symbol: action.symbol, canUndo: !action.inverse.isEmpty)
-        cleanupToast = toast
-        cleanupToastTask?.cancel()
-        cleanupToastTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(AppState.cleanupToastSeconds * 1_000_000_000))
-            guard !Task.isCancelled, let self, self.cleanupToast?.id == toast.id else { return }
-            self.cleanupToast = nil
-        }
-    }
-
-    public func dismissCleanupToast() {
-        cleanupToastTask?.cancel()
-        cleanupToast = nil
-    }
-
-    /// Two reads: one after the engine's row has landed, one for a slow event loop
-    /// (the same reasoning as `hormesSessionsRefreshDelaysMs`, shorter — no server round trip).
-    private func refreshHormesAfterCleanup() {
-        refreshHormesSessions(delayMs: 120)
-        refreshHormesSessions(delayMs: 900)
-    }
-
-    /// Drops every override the ledger's list now agrees with, and any older than the TTL.
-    public func pruneChainOverrides(against list: [HormesSessionSummary]) {
-        guard !chainOverrides.isEmpty else { return }
-        let now = Date()
-        var byId: [String: HormesSessionSummary] = [:]
-        for s in list where byId[s.id] == nil { byId[s.id] = s }
-        for (id, o) in chainOverrides {
-            if now.timeIntervalSince(o.at) > AppState.chainOverrideTTL { chainOverrides[id] = nil; continue }
-            if let s = byId[id], o.agrees(with: s) { chainOverrides[id] = nil }
-        }
-    }
-
-    /// Hidden agents as the rail shows them: the snapshot's list with Kevin's latest clicks on top.
-    public func hiddenAgentIds(in snap: Snapshot) -> Set<String> {
-        var out = Set(snap.hiddenAgents ?? [])
-        for (id, hidden) in hiddenAgentOverrides {
-            if hidden { out.insert(id) } else { out.remove(id) }
-        }
-        return out
-    }
-
-    /// Drops the overrides the snapshot now agrees with.
-    public func pruneHiddenAgentOverrides(_ snap: Snapshot) {
-        guard !hiddenAgentOverrides.isEmpty else { return }
-        let hidden = Set(snap.hiddenAgents ?? [])
-        for (id, on) in hiddenAgentOverrides where hidden.contains(id) == on { hiddenAgentOverrides[id] = nil }
-    }
-
     // Convenience views over the snapshot.
     public var phase: Phase { snapshot.phase }
-    public var lastKevin: TranscriptItem? { snapshot.transcript.last { $0.speaker == .kevin } }
+    public var lastUser: TranscriptItem? { snapshot.transcript.last { $0.speaker == .user } }
     public var lastHormes: TranscriptItem? { snapshot.transcript.last { $0.speaker == .hormes } }
     public var activeDelegation: Delegation? { snapshot.delegations.last { $0.status == .running || $0.status == .awaitingConfirmation } }
     public var isAwake: Bool { snapshot.phase != .asleep && snapshot.phase != .error }
 }
 
 extension ThreadStatus {
-    /// The status as Kevin reads it, everywhere a thread is drawn: the rail row, the pane's
+    /// The status as User reads it, everywhere a thread is drawn: the rail row, the pane's
     /// header, the card's chip, the ledger's line. One vocabulary for every surface (the notch
     /// and the satellite blobs read the same words); the two waits say what is being waited for.
     public var words: String {
@@ -845,7 +644,7 @@ extension ThreadStatus {
         case .thinking: return "thinking"
         case .acting: return "acting"
         case .waitingScreen: return "waiting for the screen"
-        case .waitingKevin: return "waiting for you"
+        case .waitingUser: return "waiting for you"
         case .paused: return "paused"
         case .done: return "done"
         case .failed: return "failed"
@@ -936,7 +735,7 @@ extension AppState {
 // MARK: - Sleep
 
 /// The sleep row's words, once, for every surface: the stream's tombstone, the log line, a
-/// session's close reason. The engine records a `SleepCause` ("dock", "pause-decayed"); Kevin
+/// session's close reason. The engine records a `SleepCause` ("dock", "pause-decayed"); User
 /// reads why it slept.
 public enum SleepCauseFormat {
     /// "said" → "said", "dock" → "dropped in the dock", "shutdown" → "quit"; a cause this
@@ -982,99 +781,6 @@ extension LedgerRow {
     }
 }
 
-// MARK: - Cleanup (types)
-
-/// One undoable cleanup action: the commands that do it, the commands that undo it, and
-/// what the rail shows meanwhile. The UI builds these (`CleanupAction.trash(_:)` …); the
-/// state only runs and remembers them.
-public struct CleanupAction: Identifiable, Equatable {
-    public var id = UUID()
-    /// Edit › Undo's word: "Move to Trash", "Archive", "Restore", "Rename", "Pin", "Clear", "Hide".
-    public var label: String
-    /// The toast's line: "Moved to Trash", "Moved 3 to Trash", "Cleared".
-    public var toast: String
-    /// The toast's solid symbol.
-    public var symbol: String
-    public var commands: [EngineCommand]
-    /// Empty when the action cannot be undone (a sweep, a new conversation): no Undo is offered.
-    public var inverse: [EngineCommand]
-    /// The rail's overlay after the action (chain id → state / name / pinned) and after its undo.
-    public var chainAfter: [String: ChainOverride] = [:]
-    public var chainBefore: [String: ChainOverride] = [:]
-    /// Hidden agents after the action and after its undo (agent id → hidden).
-    public var agentsAfter: [String: Bool] = [:]
-    public var agentsBefore: [String: Bool] = [:]
-    /// The Now stream's cleared mark after the action and after its undo.
-    public var nowAfter: NowMark?
-    public var nowBefore: NowMark?
-    /// Re-read the Hormes list after the engine appended its row (every conversation action).
-    public var refreshesHormes = true
-    public var at = Date()
-
-    public init(label: String, toast: String, symbol: String, commands: [EngineCommand], inverse: [EngineCommand]) {
-        self.label = label; self.toast = toast; self.symbol = symbol; self.commands = commands; self.inverse = inverse
-    }
-}
-
-public enum NowMark: Equatable {
-    case cleared(Double)
-    case restored
-}
-
-/// The toast under the header: one line, Undo while the action can be undone, ×.
-public struct CleanupToast: Identifiable, Equatable {
-    public var id: UUID
-    public var text: String
-    public var symbol: String
-    public var canUndo: Bool
-    public init(id: UUID, text: String, symbol: String, canUndo: Bool) {
-        self.id = id; self.text = text; self.symbol = symbol; self.canUndo = canUndo
-    }
-}
-
-/// The undo manager's target for one cleanup action. The manager holds targets weakly and
-/// forgets by target (`removeAllActions(withTarget:)`), so a token per action lets an action
-/// undone outside the manager (the toast's Undo) drop its own entry and no other's.
-final class CleanupUndoToken: NSObject {
-    let actionId: UUID
-    weak var state: AppState?
-    init(actionId: UUID, state: AppState) {
-        self.actionId = actionId
-        self.state = state
-    }
-}
-
-/// What a chain looks like before the ledger confirms it: a field left nil is unchanged.
-public struct ChainOverride: Equatable {
-    /// "active" | "archived" | "trashed".
-    public var state: String?
-    /// Kevin's name; "" is back to the auto title.
-    public var name: String?
-    public var pinned: Bool?
-    public var at = Date()
-
-    public init(state: String? = nil, name: String? = nil, pinned: Bool? = nil) {
-        self.state = state; self.name = name; self.pinned = pinned
-    }
-
-    public func merged(_ other: ChainOverride) -> ChainOverride {
-        var o = self
-        if let s = other.state { o.state = s }
-        if let n = other.name { o.name = n }
-        if let p = other.pinned { o.pinned = p }
-        o.at = other.at
-        return o
-    }
-
-    /// The ledger's summary says what this override says.
-    public func agrees(with s: HormesSessionSummary) -> Bool {
-        if let state, (s.state ?? "active") != state { return false }
-        if let name, (s.name ?? "") != name { return false }
-        if let pinned, (s.pinned ?? false) != pinned { return false }
-        return true
-    }
-}
-
 /// One full-text hit from `ledger.search` (`ledger.hits`), decoded loosely: a row's
 /// session, when, what kind of row, who spoke, and the snippet.
 public struct LedgerHit: Identifiable, Equatable {
@@ -1084,7 +790,7 @@ public struct LedgerHit: Identifiable, Equatable {
     public var at: Double
     /// heard | said | request | summary (the ledger's `SearchHitKind`), or whatever else a daemon sends.
     public var type: String
-    /// kevin | hormes, for heard / said rows.
+    /// user | hormes, for heard / said rows.
     public var speaker: String?
     public var text: String
     public var day: String?
@@ -1101,7 +807,7 @@ public struct LedgerHit: Identifiable, Equatable {
         guard let at = (o["at"] as? NSNumber)?.doubleValue, at.isFinite else { return nil }
         let text = (o["text"] as? String) ?? (o["snippet"] as? String) ?? (o["request"] as? String) ?? ""
         let kind = (o["kind"] as? String) ?? (o["type"] as? String) ?? "row"
-        let speaker = (o["speaker"] as? String) ?? (kind == "heard" ? "kevin" : (kind == "said" ? "hormes" : nil))
+        let speaker = (o["speaker"] as? String) ?? (kind == "heard" ? "user" : (kind == "said" ? "hormes" : nil))
         self.init(sessionId: sessionId, chainId: o["chainId"] as? String, at: at, type: kind, speaker: speaker, text: text, day: o["day"] as? String)
     }
 }
@@ -1157,6 +863,26 @@ public enum WakeGateState: Equatable {
 /// orb's capsule: "Wake word off: microphone not granted". The island sets the same words in its
 /// own grammar (`island: true`, site/docs/MESH.md): "Wake word off · microphone not granted".
 public enum GateWords {
+    /// One trigger-aware status for the Console, menu and notch. Legacy settings use `.word`.
+    public static func listening(phrases: [String], auth: WakeAuth, trigger: WakeTrigger = .word, paused: Bool = false, island: Bool = false) -> String {
+        let phrase = phrases.first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? "the wake word"
+        let prompt: String
+        let resume: String
+        switch trigger {
+        case .word:
+            prompt = "“\(phrase)”"
+            resume = "say “\(phrase)”"
+        case .clap:
+            prompt = "a double clap"
+            resume = "clap twice"
+        case .both:
+            prompt = "“\(phrase)” or a double clap"
+            resume = "say “\(phrase)” or clap twice"
+        }
+        if paused { return "paused · \(resume) or press Go" }
+        return "Listening for \(prompt)"
+    }
+
     public static func off(_ reason: String, island: Bool = false) -> String {
         let why = reason.trimmingCharacters(in: .whitespacesAndNewlines)
         // The plain switch-off's reason is itself "wake word off": said once.
@@ -1167,10 +893,6 @@ public enum GateWords {
     public static func denied(_ reason: String, island: Bool = false) -> String {
         "Not this time" + joint(island) + reason.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-
-    /// After "Listening for “hormes”" when the word alone opens the session; the island
-    /// joins it with its dot: "Listening for “hormes” · no authentication".
-    public static func noAuth(island: Bool = false) -> String { island ? " · no authentication" : " (no authentication)" }
 
     private static func joint(_ island: Bool) -> String { island ? " · " : ": " }
 }
@@ -1387,7 +1109,7 @@ public enum TransportFormat {
     }
 
     /// Billed seconds → "2.3 min · $0.12".
-    public static func billed(_ seconds: Double) -> String { minutes(seconds) + " · " + dollars(seconds) }
+    public static func billed(_ seconds: Double) -> String { minutes(seconds) }
 
     /// Today's total → "today 12.3 min · $0.62"; nil when nothing was billed today (hidden).
     public static func today(_ usage: UsageToday?) -> String? {
@@ -1611,7 +1333,7 @@ public enum AppStateBench {
         // 5. A daemon drop seals every utterance.
         var snap = Snapshot.empty
         snap.transcript = [
-            TranscriptItem(id: "u1", speaker: .kevin, text: "hey", startMs: 0, endMs: 900, at: 0, final: true),
+            TranscriptItem(id: "u1", speaker: .user, text: "hey", startMs: 0, endMs: 900, at: 0, final: true),
             TranscriptItem(id: "u2", speaker: .hormes, text: "still typ", startMs: 1_000, endMs: 1_800, at: 0, final: false),
         ]
         let sealed = snap.finalisingTranscript()
@@ -1643,32 +1365,32 @@ public enum AppStateBench {
         fuse.phase = .listening
         let hormesLine = "The demo doc is open. Say go when you want the walkthrough."
         var turnNo = 0
-        func kevinTurn(_ text: String) {
+        func userTurn(_ text: String) {
             turnNo += 1
             let at = Double(turnNo) * 1_000
             fuse.transcript.append(TranscriptItem(id: "j\(turnNo)", speaker: .hormes, text: hormesLine, startMs: at, endMs: at + 500, at: at, final: true))
-            fuse.transcript.append(TranscriptItem(id: "k\(turnNo)", speaker: .kevin, text: text, startMs: at + 600, endMs: at + 900, at: at + 600, final: true))
+            fuse.transcript.append(TranscriptItem(id: "k\(turnNo)", speaker: .user, text: text, startMs: at + 600, endMs: at + 900, at: at + 600, final: true))
             audio.snapshot = fuse
         }
-        check(AppState.isEchoTurn(kevin: "say go when you want", hormes: hormesLine) && !AppState.isEchoTurn(kevin: "say go", hormes: hormesLine)
-              && !AppState.isEchoTurn(kevin: "open the calendar please", hormes: hormesLine) && !AppState.isEchoTurn(kevin: "say go when", hormes: nil),
+        check(AppState.isEchoTurn(user: "say go when you want", hormes: hormesLine) && !AppState.isEchoTurn(user: "say go", hormes: hormesLine)
+              && !AppState.isEchoTurn(user: "open the calendar please", hormes: hormesLine) && !AppState.isEchoTurn(user: "say go when", hormes: nil),
               "isEchoTurn: ≥ 3 words all in the last utterance; a short or a real turn is not")
-        kevinTurn("say go when you want")
-        kevinTurn("the demo doc is open")
+        userTurn("say go when you want")
+        userTurn("the demo doc is open")
         check(sent.isEmpty && audio.echoTurns == 2, "two echo turns → nothing sent, count 2 (\(audio.echoTurns))")
-        kevinTurn("open the calendar please")
+        userTurn("open the calendar please")
         check(sent.isEmpty && audio.echoTurns == 0, "a real turn clears the count")
-        kevinTurn("say go when you want")
-        kevinTurn("the demo doc is open")
+        userTurn("say go when you want")
+        userTurn("the demo doc is open")
         audio.snapshot = fuse
         check(sent.isEmpty && audio.echoTurns == 2, "a republished snapshot does not count a turn twice")
-        kevinTurn("when you want the walkthrough")
+        userTurn("when you want the walkthrough")
         check(sent == [.mute] && audio.echoTurns == 0, "the third echo turn sends exactly .mute, once, and the count starts over (\(sent.map { $0.json["type"] as? String ?? "?" }))")
-        kevinTurn("say go when you want")
+        userTurn("say go when you want")
         check(sent == [.mute], "a fourth echo turn sends nothing more")
         audio.audioState = AudioStateInfo(running: true, guardOn: false)
         sent = []
-        kevinTurn("say go when you want"); kevinTurn("say go when you want"); kevinTurn("say go when you want")
+        userTurn("say go when you want"); userTurn("say go when you want"); userTurn("say go when you want")
         check(sent.isEmpty, "with the guard off the fuse counts nothing")
 
         // 9. W3-2 SL-14: only a fire that rang is a ring. The engine says `ring` on every `fired` event; a routine that

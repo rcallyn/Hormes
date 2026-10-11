@@ -8,7 +8,7 @@ import os
 // Eight crash reports on 2026-09-11 were uncaught NSExceptions — AVFoundation's "tap format
 // mismatch" after an input-device change, CoreText fed a NaN geometry by the notch island —
 // and every one took the daemon down with it (its stdin closed) and left the app dead until
-// Kevin noticed. This file is the net under whatever goes wrong next:
+// User noticed. This file is the net under whatever goes wrong next:
 //
 //   1. An uncaught-exception handler and POSIX signal handlers (SIGABRT, SIGSEGV, SIGBUS,
 //      SIGILL, SIGFPE, SIGTRAP) write `<state dir>/crashes/<time>-<pid>.txt`: the reason, a
@@ -610,7 +610,7 @@ enum CrashGuard {
     /// .ips — then `open -a` the bundle, or exec's the dev binary when not running from
     /// one. A pid still alive after the wait (AppKit swallowed the exception) means no launch.
     /// Never a second Hormes: `open -a` (never `-n`) activates a running instance instead, and
-    /// whatever starts runs SingleInstance first — a Hormes Kevin opened in the meantime holds the
+    /// whatever starts runs SingleInstance first — a Hormes User opened in the meantime holds the
     /// state dir's claim, so the relaunch hands off to it and exits before NSApplication.
     private static func prepareRelaunch() {
         let bundle = Bundle.main.bundleURL

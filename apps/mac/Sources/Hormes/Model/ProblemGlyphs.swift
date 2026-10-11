@@ -26,7 +26,7 @@ public enum ProblemGlyphs {
     }
 
     /// A permission missing is a warning (the hands work less), and so is Hormes twice in the
-    /// Dock (`dock`: cosmetic, one press fixes it) and the local server or model needing Kevin
+    /// Dock (`dock`: cosmetic, one press fixes it) and the local server or model needing User
     /// (`brain.local`: he runs the printed command); everything else is an error.
     public static func isWarning(_ kind: String) -> Bool {
         kind.hasPrefix("permission.") || kind == "dock" || kind == "brain.local"

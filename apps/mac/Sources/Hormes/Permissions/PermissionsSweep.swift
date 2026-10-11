@@ -189,9 +189,9 @@ final class PermissionsCenter {
 
     private func watchTick() {
         // APP-7: the watch ends at `watchUntil`, a step waiting or not. Every poll re-reads every
-        // kind and can spawn the helper, and a step left waiting (Setup closed, Kevin gone)
+        // kind and can spawn the helper, and a step left waiting (Console closed, User gone)
         // polled forever. Past the span the step parks: still waiting, no polls. Hormes coming
-        // to the front re-reads it (`appActivated`); Next and Cancel, in Setup or the status
+        // to the front re-reads it (`appActivated`); Next and Cancel, in Console or the status
         // menu, still end it; opening a pane again starts a fresh span.
         if Date() > watchUntil {
             stopWatch()
@@ -211,7 +211,7 @@ final class PermissionsCenter {
         watchTimer = nil
     }
 
-    /// Setup closed (APP-7): the watch stops now, not at its span. Nobody is looking at Setup,
+    /// Console closed (APP-7): the watch stops now, not at its span. Nobody is looking at Console,
     /// and every poll re-reads every kind and can spawn the helper. A waiting step stays
     /// waiting, as it does past the span: Hormes coming to the front re-reads it, and Next and
     /// Cancel are in the status menu. A pane or dialog the sweep opens later starts a fresh span.
@@ -219,7 +219,7 @@ final class PermissionsCenter {
         guard watchTimer != nil else { return }
         stopWatch()
         watchUntil = .distantPast
-        log(walkContinuation != nil ? "sweep: parked, Setup closed · \(state.permissionSweep?.line ?? "waiting")" : "watch: stopped, Setup closed")
+        log(walkContinuation != nil ? "sweep: parked, Console closed · \(state.permissionSweep?.line ?? "waiting")" : "watch: stopped, Console closed")
     }
 
     /// The waiting step's kinds are all granted: the sweep moves on by itself.
@@ -402,7 +402,7 @@ final class PermissionsCenter {
             await walkSettings(settingsQueue, total: total, progress: &progress)
         }
 
-        // The watch keeps running after a sweep (Kevin may still be in System Settings); it stops itself at `watchUntil`.
+        // The watch keeps running after a sweep (User may still be in System Settings); it stops itself at `watchUntil`.
         await refreshNow()
         let summary = PermissionsKit.summary(list)
         progress.stage = .done

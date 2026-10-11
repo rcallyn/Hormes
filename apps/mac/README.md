@@ -82,12 +82,12 @@ UCKeyTranslate what each combo types on the US layout and fails on any character
 (decision D8). On the US layout it types a no-break space (U+00A0), so that combo never
 reaches a field while Hormes runs; ⌥Space still types one. A combo another app registered
 first fails to register, and that is only logged.
-`defaults write com.kevinliu.hormes hotkeys.off -bool YES` turns every global hotkey off at
+`defaults write com.hormes.app hotkeys.off -bool YES` turns every global hotkey off at
 the next launch except ⌥⎋ Stop; the menus keep working, and so does the spoken "stop".
 
 In the Console: `⌘P` go / pause, `⌘.` stop. URLs: `hormes://go`, `hormes://pause`,
 `hormes://stop` (the three transport verbs), plus `hormes://orb` (summon the blob) and
-`hormes://setup` (open Setup); any other path opens the Console. While paused the mic is off
+`hormes://settings` (Console settings) or `hormes://permissions` (Console permissions); any other path opens the Console. While paused the mic is off
 and the wake gate listens: the word resumes without Touch ID or the passphrase. The
 pause was authenticated when its session opened, and it decays to asleep on its own.
 
@@ -126,8 +126,8 @@ over the old name, so the running app keeps the inodes it has mapped; never `-a`
 never `-E` (openrsync's xattr emulation writes `._*` AppleDouble entries into the
 bundle), never `--inplace`. Then it verifies the INSTALLED copy, not the stage:
 `codesign --verify --strict --deep`, the designated requirement must carry
-`identifier "com.kevinliu.hormes"` (what TCC keys the grants on) or, signed ad-hoc, the
-signature's own Identifier must be `com.kevinliu.hormes` (its requirement is the code hash,
+`identifier "com.hormes.app"` (what TCC keys the grants on) or, signed ad-hoc, the
+signature's own Identifier must be `com.hormes.app` (its requirement is the code hash,
 so the grants reset every build), a sha256 walk
 proves the installed tree is exactly the signed stage, and the directory inode must
 be the one from before. An ad-hoc stage the keychain fell back to is refused over a copy a
@@ -163,7 +163,7 @@ one injectable `exec`, tested without a Dock.
 
 Signing picks, in order (`scripts/sign-identity.ts`): `HORMES_SIGN_IDENTITY` (use `-` to
 force ad-hoc), the first `Apple Development` identity, the first `Developer ID Application`,
-a name matching `hormes` or `hormes`, a name matching `code signing`, the first identity
+a name matching `hormes` or `jarvis`, a name matching `code signing`, the first identity
 listed, and ad-hoc when the keychain lists none. A self-signed "Code Signing" certificate made
 with Keychain Access → Certificate Assistant is enough to keep the grants, because what TCC
 needs is a designated requirement that stays the same across builds. A certificate is
@@ -175,21 +175,18 @@ The engine runs from the checkout through tsx, so changing Hormes's behaviour is
 editing this checkout (or pulling it); changes under `apps/mac` or
 `packages/hands/native` need a repackage. This app is the only face.
 
-## Setup (`Sources/Hormes/UI/Onboarding`)
+## Installation permissions
 
-Shown once, when the first snapshot from the daemon says `settings.onboarded` is
-false, and on demand from the status-bar menu *Set Up…* (`AppState.openOnboarding`).
-Steps: **welcome** (daemon connected?), **voice** (`OPENAI_API_KEY` →
-`config.set-secrets`; the engine writes `~/.hormes/env`, restarts the brain and
-probes; the result is `snapshot.setup.openaiKey`), **brain** (kind, model, base URL
-for `openai-compatible`; `ANTHROPIC_API_KEY` / `HORMES_BRAIN_API_KEY` →
-`config.set-secrets`, then `config.probe` → `snapshot.setup.brain` /
-`brainDetail`), **permissions** (all sixteen kinds, "Ask for everything", per-row Request / Open Settings),
-**wake** (phrases, authentication, passphrase), **agents** (the sessions found),
-**done** (`set-settings {onboarded: true}`). Secrets go to `~/.hormes/env` (mode
-0600) on the daemon side; the snapshot only ever carries presence
-(`SetupStatus.secrets`) and probe results. Preview with fake data:
-`Scripts/onboarding-preview.sh [step] [out.png]` (`PREVIEW_SCENARIO=ready|fresh|broken`).
+There is no separate setup window. First launch, and the installer's
+`--install-permissions` launch, use native macOS permission dialogs and System Settings.
+The user approves each dialog or toggles Hormes on. Requests are sequential; missing
+permissions stay missing until actual readback confirms them. Menu-bar Permissions and
+Console can retry, skip a waiting step, or stop. Model, key and wake preferences live in
+Console Settings, with keys written only through `config.set-secrets`.
+
+The app records the start of the installation attempt in `permission-installation.json`,
+not completion or grants. Ordinary later launches only read permissions. Test launches
+with `HORMES_NO_AUDIO=1` request nothing; the installer supplies `HORMES_AUTO_WAKE=0`.
 
 ## TCC identities (why the bundle exists)
 
@@ -200,14 +197,14 @@ macOS keys privacy grants (microphone, screen recording, accessibility) to the
   launched it, usually Terminal. The mic prompt names Terminal; screen recording
   and accessibility for the hands helper resolve to Terminal's grants too. Fine for
   development, confusing for daily use.
-- **Bundle** (`/Applications/Hormes.app`, id `com.kevinliu.hormes`): the app is
+- **Bundle** (`/Applications/Hormes.app`, id `com.hormes.app`): the app is
   the responsible process. It spawns node, which spawns `hormes-hands`
   (`Contents/MacOS/hormes-hands`, passed as `HORMES_HANDS_BIN`), and both inherit
   the app's identity, so one set of grants covers everything. Signing with a stable
   identity keeps those grants across rebuilds; an ad-hoc signature changes every
   build and TCC forgets.
 
-**Every permission, read live, asked for in one sweep, shown everywhere.** Kevin:
+**Every permission, read live, asked for in one sweep, shown everywhere.** User:
 "give it all permissions and make it ask for all permissions". Nothing can grant a TCC
 permission programmatically (no API; `tccutil` only resets; MDM is not an option), so
 the app does the most that exists: it reads all sixteen kinds of the contract
@@ -238,8 +235,7 @@ three folders report unknown until the sweep has asked, because their first real
 microphone, speech recognition, screen recording, accessibility, input monitoring,
 automation, full disk access; the rest are capabilities.
 
-**The sweep** ("Ask for everything": the Setup Permissions step's head button, a ghost since
-the footer's Continue is the step's one filled button; the Console's Permissions
+**The sweep** ("Ask for everything": the Console's Permissions
 section, the status menu's "Ask for everything…", and the engine command
 `request-permission {which: "all"}`, which the AppDelegate answers in-process like every
 kind but accessibility and screen recording): required kinds first, then the rest;
@@ -262,7 +258,7 @@ Privacy), kinds that share a pane in one step (the three folders under Files and
 Folders), Full Disk Access also revealing `/Applications/Hormes.app` in Finder so it
 can be dragged in; a poll every 1.5 s for 90 s from the last pane or dialog it opened, and
 a read on activation, catch the switch and move the step on when all its kinds are granted.
-Past those 90 s, or when Setup closes, a waiting step parks: it stays waiting with no polls,
+Past those 90 s, or when Console closes, a waiting step parks: it stays waiting with no polls,
 Hormes coming to the front re-reads it, and Next and Cancel are in the status menu
 (`Scripts/sweep-check.sh`, in CI). At the end a summary ("14 of 16 granted · Full Disk Access needs System Settings"). A
 read that began before a prompt's answer landed cannot undo it: the list merges per kind
@@ -274,20 +270,15 @@ app sends `permission {which,state,detail}` per changed kind and `permissions {a
 the whole list (`EngineClient.sendPermission` / `sendPermissions`), so
 `snapshot.permissions.all` carries it to the Console rail (required rows + an "n of 16
 granted" disclosure), `hormes status` and the doctor; `AppState`'s permissions region
-holds the published list and the sweep progress for the Setup step and the status menu
-("Permissions: n missing" opens Setup on that step). `Scripts/permissions-probe.sh`
+holds the published list and the sweep progress for Console and the status menu
+("Permissions: n missing" opens Console on that section). `Scripts/permissions-probe.sh`
 prints the readers' answers for the shell's own process and a dry-run sweep, never a
-prompt. Preview: `Scripts/onboarding-preview.sh permissions`
-(`PREVIEW_SWEEP=asking|waiting|settings|folders|done`; `all` also shoots the step at
-620x1500, every row in one picture; the README's copy is `docs/media/onboarding-permissions.png`).
+prompt. The Console's Permissions section displays these actual results.
 
-The launch path asks for the microphone (`refreshMicrophoneGrant`) once the first snapshot
-says Setup has run (`settings.onboarded`), re-checks it on every activation, and answers the
-Console's microphone "Request" in-process; the speech prompt follows it once for the wake
-word. On a fresh Mac (`onboarded` false) launch and activation only *read* the two grants
-(no system dialog lands before Setup's own window); Setup › Permissions asks for them in
-order (a grant the sweep makes is adopted at once, so the Wake step can listen), and the
-`onboarded` flip at Setup › Done runs the launch ask as usual.
+The launch path reads microphone and Speech Recognition grants without prompting on
+ordinary launch and activation. Installation requests them in order through
+`PermissionsCenter`; explicit Console requests can retry them. Readback updates the
+wake gate without duplicate dialogs.
 
 **Grants change while the app runs, and no relaunch is needed.** A running process
 may keep the TCC answer it got at launch (Screen Recording notoriously does), so
@@ -295,7 +286,7 @@ the engine asks a *fresh* helper process (`hormes-hands --permissions`) on a
 timer (every 3 s while a kind with a prompt is missing, 1.5 s for 90 s after a Request, 30 s
 otherwise) and, the moment a grant appears, restarts the resident helper so its
 capture and accessibility connections are made with the new rights, clears the
-problem line and toasts. The Setup window and the Console read the same fresh
+problem line and toasts. Console reads the same fresh
 answers (`PermissionsKit` runs the bundled helper in the background while anyone
 is looking). One trap remains: a row in System Settings that an *earlier build*
 created is bound to that build's code hash. After re-signing (ad-hoc → a real
@@ -324,7 +315,7 @@ accessibility and screen recording, which are TCC checks on the responsible proc
   while the agent works (the engine tails the session file), with a composer
   that talks to that agent and Allow / Deny for a resumed session's questions.
 - **⌃⌥C** (or the menu-bar *Circle Something…*) enters mark mode: the overlay
-  takes one stroke, Kevin circles anything, the engine screenshots that region
+  takes one stroke, User circles anything, the engine screenshots that region
   and hands it to the brain with the next task; Live is told he circled
   something. Escape cancels; the mode times out after 20 s.
 - **Flight and drawing.** When the brain acts, the blob flies to the target,
@@ -337,7 +328,7 @@ accessibility and screen recording, which are TCC checks on the responsible proc
   one `DockContent` value in, action closures out; `OrbPanelController` builds the
   content from the snapshot and the thread store). Press `◎` on the island: the dock
   folds to the peek (`NotchDock.foldForMark`, before the overlay takes the mouse), the
-  peek reads `◎ Circle something · Esc`, Kevin draws, the overlay sends `mark.add`, and
+  peek reads `◎ Circle something · Esc`, User draws, the overlay sends `mark.add`, and
   the engine's `orb.trace` echo has the blob outline the circle; then, because the trace
   was started from the dock, **the blob comes home** to the notch instead of loitering by
   the line (`homeAfterTrace`), and a pinned island is pinned again once it is parked.
@@ -355,7 +346,7 @@ accessibility and screen recording, which are TCC checks on the responsible proc
   remedy while the island is open, never a pill. Nothing on the dock but Go (and a typed
   line under `typedWakes`) opens a paid session.
 
-The contract for all of it is in `docs/REDESIGN.md` §9.
+The contracts live in `packages/protocol` and the native Swift protocol mirror.
 
 ## Wake word (`Sources/Hormes/Wake`)
 
@@ -367,10 +358,12 @@ transcript for any of `settings.wake.phrases` on word boundaries. The listener p
 own input unit at the ranked microphone (the MacBook's own when there is one), so it holds
 that microphone while it waits; nothing is ducked. When it hears one:
 
-1. earcon, then it authenticates according to `settings.wake.auth`:
+1. With the default `settings.wake.auth = none`, the selected wake word or double
+   clap plays the bundled startup clip and sends `go` immediately, without Touch ID,
+   a passphrase prompt, or a preliminary chime. Optional authentication modes are:
    `touch-id`, the system sheet (Touch ID, Apple Watch, or the Mac password);
-   `passphrase`, a phrase Kevin says or types; `either`, both at once, first
-   one wins; `none`, no check (doctor warns). With nothing to check against the
+   `passphrase`, a phrase User says or types; `either`, both at once, first
+   one wins. When authentication is selected but there is nothing to check against, the
    gate stays shut and says so.
 2. On success it sends `go` and the Live session opens. The gate guards the
    hands-free path only: a deliberate Orb tap, the hotkey, the menu-bar item or
@@ -475,7 +468,7 @@ App → daemon:
 - `ear {text,isFinal,segment,at}`: the on-device ear's partial or final transcript while
   awake; the engine's reflex layer acts on the unambiguous ones said to Hormes.
 - `ping {id}`.
-- `system.signal {signal,at}`: a signal the app observes on Kevin's behalf and forwards as
+- `system.signal {signal,at}`: a signal the app observes on User's behalf and forwards as
   data, never a command: `app.launch` / `app.quit {app,bundleId?}` (`NSWorkspace`), `mac.wake`,
   `mac.sleep`, `screen.unlock`, `screen.lock`, `display.connected`, `display.disconnected`,
   `clock.changed`. The daemon has no `NSWorkspace`; the automations table fires its watchers on
@@ -499,7 +492,7 @@ Requests carrying an `id` resolve through it with a 5 s timeout (15 s for `ledge
 The local brain adds no message types: `setup.local` (a `LocalServerStatus`: the
 server found, its tool-capable models with fit and capabilities, the engine's pick),
 `setup.dataPaths` (the four "where words go" rows) and `remedy.copy` on a problem
-(a shell command Kevin runs himself; the app offers Copy, never runs it) are new
+(a shell command User runs himself; the app offers Copy, never runs it) are new
 fields on the snapshot, mirrored in `Protocol.swift`. Picking the local brain is the
 same `set-settings` patch as every other kind: `{ brain: "local", brainModel: "" }`
 means the best fit on this Mac.
@@ -545,7 +538,7 @@ in front, and after an underrun the cushion grows to the gap plus 40 ms, 200 ms 
 late chunk is absorbed instead of heard as a hole (`Scripts/playout-probe.sh` renders it
 offline). `flush` stops the player and drops the backlog. The barge-in duck
 (`Audio/BargeInDuck.swift`) brings the speaker down 6 dB the moment the mic hears speech over
-Hormes's voice and 20 dB once the ear or Live's transcript confirms it is Kevin; only the
+Hormes's voice and 20 dB once the ear or Live's transcript confirms it is User; only the
 player's volume moves. Audio runs only while a session is
 open and the mic is granted.
 
@@ -593,7 +586,7 @@ just stopped itself. Uncaught, one takes the app down: five of the eight crashes
 - Every AVFoundation call that can raise (`installTap`, `connect`, `prepare`/`start`,
   `setVoiceProcessingEnabled`, `reset`, `removeTap`, the player's `play`/`stop`/
   `scheduleBuffer`) runs inside `objcTry` (`Audio/ObjCTry.swift`), a Swift wrapper over
-  the `HormesObjC` target's `JHTry` (`@try/@catch`, `Sources/HormesObjC`). A raise
+  the `HormesObjC` target's `HMSTry` (`@try/@catch`, `Sources/HormesObjC`). A raise
   comes out as `ObjCException` (name, reason, top of the ObjC stack) and is logged and
   retried like any other failed start.
 
@@ -632,19 +625,19 @@ System Settings › Sound). Unknown ids fall back to the system default.
 ```
 Sources/Hormes/App          main, AppDelegate, CrashGuard, SingleInstance (one Hormes: the claim and the hand-off), StatusItem, Hotkeys, Menus
 Sources/Hormes/Daemon       RepoLocator, DaemonProcess, Wire, EngineClient
-Sources/Hormes/Audio        AudioEngine, VoiceProcessingPolicy + VoiceProcessingKnobs (the graph's wiring ladder and the unit's properties), PrivateRoute (Hormes's own aggregate device), EchoGuard + EchoGuardModel (the software echo guard on the plain graph), AudioStateReadback (the HAL as it is now), AudioStateReader (the in-process half of the read-back), Playout (the speaker's cushion), BargeInDuck (the speaker down while Kevin talks over it), ObjCTry (the Swift face of JHTry)
+Sources/Hormes/Audio        AudioEngine, VoiceProcessingPolicy + VoiceProcessingKnobs (the graph's wiring ladder and the unit's properties), PrivateRoute (Hormes's own aggregate device), EchoGuard + EchoGuardModel (the software echo guard on the plain graph), AudioStateReadback (the HAL as it is now), AudioStateReader (the in-process half of the read-back), Playout (the speaker's cushion), BargeInDuck (the speaker down while User talks over it), ObjCTry (the Swift face of HMSTry)
 Sources/Hormes/Ear          EarListener, SegmentedRecognizer, EarGrammar, EarThrottle, ReflexEar: the on-device ear behind the reflexes
 Sources/Hormes/Wake         WakeGate, WakeWordListener, LocalAuth, LocalSpeaker
 Sources/Hormes/Permissions  Permissions (PermissionsKit: the readers and panes), PermissionsRequests (one awaited prompt per kind), PermissionsSweep (PermissionsCenter: the list, the sweep, the dry run)
 Sources/Hormes/System       Notifications (the banner for a fired automation), SignalObserver (app launch/quit, sleep/wake, lock, displays, clock jumps → `system.signal` frames)
 Sources/Hormes/Model        Protocol.swift, AppState.swift (the contract; do not edit casually); ThreadStore (a thread's transcript pages), Remedy (a problem's remedy as a command), ProblemGlyphs, ComposerWords (the words the composer, the Say box and the thumbs share)
-Sources/Hormes/UI           Dither, Motion, HelpCopy (every surface's tips, described once), Thumbnails (screenshots decoded off the main thread); Orb (BlobField, BlobPhysics, BlobFleet + SatelliteBlob (one blob per thread), BlobTrail, Eyes, FleetBudget, NotchPanel, NotchInk, OrbTrace, OrbPanelController, OrbExpandedView, OrbPreviewApp), Overlay (OverlayManager, OverlayAnnotations, MarkMode, OverlayPreviewDemo), Console, Onboarding
-Sources/HormesObjC          JHTry: the @try/@catch shim AVFoundation calls run inside
+Sources/Hormes/UI           Dither, Motion, HelpCopy (every surface's tips, described once), Thumbnails (screenshots decoded off the main thread); Orb (BlobField, BlobPhysics, BlobFleet + SatelliteBlob (one blob per thread), BlobTrail, Eyes, FleetBudget, NotchPanel, NotchInk, OrbTrace, OrbPanelController, OrbExpandedView, OrbPreviewApp), Overlay (OverlayManager, OverlayAnnotations, MarkMode, OverlayPreviewDemo), Console
+Sources/HormesObjC          HMSTry: the @try/@catch shim AVFoundation calls run inside
 Resources                    Info.plist, entitlements.plist, preview-icon-sizes.png (the icon contact strip; the harnesses' other preview-*.png are gitignored)
-Scripts                      orb-preview.sh (`--notch-checks`: every rule of the island as `check:` lines), console-preview.sh (scenarios incl. `threads`, `hormes`, `hormes-log`, `paused`), onboarding-preview.sh, protocol-probe.sh (the Swift mirror against fixtures/snapshot-threads.json), permissions-probe.sh (read-only readers + dry-run sweep), appstate-bench.sh, orb-home-probe.sh, ear-probe.sh, objc-try-probe.sh, audio-probe.sh, duck-probe.sh, duck-leak-probe.sh, recorder-probe.sh, playout-probe.sh (the cushion, offline), snapshot-probe.sh (the receive path under big snapshots, against a fake daemon); the headless checks wake-gate-check.sh, sweep-check.sh and hotkey-check.sh (all three in CI), single-instance-check.sh and w3-3-check.sh (version skew, the Ledger tab's totals, search paging); *PreviewMain.swift / *ProbeMain.swift / *CheckMain.swift / AppStateBenchMain.swift; fixtures/ holds the probe fixture (snapshot-threads.json), the Console preview's ledger days (ledger-days.json) and the one fake screenshot the previews resolve
+Scripts                      orb-preview.sh (`--notch-checks`: every rule of the island as `check:` lines), console-preview.sh (scenarios incl. `threads`, `hormes`, `hormes-log`, `paused`), protocol-probe.sh (the Swift mirror against fixtures/snapshot-threads.json), permissions-probe.sh (read-only readers + dry-run sweep), appstate-bench.sh, orb-home-probe.sh, ear-probe.sh, objc-try-probe.sh, audio-probe.sh, duck-probe.sh, duck-leak-probe.sh, recorder-probe.sh, playout-probe.sh (the cushion, offline), snapshot-probe.sh (the receive path under big snapshots, against a fake daemon); the headless checks wake-gate-check.sh, sweep-check.sh and hotkey-check.sh (all three in CI), single-instance-check.sh and w3-3-check.sh (version skew, the Ledger tab's totals, search paging); *PreviewMain.swift / *ProbeMain.swift / *CheckMain.swift / AppStateBenchMain.swift; fixtures/ holds the probe fixture (snapshot-threads.json), the Console preview's ledger days (ledger-days.json) and the one fake screenshot the previews resolve
 ```
 
 `Scripts/appstate-bench.sh` runs the model's acceptance checks (apps/mac has no XCTest
-target): `AppStateBench` and `OnboardingBench`, behind `#if DEBUG`, drive `AppState` over
+target): `AppStateBench`, behind `#if DEBUG`, drive `AppState` over
 fixed snapshots and fail on a wrong derived value, so a Protocol.swift change is proven
 there before it reaches the app.

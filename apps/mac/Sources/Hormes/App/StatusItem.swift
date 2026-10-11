@@ -14,10 +14,9 @@ struct AppActions {
     var openLedgerFolder: () -> Void = {}
     var quit: () -> Void = {}
     /// The automations (design11): the ring's two presses — `automation.snooze` (id, minutes) / `automation.done`
-    /// (id) — and the Console opened on its Automations section. Never a session, never a brain turn.
+    /// (id). Never a session or a brain turn.
     var snoozeRing: (String, Int) -> Void = { _, _ in }
     var doneRing: (String) -> Void = { _ in }
-    var openAutomations: () -> Void = {}
     /// design12: Recording on / off — the whole audio block through `set-settings`, never another command.
     var toggleRecording: () -> Void = {}
 }
@@ -118,7 +117,7 @@ final class StatusItem: NSObject {
         let busy = VoiceSwitch.busy(delegations: s.delegations, threads: [], phase: s.phase)
         let spoken = s.session?.voice ?? ""
         let accent = s.session?.accent ?? ""
-        return [s.settings.voice, s.settings.accent, spoken, accent, String(busy)].joined(separator: "|")
+        return [s.settings.voiceProvider ?? "openai", s.settings.geminiVoice ?? "Kore", s.settings.voice, s.settings.accent, spoken, accent, String(busy)].joined(separator: "|")
     }
 
     private func scheduleRefresh() {
@@ -223,7 +222,7 @@ final class StatusItem: NSObject {
         // The wake word gate, while the engine is dormant or paused: what it is doing and, if off, why.
         if WakeGate.listens(in: phase) {
             let wake = state.snapshot.settings.wake
-            let gate = NSMenuItem(title: StatusItem.gateLabel(state.wakeGate, phrases: wake.phrases, auth: wake.auth, paused: paused), action: nil, keyEquivalent: "")
+            let gate = NSMenuItem(title: StatusItem.gateLabel(state.wakeGate, phrases: wake.phrases, auth: wake.auth, trigger: wake.trigger ?? .word, paused: paused), action: nil, keyEquivalent: "")
             gate.isEnabled = false
             gate.image = StatusItem.symbol(StatusItem.gateSymbol(state.wakeGate))
             menu.addItem(gate)
@@ -304,12 +303,6 @@ final class StatusItem: NSObject {
         ledger.image = StatusItem.symbol("list.bullet.rectangle.fill")
         menu.addItem(ledger)
 
-        let automations = NSMenuItem(title: "Automations…", action: #selector(doOpenAutomations), keyEquivalent: "")
-        automations.target = self
-        automations.image = StatusItem.symbol("alarm.fill")
-        automations.toolTip = "What is set to fire while Hormes sleeps (the Console's Automations section)"
-        menu.addItem(automations)
-
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Hormes", action: #selector(doQuit), keyEquivalent: "q")
@@ -321,21 +314,16 @@ final class StatusItem: NSObject {
         circle.toolTip = "Draw around anything on screen and Hormes sees it (\(Hotkeys.Action.markScreen.glyph))"
         menu.addItem(circle)
 
-        let setup = NSMenuItem(title: "Set Up…", action: #selector(doSetup), keyEquivalent: "")
-        setup.target = self
-        setup.image = StatusItem.symbol("gearshape.fill")
-        menu.addItem(setup)
-
-        // Permissions: how many are missing (required ones named first), opening Setup on
-        // that step; and the sweep itself. While the sweep runs the row says so.
+        // Permissions: how many are missing (required ones named first), opening Console on
+        // that section; and the sweep itself. While the sweep runs the row says so.
         let perms = NSMenuItem(title: StatusItem.permissionsLabel(state.permissionList, sweep: state.permissionSweep), action: #selector(doPermissions), keyEquivalent: "")
         perms.target = self
         perms.image = StatusItem.symbol(StatusItem.permissionsSymbol(state.permissionList))
-        perms.toolTip = "Open Setup on the Permissions step"
+        perms.toolTip = "View permissions in Console"
         menu.addItem(perms)
 
-        // APP-7: the sweep's own Next and Cancel, while it runs. A step left waiting after Setup
-        // closed is moved on or ended here, without opening Setup again.
+        // APP-7: the sweep's own Next and Cancel, while it runs. A step left waiting after Console
+        // closed is moved on or ended here, without opening another window.
         if state.permissionSweep?.running ?? false {
             if StatusItem.sweepWaits(state.permissionSweep) {
                 let next = NSMenuItem(title: "Next", action: #selector(doSweepNext), keyEquivalent: "")
@@ -373,9 +361,8 @@ final class StatusItem: NSObject {
     @objc private func doSummon() { actions.summonOrb() }
     @objc private func doOpenLedger() { actions.openLedgerFolder() }
     @objc private func doQuit() { actions.quit() }
-    @objc private func doSetup() { state.openOnboarding() }
     @objc private func doMark() { state.beginMarkMode() }
-    @objc private func doPermissions() { state.openPermissionsSetup() }
+    @objc private func doPermissions() { state.openPermissions() }
     @objc private func doAskAll() { state.requestAll() }
     @objc private func doSweepNext() { state.permissionSweepNext() }
     @objc private func doSweepCancel() { state.permissionSweepCancel() }
@@ -388,15 +375,14 @@ final class StatusItem: NSObject {
         guard let ring = state.ringing else { return }
         actions.doneRing(ring.id)
     }
-    @objc private func doOpenAutomations() { actions.openAutomations() }
 
     // MARK: - the Voice row (design13)
 
     /// `Voice   Marin 🇬🇧` with the submenu; the value in the secondary colour after the key.
     private func voiceRow() -> NSMenuItem {
         let s = state.snapshot
-        let row = NSMenuItem(title: VoiceMenuWords.voice, action: nil, keyEquivalent: "")
-        row.attributedTitle = StatusItem.voiceTitle(voice: s.settings.voice, accent: s.settings.accent)
+        let row = NSMenuItem(title: "Voice", action: nil, keyEquivalent: "")
+        row.attributedTitle = StatusItem.voiceTitle(voice: s.settings.voiceProvider == "gemini" ? (s.settings.geminiVoice ?? "Kore") : s.settings.voice, accent: s.settings.accent)
         row.image = StatusItem.symbol(ConsoleGlyph.voice)
         row.toolTip = HelpCopy.voiceChip.hint
         let busy = VoiceSwitch.busy(delegations: s.delegations, threads: Array(state.threads.values), phase: s.phase)
@@ -409,6 +395,10 @@ final class StatusItem: NSObject {
     static func voiceMenu(settings: Settings, session: SessionInfo?, phase: Phase, busy: Bool) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
+        if settings.voiceProvider == "gemini" {
+            let item = NSMenuItem(title: "Gemini · \(settings.geminiVoice ?? "Kore")", action: nil, keyEquivalent: "")
+            item.isEnabled = false; menu.addItem(item); return menu
+        }
         for row in VoiceMenuModel.rows(voice: settings.voice, accent: settings.accent, session: session, phase: phase, busy: busy) {
             switch row.kind {
             case .separator:
@@ -425,12 +415,7 @@ final class StatusItem: NSObject {
                 item.state = row.on ? .on : .off
                 item.tag = 2
                 menu.addItem(item)
-            case .accent(let id):
-                let item = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
-                item.representedObject = id
-                item.state = row.on ? .on : .off
-                item.tag = 3
-                menu.addItem(item)
+
             }
         }
         return menu
@@ -439,7 +424,7 @@ final class StatusItem: NSObject {
     /// `Voice` in the label colour, the pick (`Marin 🇬🇧`) after it in the secondary one.
     static func voiceTitle(voice: String, accent: String) -> NSAttributedString {
         let font = NSFont.menuFont(ofSize: 0)
-        let out = NSMutableAttributedString(string: VoiceMenuWords.voice, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+        let out = NSMutableAttributedString(string: "Voice", attributes: [.font: font, .foregroundColor: NSColor.labelColor])
         out.append(NSAttributedString(string: "   " + VoiceMenuModel.value(voice: voice, accent: accent),
                                       attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
         return out
@@ -475,7 +460,7 @@ final class StatusItem: NSObject {
         ring.presses.first { $0.kind == "snooze" }?.minutes ?? (ring.kind == "timer" ? 5 : settings.snoozeMinutes)
     }
 
-    /// "Next · 07:10 Wake up, Kevin".
+    /// "Next · 07:10 Wake up, User".
     static func nextLabel(_ next: NextFire) -> String {
         guard next.at.isFinite else { return "Next · \(next.name)" }
         return "Next · \(RingWords.clock(Date(timeIntervalSince1970: next.at / 1000))) \(next.name)"
@@ -501,7 +486,7 @@ final class StatusItem: NSObject {
         return "Permissions: \(missing.count) missing" + (required > 0 ? " (\(required) required)" : "")
     }
 
-    /// The sweep is at a step that waits on Kevin (a dialog that returned at once, a System Settings pane): Next applies.
+    /// The sweep is at a step that waits on User (a dialog that returned at once, a System Settings pane): Next applies.
     static func sweepWaits(_ p: PermissionSweepProgress?) -> Bool {
         guard let p, p.running else { return false }
         return p.stage == .waiting || p.stage == .settings
@@ -519,13 +504,11 @@ final class StatusItem: NSObject {
     /// alone never looks like one that authenticates. While `paused` the gate listens for
     /// the word to *resume* — no authentication, the pause was authenticated minutes ago
     /// (WakeGate.heard) — so the row says so, and names the other way back.
-    static func gateLabel(_ g: WakeGateState, phrases: [String], auth: WakeAuth = .either, paused: Bool = false) -> String {
+    static func gateLabel(_ g: WakeGateState, phrases: [String], auth: WakeAuth = .either, trigger: WakeTrigger = .word, paused: Bool = false) -> String {
         switch g {
         case .off(let reason): return GateWords.off(reason)
         case .listening:
-            let phrase = phrases.first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? "the wake word"
-            if paused { return "paused · say “\(phrase)” or press Go" }
-            return "Listening for “\(phrase)”" + (auth == .none ? GateWords.noAuth() : "")
+            return GateWords.listening(phrases: phrases, auth: auth, trigger: trigger, paused: paused)
         case .heard: return "Heard you"
         case .authenticating(let method): return "Waiting for \(method)"
         case .granted: return paused ? "Resuming…" : "Waking…"
@@ -547,31 +530,17 @@ final class StatusItem: NSObject {
 
     // MARK: - glyph
 
-    /// A monochrome orb: a ring, plus a filled core while a session is open or opening,
-    /// a dim ember while asleep, and two bars while paused (the session is closed, the
-    /// conversation kept). Template, so the system tints it for light/dark menu bars and
-    /// Retina scaling is free.
+    /// The same five voice bars as the Dock and draggable presence. macOS tints this
+    /// template for the menu bar; a quiet session dims the mark.
     static func glyph(for phase: Phase) -> NSImage {
         let size = NSSize(width: 18, height: 18)
-        let paused = phase == .paused
         let awake = AppState.voiceAudioRuns(in: phase)
         let image = NSImage(size: size, flipped: false) { rect in
-            let c = NSPoint(x: rect.midX, y: rect.midY)
-            NSColor.black.setStroke()
-            NSColor.black.setFill()
-            let ring = NSBezierPath(ovalIn: NSRect(x: c.x - 6.25, y: c.y - 6.25, width: 12.5, height: 12.5))
-            ring.lineWidth = 1.5
-            ring.stroke()
-            if paused {
-                // Paused: two bars at the centre, the transport's own mark.
-                NSBezierPath(rect: NSRect(x: c.x - 2.75, y: c.y - 3, width: 1.75, height: 6)).fill()
-                NSBezierPath(rect: NSRect(x: c.x + 1, y: c.y - 3, width: 1.75, height: 6)).fill()
-            } else if awake {
-                NSBezierPath(ovalIn: NSRect(x: c.x - 3, y: c.y - 3, width: 6, height: 6)).fill()
-            } else {
-                // Asleep: a dim ember at the centre.
-                NSColor.black.withAlphaComponent(0.45).setFill()
-                NSBezierPath(ovalIn: NSRect(x: c.x - 1.5, y: c.y - 1.5, width: 3, height: 3)).fill()
+            NSColor.black.withAlphaComponent(awake ? 1 : 0.55).setFill()
+            for (index, height) in [4.0, 8.0, 13.0, 8.0, 4.0].enumerated() {
+                let bar = NSRect(x: rect.midX + Double(index - 2) * 3 - 0.85,
+                                 y: rect.midY - height / 2, width: 1.7, height: height)
+                NSBezierPath(roundedRect: bar, xRadius: 0.85, yRadius: 0.85).fill()
             }
             return true
         }
