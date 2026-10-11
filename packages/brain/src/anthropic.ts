@@ -2,11 +2,12 @@ import Anthropic, { APIConnectionError, APIConnectionTimeoutError, APIError, API
 import { logger } from "@hormes/core";
 import type { ToolResult } from "@hormes/hands";
 import type { Effort } from "@hormes/protocol";
-import type { Brain, BrainResult, BrainSink, BrainTask } from "./brain.ts";
-import { brainSystemPrompt } from "./brain.ts";
+import type { Brain, BrainAttachment, BrainResult, BrainSink, BrainTask } from "./brain.ts";
+import { SYSTEM_PROMPT_VERSION, brainSystemPrompt } from "./brain.ts";
 import { ALL_TOOL_SPECS, type ToolSpec } from "./tools.ts";
 import { progressLine } from "./responses.ts";
 import { resultText, type ToolRunner } from "./runner.ts";
+import { attachmentsPreamble, attachmentsRecap, loadAttachments } from "./attachments.ts";
 
 /**
  * The Anthropic brain: the Messages API with ANTHROPIC_API_KEY.
@@ -96,15 +97,31 @@ export function toAnthropicTool(spec: ToolSpec): Anthropic.Tool {
   };
 }
 
-/** The user turn every API brain sends; the same words the Claude Code brain uses. */
-export function delegationPrompt(task: BrainTask, userName = "Kevin"): string {
+/**
+ * The user turn every brain sends. Attached images (circled regions) are named
+ * here, numbered as `attachments` lists them; pass the ones the transport really
+ * sends (the loaded or existing files), not the task's list, so the model is never
+ * told about an image it does not get. Each transport carries the pixels its own way.
+ */
+export function delegationPrompt(task: BrainTask, userName = "Kevin", attachments: readonly BrainAttachment[] | undefined = task.attachments): string {
+  return promptParts(task, userName, attachmentsPreamble(attachments)).join("\n\n");
+}
+
+/**
+ * The same turn as it is kept in history, or sent where images cannot go: the
+ * words and where Kevin circled, without claiming pixels that are not there.
+ */
+export function historyPrompt(task: BrainTask, userName = "Kevin"): string {
+  return promptParts(task, userName, attachmentsRecap(task.attachments)).join("\n\n");
+}
+
+function promptParts(task: BrainTask, userName: string, regions: string): string[] {
   return [
     task.confirmation ? `${userName} just said YES to the pending confirmation. Do that action now, then report.` : "",
     `${userName} said: "${task.request}"`,
+    regions,
     task.dialogue ? `Recent conversation:\n${task.dialogue}` : "",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  ].filter(Boolean);
 }
 
 function toolResultBlock(toolUseId: string, r: ToolResult): Anthropic.ToolResultBlockParam {
@@ -167,6 +184,7 @@ export class AnthropicBrain implements Brain {
       this.ready = true;
       const flags = [this.reasoning.thinking ? "adaptive thinking" : "", this.reasoning.effort ? `effort ${this.reasoning.effort}` : ""].filter(Boolean);
       this.readyDetail = `Anthropic Messages API (${info.display_name || this.model}${flags.length ? `, ${flags.join(", ")}` : ""})`;
+      log.info(`ready; standing orders v${SYSTEM_PROMPT_VERSION}`);
     } catch (e) {
       this.ready = false;
       this.readyDetail = this.describeProbeError(e);
@@ -206,7 +224,7 @@ export class AnthropicBrain implements Brain {
     task.signal.addEventListener("abort", onAbort, { once: true });
     if (task.signal.aborted) abort.abort();
     this.current = { task, abort };
-    this.opts.runner.attach(sink);
+    this.opts.runner.attach(sink, task);
     try {
       return await this.loop(client, task, sink, abort.signal);
     } finally {
@@ -223,8 +241,14 @@ export class AnthropicBrain implements Brain {
   }
 
   private async loop(client: Anthropic, task: BrainTask, sink: BrainSink, signal: AbortSignal): Promise<BrainResult> {
-    const prompt = delegationPrompt(task, this.opts.userName);
-    const messages: Anthropic.MessageParam[] = [...this.history, { role: "user", content: prompt }];
+    // Circled regions go in as base64 image blocks ahead of the words; the prompt
+    // names exactly the ones that loaded.
+    const attachments = loadAttachments(task);
+    const prompt = delegationPrompt(task, this.opts.userName, attachments);
+    const content: Anthropic.MessageParam["content"] = attachments.length
+      ? [...attachments.map((a): Anthropic.ImageBlockParam => ({ type: "image", source: { type: "base64", media_type: "image/png", data: a.pngBase64 } })), { type: "text", text: prompt }]
+      : prompt;
+    const messages: Anthropic.MessageParam[] = [...this.history, { role: "user", content }];
     const started = Date.now();
     const maxSteps = this.opts.maxSteps ?? 40;
     const maxWallMs = this.opts.maxWallMs ?? 5 * 60_000;
@@ -287,7 +311,8 @@ export class AnthropicBrain implements Brain {
           break;
       }
       const summary = text || "done.";
-      this.remember(prompt, summary);
+      // History keeps the words and the regions, not the pixels — so it must not say "attached image".
+      this.remember(historyPrompt(task, this.opts.userName), summary);
       log.debug(`done in ${steps} step(s), ${Date.now() - started}ms`);
       return { status: "done", summary };
     }

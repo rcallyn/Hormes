@@ -1,9 +1,10 @@
 import { logger } from "@hormes/core";
 import type { LiveSession, ResponsesDelegationConfig } from "@hormes/live";
 import type { Brain, BrainResult, BrainSink, BrainTask } from "./brain.ts";
-import { brainSystemPrompt } from "./brain.ts";
+import { SYSTEM_PROMPT_VERSION, brainSystemPrompt } from "./brain.ts";
 import { ALL_TOOL_SPECS, type ToolSpec } from "./tools.ts";
 import { resultText, type ToolRunner } from "./runner.ts";
+import { loadAttachments, type LoadedAttachment } from "./attachments.ts";
 
 /**
  * The OpenAI brain: Live's own "responses" delegation.
@@ -69,6 +70,8 @@ export class ResponsesBrain implements Brain {
   private live: LiveSession | undefined;
   private sinks = new Map<string, { sink: BrainSink; resolve: (r: BrainResult) => void; started: number }>();
   private pendingByDelegation = new Map<string, PendingCall[]>();
+  /** Circled regions not yet shown to the backend, per delegation. */
+  private attachments = new Map<string, LoadedAttachment[]>();
   private cancelled = new Set<string>();
   private unbind: (() => void) | undefined;
 
@@ -86,6 +89,7 @@ export class ResponsesBrain implements Brain {
   }
 
   async start(): Promise<{ ready: boolean; detail: string }> {
+    log.info(`ready; standing orders v${SYSTEM_PROMPT_VERSION}`);
     return { ready: true, detail: `responses delegation via ${this.opts.model || DEFAULT_RESPONSES_MODEL}` };
   }
 
@@ -95,9 +99,16 @@ export class ResponsesBrain implements Brain {
    * response completes.
    */
   handle(task: BrainTask, sink: BrainSink): Promise<BrainResult> {
-    this.opts.runner.attach(sink);
+    this.opts.runner.attach(sink, task);
     return new Promise<BrainResult>((resolve) => {
       this.sinks.set(task.delegationId, { sink, resolve, started: Date.now() });
+      // The backend is already answering by the time we hear of the delegation, so
+      // the circled regions cannot go in with the words; they ride as input_image
+      // items with the first batch of tool results, before the backend continues —
+      // or, when it answers without any tool, right after that answer (see
+      // onResponseEvent), so a "what is this?" never goes unseen.
+      const loaded = loadAttachments(task);
+      if (loaded.length > 0) this.attachments.set(task.delegationId, loaded);
       task.signal.addEventListener("abort", () => {
         this.cancelled.add(task.delegationId);
         this.finish(task.delegationId, { status: "cancelled" });
@@ -110,6 +121,7 @@ export class ResponsesBrain implements Brain {
     if (!entry) return;
     this.sinks.delete(delegationId);
     this.pendingByDelegation.delete(delegationId);
+    this.attachments.delete(delegationId);
     entry.resolve(result);
   }
 
@@ -139,6 +151,12 @@ export class ResponsesBrain implements Brain {
       this.pendingByDelegation.set(id, []);
       if (pending.length > 0 && !this.cancelled.has(id)) {
         await this.runCalls(id, pending, entry?.sink);
+        return;
+      }
+      // The backend answered without a single tool call, so the circled region never
+      // went in: show it now and let it answer once more, seeing what Kevin meant.
+      if (type !== "response.failed" && entry && !this.cancelled.has(id) && this.sendAttachments(id, true)) {
+        this.live?.createResponse();
         return;
       }
       if (type === "response.failed") {
@@ -179,8 +197,35 @@ export class ResponsesBrain implements Brain {
       }
       if (r.kind === "needs-confirmation") sink?.step({ kind: "confirm", text: r.question });
     }
+    this.sendAttachments(delegationId, false);
     live.createResponse();
     log.debug(`continued backend after ${calls.length} call(s)`);
+  }
+
+  /**
+   * The circled regions go to the backend once, as one user message of
+   * input_text notes and input_image items. `late` means the backend already
+   * answered without them, so the message also says what to do with them.
+   * Returns whether anything was sent.
+   */
+  private sendAttachments(delegationId: string, late: boolean): boolean {
+    const live = this.live;
+    const attachments = this.attachments.get(delegationId);
+    if (!live || !attachments || attachments.length === 0) return false;
+    this.attachments.delete(delegationId);
+    const content: unknown[] = attachments.flatMap((a) => [
+      { type: "input_text", text: a.note },
+      { type: "input_image", image_url: `data:image/png;base64,${a.pngBase64}`, detail: "high" },
+    ]);
+    if (late) {
+      content.push({
+        type: "input_text",
+        text: "You answered before seeing what Kevin circled. Look at it now: if your answer changes or was missing what he meant by \"this\", give the corrected answer in one or two sentences; if it stands, answer \"done.\"",
+      });
+    }
+    live.createResponseItem({ type: "message", role: "user", content });
+    if (late) log.debug(`showed ${attachments.length} circled region(s) after a tool-less answer`);
+    return true;
   }
 
   async cancel(): Promise<void> {
@@ -193,6 +238,19 @@ export class ResponsesBrain implements Brain {
   async stop(): Promise<void> {
     this.unbind?.();
     await this.cancel();
+  }
+}
+
+function base(v: unknown): string {
+  const s = String(v ?? "").trim();
+  return s ? (s.split("/").filter(Boolean).pop() ?? s).slice(0, 40) : "a file";
+}
+
+function hostOf(v: unknown): string {
+  try {
+    return new URL(String(v ?? "")).host || "a page";
+  } catch {
+    return "a page";
   }
 }
 
@@ -219,6 +277,40 @@ export function progressLine(name: string, args: unknown): string {
       return `Opening ${String(a["name"] ?? "the app")}.`;
     case "run_shell":
       return `Running ${String(a["command"] ?? "a command").slice(0, 60)}.`;
+    case "read_file":
+      return `Reading ${base(a["path"])}.`;
+    case "write_file":
+      return `Writing ${base(a["path"])}.`;
+    case "edit_file":
+      return `Editing ${base(a["path"])}.`;
+    case "list_dir":
+      return `Listing ${base(a["path"])}.`;
+    case "search_files":
+      return `Searching for ${String(a["pattern"] ?? "").slice(0, 40)}.`;
+    case "web_fetch":
+      return `Fetching ${hostOf(a["url"])}.`;
+    case "web_search":
+      return `Searching the web for ${String(a["query"] ?? "").slice(0, 50)}.`;
+    case "applescript":
+      return "Running an AppleScript.";
+    case "open_url":
+      return `Opening ${hostOf(a["url"])} in the browser.`;
+    case "clipboard_read":
+      return "Reading the clipboard.";
+    case "clipboard_write":
+      return "Copying to the clipboard.";
+    case "self_edit":
+      return "Starting a change to my own code.";
+    case "self_check":
+      return "Re-running my checks.";
+    case "self_review":
+      return "Looking at what I changed.";
+    case "self_apply":
+      return "Applying the change to myself.";
+    case "self_discard":
+      return "Throwing the change away.";
+    case "self_status":
+      return "Checking my pending changes.";
     case "agents_list":
       return "Checking the agents.";
     case "agent_send":
@@ -237,6 +329,14 @@ export function progressLine(name: string, args: unknown): string {
       return "Inspecting that element.";
     case "mouse_move":
       return "Pointing at it.";
+    case "show_circle":
+    case "show_arrow":
+    case "show_rect":
+    case "show_text":
+    case "show_stroke":
+      return "Drawing on the screen.";
+    case "show_clear":
+      return "Clearing the drawings.";
     case "wait":
       return "Waiting a moment.";
     default:

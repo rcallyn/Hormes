@@ -3,9 +3,11 @@ import { z } from "zod";
 import { logger } from "@hormes/core";
 import { ClaudeSession, claudeEnv, loadSdk, type PermissionDecision, type SdkLike } from "@hormes/agents";
 import type { Brain, BrainResult, BrainSink, BrainTask } from "./brain.ts";
-import { brainSystemPrompt } from "./brain.ts";
+import { SYSTEM_PROMPT_VERSION, brainSystemPrompt } from "./brain.ts";
 import { ALL_TOOL_SPECS, type ToolSpec } from "./tools.ts";
 import { progressLine } from "./responses.ts";
+import { delegationPrompt } from "./anthropic.ts";
+import { loadAttachments } from "./attachments.ts";
 import type { ToolRunner } from "./runner.ts";
 
 /**
@@ -170,6 +172,7 @@ export class ClaudeBrain implements Brain {
       }
       this.ready = true;
       this.readyDetail = `headless Claude Code (${this.opts.model || "default model"}, ${auth === "valid" ? "api key" : "oauth"})`;
+      log.info(`ready; standing orders v${SYSTEM_PROMPT_VERSION}`);
       return { ready: true, detail: this.readyDetail };
     } catch (e) {
       this.ready = false;
@@ -255,7 +258,12 @@ export class ClaudeBrain implements Brain {
 
   private async permission(toolName: string, input: Record<string, unknown>): Promise<PermissionDecision> {
     if (toolName.startsWith("mcp__hormes__")) return { behavior: "allow" };
-    if (["Read", "Glob", "Grep", "WebSearch", "WebFetch", "TodoWrite"].includes(toolName)) return { behavior: "allow" };
+    if (toolName === "TodoWrite") return { behavior: "allow" };
+    // The SDK's own Read/Glob/Grep/WebFetch/WebSearch would bypass classifyPath and
+    // classifyUrl (a Read of ~/.hormes/env, a WebFetch of 10.0.0.1). Every read goes
+    // through the hormes tools so the secret stores and private hosts stay gated.
+    const redirect: Record<string, string> = { Read: "read_file", Glob: "list_dir or search_files", Grep: "search_files", LS: "list_dir", WebFetch: "web_fetch", WebSearch: "web_search", Edit: "edit_file", Write: "write_file", MultiEdit: "edit_file", NotebookEdit: "edit_file" };
+    if (redirect[toolName]) return { behavior: "deny", message: `${toolName} is not available to the desktop brain; use the hormes tool ${redirect[toolName]} so the path and URL gates apply` };
     if (toolName === "Bash") {
       // Route shell through the same policy as run_shell so the confirmation
       // handshake is one mechanism, not two.
@@ -288,7 +296,7 @@ export class ClaudeBrain implements Brain {
     const session = this.session;
     if (!session || !this.ready) return Promise.resolve({ status: "failed", error: this.readyDetail });
     if (this.current) return Promise.resolve({ status: "failed", error: "already handling a task" });
-    this.opts.runner.attach(sink);
+    this.opts.runner.attach(sink, task);
     return new Promise<BrainResult>((resolve) => {
       this.current = { task, sink, resolve };
       task.signal.addEventListener("abort", () => {
@@ -299,15 +307,13 @@ export class ClaudeBrain implements Brain {
           resolve({ status: "cancelled" });
         }
       }, { once: true });
-      const prompt = [
-        task.confirmation ? "Kevin just said YES to the pending confirmation. Do that action now, then report." : "",
-        `Kevin said: "${task.request}"`,
-        task.dialogue ? `Recent conversation:\n${task.dialogue}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+      // The same words as the API brains; the circled regions ride as image blocks of
+      // this user turn (ClaudeSession builds Anthropic-shaped content), and the prompt
+      // says what each one is.
+      const attachments = loadAttachments(task);
+      const prompt = delegationPrompt(task, undefined, attachments);
       try {
-        session.send(prompt);
+        session.send(prompt, attachments.map((a) => ({ pngBase64: a.pngBase64 })));
       } catch (e) {
         this.current = undefined;
         resolve({ status: "failed", error: (e as Error).message });
@@ -352,7 +358,8 @@ export function zodShape(spec: ToolSpec): Record<string, z.ZodTypeAny> {
     if (prop.enum) t = z.enum(prop.enum as [string, ...string[]]);
     else if (type === "number" || type === "integer") t = z.number();
     else if (type === "boolean") t = z.boolean();
-    else if (type === "array") t = z.array(prop.items?.type === "number" ? z.number() : z.string());
+    // Arrays of numbers (coordinates), of [x, y] pairs (show_stroke), or of strings.
+    else if (type === "array") t = z.array(prop.items?.type === "number" ? z.number() : prop.items?.type === "array" ? z.array(z.number()) : z.string());
     else if (Array.isArray(prop.type)) t = z.union([z.string(), z.number()]);
     else t = z.string();
     if (prop.description) t = t.describe(prop.description);

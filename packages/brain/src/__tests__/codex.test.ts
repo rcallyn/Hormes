@@ -206,6 +206,9 @@ test("codex brain: one delegation replays a recorded run through the sink and th
   assert.deepEqual(scrubbed, { PATH: "/bin", CODEX_HOME: "/ch" });
   assert.ok(exec.prompt.startsWith(brainSystemPrompt().slice(0, 60)), "the shared standing orders come first");
   assert.ok(exec.prompt.includes(codexAddendum()));
+  assert.match(codexAddendum(), /must not be used to act on it or to read from it/, "the read-only sandbox does not stop reads; the orders do");
+  assert.match(codexAddendum(), /does not stop you reading ~\/\.hormes\/env, ~\/\.ssh/);
+  assert.match(codexAddendum(), /the same tool and exactly the same arguments/);
   assert.ok(exec.prompt.includes('Kevin said: "what app is open"'));
   assert.ok(!exec.prompt.includes("Earlier in this session"));
 
@@ -320,4 +323,32 @@ test("codex brain: a daemon that belongs to another process is not trusted with 
   assert.equal((await brain.handle(makeTask("x"), makeSink().sink)).status, "done");
   assert.ok(execLog().args.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(join(stateDir, "codex-tools.sock"))}}`));
   assert.deepEqual(foreign.calls, [], "nothing was routed into the other daemon");
+});
+
+test("codex brain: circled regions are attached with -i and named in the prompt; a file already gone is left out of both", async (t) => {
+  const { brain, dir, execLog } = makeBrain(t, {});
+  assert.equal((await brain.start()).ready, true);
+  const png = join(dir, "mark_1.png");
+  writeFileSync(png, "PNG");
+  const task = {
+    ...makeTask("what is this"),
+    attachments: [
+      { path: png, mediaType: "image/png" as const, note: "Kevin circled this region of his screen: 10,20 100×50 (global points)" },
+      { path: join(dir, "gone.png"), mediaType: "image/png" as const, note: "Kevin circled this region of his screen: 0,0 5×5 (global points)" },
+    ],
+  };
+  const result = await brain.handle(task, makeSink().sink);
+  assert.equal(result.status, "done");
+  const exec = execLog();
+  assert.deepEqual(exec.args.filter((_, i) => exec.args[i - 1] === "-i"), [png], "one -i per image that exists");
+  assert.ok(exec.args.indexOf("-i") < exec.args.indexOf("-c"), "images come before the -c flags, so the variadic -i never swallows the stdin marker");
+  assert.equal(exec.args[exec.args.length - 1], "-");
+  assert.ok(exec.prompt.includes('Kevin said: "what is this"\n\nAttached image 1: Kevin circled this region of his screen: 10,20 100×50 (global points)\nTreat the circled region'), exec.prompt.slice(-600));
+  assert.ok(!exec.prompt.includes("Attached image 2"), "the prompt numbers only the images that went in with -i");
+  assert.ok(!exec.prompt.includes("0,0 5×5"), exec.prompt.slice(-600));
+
+  // The argv builder alone: every image gets its own flag, none by default.
+  const args = codexExecArgs({ cwd: "/c", node: "n", tsxCli: "t", bridgePath: "b", socketPath: "s", images: ["/a.png", "/b.png"] });
+  assert.deepEqual(args.filter((_, i) => args[i - 1] === "-i"), ["/a.png", "/b.png"]);
+  assert.ok(!codexExecArgs({ cwd: "/c", node: "n", tsxCli: "t", bridgePath: "b", socketPath: "s" }).includes("-i"));
 });
