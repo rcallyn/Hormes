@@ -14,13 +14,15 @@ import { secretPathReason } from "@hormes/core";
  */
 
 /**
- * The path with every symlink resolved. For a path that does not exist yet, the
- * nearest existing ancestor is resolved and the rest appended, so a write through
- * a linked folder is judged by where it lands.
+ * The path with every symlink resolved, in the spelling on disk: `realpathSync.native` is
+ * realpath(3), which on APFS answers `~/.AWS/credentials` as `~/.aws/credentials`, so the
+ * secret stores are judged by their real names whatever case the model used (W1-6). For a
+ * path that does not exist yet, the nearest existing ancestor is resolved and the rest
+ * appended, so a write through a linked folder is judged by where it lands.
  */
 export function realPathOf(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     const parent = dirname(path);
     if (parent === path) return path;
@@ -43,33 +45,48 @@ export function secretReasonEither(path: string): string | undefined {
 // the one line the voice can say. They decide nothing: policy ran before the read.
 
 const HOME = homedir();
-const TCC_FOLDERS: readonly { readonly prefix: string; readonly lacks: string }[] = [
-  { prefix: join(HOME, "Desktop"), lacks: "access to the Desktop folder" },
-  { prefix: join(HOME, "Documents"), lacks: "access to the Documents folder" },
-  { prefix: join(HOME, "Downloads"), lacks: "access to the Downloads folder" },
-  { prefix: join(HOME, "Library"), lacks: "Full Disk Access" },
-  { prefix: join(HOME, ".Trash"), lacks: "Full Disk Access" },
+const TCC_FOLDERS: readonly { readonly name: string; readonly lacks: string }[] = [
+  { name: "Desktop", lacks: "access to the Desktop folder" },
+  { name: "Documents", lacks: "access to the Documents folder" },
+  { name: "Downloads", lacks: "access to the Downloads folder" },
+  { name: "Library", lacks: "Full Disk Access" },
+  { name: ".Trash", lacks: "Full Disk Access" },
 ];
 
+/**
+ * One spelling for comparisons: macOS answers /tmp, /var and /etc as /private/tmp…, and a
+ * temp HOME is often one of those, so the home and the path are both read without the
+ * /private in front (BL-07..10); a trailing slash is dropped.
+ */
+function withoutPrivate(path: string): string {
+  let p = path;
+  while (/^\/private(\/|$)/.test(p)) p = p.replace(/^\/private(?=\/|$)/, "") || "/";
+  return p.replace(/\/+$/, "") || "/";
+}
+
 /** Where a grant is obtained, for the line's tail. */
-export const PERMISSIONS_HINT = "Setup › Permissions › Ask for everything";
+export const PERMISSIONS_HINT = "Console › Permissions › Ask for everything";
 
 /** `~/x` and `$HOME/x` as absolute paths; anything else unchanged. */
-function expandHome(path: string): string {
-  if (path === "~") return HOME;
-  if (path.startsWith("~/")) return join(HOME, path.slice(2));
-  if (path.startsWith("$HOME/")) return join(HOME, path.slice(6));
+function expandHome(path: string, home: string = HOME): string {
+  if (path === "~") return home;
+  if (path.startsWith("~/")) return join(home, path.slice(2));
+  if (path.startsWith("$HOME/")) return join(home, path.slice(6));
   return path;
 }
 
 /** What Hormes lacks when macOS blocks `path`, or undefined for a path TCC does not guard. */
-export function tccGrantFor(path: string): string | undefined {
-  const p = expandHome(path).replace(/^\/private(\/|$)/, "/").replace(/\/+$/, "");
-  for (const f of TCC_FOLDERS) if (p === f.prefix || p.startsWith(f.prefix + sep)) return f.lacks;
+export function tccGrantFor(path: string, home: string = HOME): string | undefined {
+  const p = withoutPrivate(expandHome(path, home));
+  const h = withoutPrivate(home);
+  for (const f of TCC_FOLDERS) {
+    const prefix = join(h, f.name);
+    if (p === prefix || p.startsWith(prefix + sep)) return f.lacks;
+  }
   return undefined;
 }
 
-/** The line for a blocked path: "macOS blocked this: Hormes lacks Full Disk Access. Setup › Permissions › Ask for everything". */
+/** The line for a blocked path: "macOS blocked this: Hormes lacks Full Disk Access. Console › Permissions › Ask for everything". */
 export function macOSBlockedLine(path: string): string | undefined {
   const lacks = tccGrantFor(path);
   return lacks ? `macOS blocked this: Hormes lacks ${lacks}. ${PERMISSIONS_HINT}` : undefined;
@@ -354,7 +371,7 @@ export async function searchFiles(root: string, pattern: string, opts: SearchOpt
     if (isMacOSBlock(e) && macOSBlockedLine(root)) throw new Error(explainFsError(e, root));
   }
   if (opts.rg !== false) {
-    const viaRg = await ripgrep(root, mode, opts.glob, max, opts.rg, opts.signal);
+    const viaRg = await ripgrep(searchCandidates(root, opts.glob), mode, max, opts.rg, opts.signal);
     if (viaRg) return { hits: viaRg.filter((h) => !secretReasonEither(h.path)), via: "rg" };
   }
   return { hits: walkSearch(root, regex, opts.glob, max), via: "walk" };
@@ -367,14 +384,19 @@ export function ripgrepModeArgs(mode: SearchMode): string[] {
   return [mode.insensitive ? "-i" : "-s", ...(mode.multiline || mode.dotAll ? ["--multiline"] : []), ...(mode.dotAll ? ["--multiline-dotall"] : [])];
 }
 
-function ripgrep(root: string, mode: SearchMode, glob: string | undefined, max: number, bin: string | undefined, signal: AbortSignal | undefined): Promise<SearchHit[] | undefined> {
+function ripgrep(files: readonly string[], mode: SearchMode, max: number, bin: string | undefined, signal: AbortSignal | undefined): Promise<SearchHit[] | undefined> {
+  if (!files.length) return Promise.resolve([]);
   const candidates = bin ? [bin] : RG_CANDIDATES;
   const tryOne = (i: number): Promise<SearchHit[] | undefined> =>
     new Promise((resolve) => {
       const file = candidates[i];
       if (!file) return resolve(undefined);
-      const args = ["-n", "--no-heading", "--color", "never", "--max-count", "50", "--max-filesize", "1M", ...ripgrepModeArgs(mode), ...(glob ? ["-g", glob] : []), "-e", mode.pattern, root];
-      execFile(file, args, { timeout: 20_000, maxBuffer: 8 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout) => {
+      // Both engines receive the same bounded file list, including ignored/hidden
+      // documents and excluding generated folders, secrets and symlinks BEFORE reads.
+      // Search is line-based in both engines; inline m/s never changes that contract.
+      const args = ["--no-config", "--no-ignore", "-n", "-H", "--no-heading", "--color", "never", "--sort", "path", mode.insensitive ? "-i" : "-s", "-e", mode.pattern, "--", ...files];
+      execFile(file, args, { timeout: 20_000, maxBuffer: 8 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
+        if (stderr.includes("test preload") || stderr.includes("test fence")) return resolve(tryOne(i + 1));
         const code = (err as { code?: number | string } | null)?.code;
         if (err && code === "ENOENT") return resolve(tryOne(i + 1));
         // rg exits 1 for "no matches" and 2 for an error (a bad pattern, an unreadable root).
@@ -392,64 +414,42 @@ function ripgrep(root: string, mode: SearchMode, glob: string | undefined, max: 
   return tryOne(0);
 }
 
-function walkSearch(root: string, regex: RegExp, glob: string | undefined, max: number): SearchHit[] {
-  const hits: SearchHit[] = [];
+/** Shared traversal policy; rg must not independently decide which files exist. */
+function searchCandidates(root: string, glob: string | undefined): string[] {
+  const files: string[] = [];
   const matcher = glob ? globToRegExp(glob) : undefined;
-  let visited = 0;
-  const walk = (dir: string): void => {
-    if (hits.length >= max || visited >= MAX_SEARCH_FILES) return;
-    let names: string[];
-    try {
-      names = readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const name of names) {
-      if (hits.length >= max || visited >= MAX_SEARCH_FILES) return;
-      const full = join(dir, name);
-      if (secretPathReason(full)) continue;
-      let st: ReturnType<typeof lstatSync>;
-      try {
-        st = lstatSync(full);
-      } catch {
-        continue;
-      }
-      // Links are not followed: a link into a secret store would read it under an innocent name.
-      if (st.isSymbolicLink()) continue;
-      if (st.isDirectory()) {
-        if (!SKIP_DIRS.has(name)) walk(full);
-        continue;
-      }
-      if (!st.isFile() || st.size > MAX_SEARCH_FILE_BYTES) continue;
-      if (matcher) {
-        const subject = matcher.onBasename ? basename(full) : relative(root, full).split(sep).join("/");
-        if (!matcher.re.test(subject)) continue;
-      }
-      visited++;
-      let buf: Buffer;
-      try {
-        buf = readFileSync(full);
-      } catch {
-        continue;
-      }
-      if (isBinary(buf)) continue;
-      const lines = buf.toString("utf8").split("\n");
-      for (let i = 0; i < lines.length && hits.length < max; i++) {
-        if (regex.test(lines[i]!)) hits.push({ path: full, line: i + 1, text: lines[i]!.slice(0, 300) });
-      }
+  const walk = (path: string): void => {
+    if (files.length >= MAX_SEARCH_FILES || secretReasonEither(path)) return;
+    let st: ReturnType<typeof lstatSync>;
+    try { st = lstatSync(path); } catch { return; }
+    if (st.isSymbolicLink()) return;
+    if (st.isDirectory()) {
+      let names: string[];
+      try { names = readdirSync(path).sort(); } catch { return; }
+      for (const name of names) if (!SKIP_DIRS.has(name)) walk(join(path, name));
+    } else if (st.isFile() && st.size <= MAX_SEARCH_FILE_BYTES) {
+      const subject = matcher?.onBasename ? basename(path) : relative(root, path).split(sep).join("/");
+      if (!matcher || matcher.re.test(subject)) files.push(path);
     }
   };
-  if (existsSync(root) && statSync(root).isFile()) {
-    if (secretReasonEither(root)) return hits;
-    let buf: Buffer;
-    try {
-      buf = readFileSync(root);
-    } catch (e) {
-      rethrowExplained(e, root);
-    }
-    if (!isBinary(buf)) buf.toString("utf8").split("\n").forEach((l, i) => regex.test(l) && hits.length < max && hits.push({ path: root, line: i + 1, text: l.slice(0, 300) }));
-    return hits;
-  }
   walk(root);
+  return files;
+}
+
+function walkSearch(root: string, regex: RegExp, glob: string | undefined, max: number): SearchHit[] {
+  const hits: SearchHit[] = [];
+  for (const path of searchCandidates(root, glob)) {
+    if (hits.length >= max) break;
+    let buf: Buffer;
+    try { buf = readFileSync(path); } catch (e) {
+      if (path === root) rethrowExplained(e, root);
+      continue;
+    }
+    if (isBinary(buf)) continue;
+    const lines = buf.toString("utf8").split("\n");
+    for (let i = 0; i < lines.length && hits.length < max; i++) {
+      if (regex.test(lines[i]!)) hits.push({ path, line: i + 1, text: lines[i]!.slice(0, 300) });
+    }
+  }
   return hits;
 }

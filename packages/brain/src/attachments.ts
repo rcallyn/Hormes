@@ -1,11 +1,11 @@
 import { readFileSync } from "node:fs";
 import { logger } from "@hormes/core";
-import type { Rect } from "@hormes/protocol";
+import type { Rect, ScreenMark } from "@hormes/protocol";
 import type { BrainAttachment, BrainTask } from "./brain.ts";
 
 /**
- * Images that ride along with a task — today the regions Kevin circled on his
- * screen. The delegator turns pending ScreenMarks into BrainAttachments; each
+ * Images that ride along with a task — the regions User circled on his screen
+ * and the windows he captured whole. The delegator turns pending ScreenMarks into BrainAttachments; each
  * brain calls `loadAttachments` and encodes the pixels the way its transport
  * takes them (image blocks, image_url parts, `-i` files, input_image items).
  * The note is the same words everywhere so a "what is this?" means the same
@@ -32,20 +32,24 @@ export function loadAttachments(task: BrainTask): LoadedAttachment[] {
 }
 
 /**
- * The note every brain reads with a circled region: where it is, in global
- * points, and — once it is more than a minute old — how long ago, so a circle
- * from before a nap is weighed as such rather than read as "this, right now".
+ * The note every brain reads with a mark: where it is, in global points, and —
+ * once it is more than a minute old — how long ago, so a mark from before a nap
+ * is weighed as such rather than read as "this, right now". The verb follows how
+ * the mark was made: a stroke is "circled this region", a front window captured
+ * whole (`mark.window`, `source: "window"`) is "captured this window".
  */
-export function markNote(rect: Rect, ageMs = 0): string {
+export function markNote(rect: Rect, ageMs = 0, source?: ScreenMark["source"], userName = "User"): string {
   const where = `${Math.round(rect.x)},${Math.round(rect.y)} ${Math.round(rect.w)}×${Math.round(rect.h)} (global points)`;
-  return `Kevin circled this region of his screen: ${where}${markAge(ageMs)}`;
+  const window = source === "window";
+  const what = window ? "captured this window of the screen" : "circled this region of the screen";
+  return `${userName} ${what}: ${where}${markAge(ageMs, window ? "captured" : "circled")}`;
 }
 
-function markAge(ageMs: number): string {
+function markAge(ageMs: number, verb: "circled" | "captured"): string {
   if (!Number.isFinite(ageMs) || ageMs < 60_000) return "";
   const minutes = Math.round(ageMs / 60_000);
-  if (minutes < 120) return `, circled ${minutes} min ago`;
-  return `, circled ${Math.round(minutes / 60)} h ago`;
+  if (minutes < 120) return `, ${verb} ${minutes} min ago`;
+  return `, ${verb} ${Math.round(minutes / 60)} h ago`;
 }
 
 /**
@@ -53,10 +57,10 @@ function markAge(ageMs: number): string {
  * Pass the images that actually go to the model with this prompt — the numbering
  * must match what the transport sends, not what the task listed.
  */
-export function attachmentsPreamble(attachments: readonly BrainAttachment[] | undefined): string {
+export function attachmentsPreamble(attachments: readonly BrainAttachment[] | undefined, userName = "User"): string {
   if (!attachments || attachments.length === 0) return "";
   const lines = attachments.map((a, i) => `Attached image ${i + 1}: ${a.note}`);
-  if (attachments.some((a) => a.kind !== "screen")) lines.push("Treat the circled region as what Kevin means by \"this\"; look at it before answering.");
+  if (attachments.some((a) => a.kind !== "screen")) lines.push(`Treat what ${userName} circled or captured as "this"; look at it before answering.`);
   return lines.join("\n");
 }
 

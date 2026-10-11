@@ -2,9 +2,10 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, openSync, closeSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { logger, newId } from "@hormes/core";
+import { envFilePath, logger, newId } from "@hormes/core";
 import { SECRET_KEYS } from "@hormes/protocol";
 import { PERMISSIONS_HINT, macOSBlockedLine, tccGrantFor } from "./files.ts";
+import { assertWorkspaceIntegrity, shellSandbox } from "./sandbox.ts";
 
 /**
  * Running commands for the brain: one shell, one AppleScript, one background
@@ -34,7 +35,7 @@ export function scrubbedEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.Proce
 
 /**
  * The command as the login shell runs it. `zsh -l` sources ~/.zprofile, which on
- * Kevin's Mac exports the very key scrubbedEnv removed; so the keys are unset
+ * User's Mac exports the very key scrubbedEnv removed; so the keys are unset
  * again after the rc files ran and before the command starts.
  */
 export function loginShellCommand(command: string): string {
@@ -63,10 +64,13 @@ const SECRET_NAME = /(^|_)(API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|PASSPHRASE|CRED
 
 /**
  * The secret values Hormes knows about: its own keys from the environment and
- * every secret-named value in ~/.hormes/env (the file also carries settings such
- * as HORMES_BRAIN_MODEL, which must not be blanked out of results). A value
- * shorter than 8 characters is not redacted (it would blank ordinary words); a
- * file that cannot be read adds nothing.
+ * every secret-named value in the state dir's env file (the file also carries
+ * settings such as HORMES_BRAIN_MODEL, which must not be blanked out of results).
+ * The file is core's envFilePath() over this env and home, the one loadEnv reads:
+ * <HORMES_STATE_DIR>/env, or ~/.hormes/env when the variable is unset or empty.
+ * Never $HOME/.hormes/env behind a state dir set elsewhere (W2-9).
+ * A value shorter than 8 characters is not redacted (it would blank ordinary
+ * words); a file that cannot be read adds nothing.
  */
 export function secretValues(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string[] {
   const values = new Set<string>();
@@ -75,7 +79,7 @@ export function secretValues(env: NodeJS.ProcessEnv = process.env, home: string 
     if (v && v.length >= 8) values.add(v);
   }
   try {
-    const text = readFileSync(join(home, ".hormes", "env"), "utf8");
+    const text = readFileSync(envFilePath(env, home), "utf8");
     for (const line of text.split("\n")) {
       const m = /^\s*(?:export\s+)?([A-Za-z_]\w*)\s*=\s*(.*)$/.exec(line);
       if (!m) continue;
@@ -90,7 +94,39 @@ export function secretValues(env: NodeJS.ProcessEnv = process.env, home: string 
   return [...values];
 }
 
-/** Every known secret value (and its base64 form) and every secret-shaped string in `text`, replaced. */
+/**
+ * Secrets told by their label rather than their shape (W1-6): the line names what follows.
+ * An AWS secret key line (`aws_secret_access_key = …`), a URL's password
+ * (`postgres://app:…@host`), and a `password` / `secret` / `token` key with a literal value.
+ */
+const AWS_SECRET_LINE = /\b(aws_secret_access_key|aws_session_token)(\s*[=:]\s*["']?)([A-Za-z0-9/+=]{16,})/gi;
+const URL_PASSWORD = /\b([a-z][a-z0-9+.-]*:\/\/[^\s:@/]*:)([^\s@/]+)(@)/gi;
+const LABELLED_SECRET = /(\b[A-Za-z0-9_.-]*(?:password|passwd|passphrase|secret|token)(?:[_.-]?(?:key|value))?["']?\s*[=:]\s*)(?:(["'])([^"'\n]{6,}?)\2|([^\s"'`,;()[\]{}<>]{8,}))/gi;
+
+/**
+ * Whether a labelled value is a literal, not code: an unquoted value is struck only when it
+ * carries a digit or a symbol (a password has one; `getToken`, `required` and
+ * `process.env.SECRET` do not), is not a bare number (a count, a time), is no member chain,
+ * and is not called.
+ */
+function literalSecret(value: string, after: string): boolean {
+  if (after.startsWith("(") || /^\d+$/.test(value)) return false;
+  if (/^[A-Za-z_$][\w$]*(\.[A-Za-z_$][\w$]*)+$/.test(value)) return false;
+  return /[\d!@#$%^&*+=~?]/.test(value);
+}
+
+function redactLabelled(text: string): string {
+  return text
+    .replace(AWS_SECRET_LINE, (_, key: string, sep: string) => `${key}${sep}${REDACTED}`)
+    .replace(URL_PASSWORD, (_, head: string, _pw: string, at: string) => `${head}${REDACTED}${at}`)
+    .replace(LABELLED_SECRET, (whole: string, head: string, quote: string | undefined, quoted: string | undefined, bare: string | undefined, offset: number, all: string) => {
+      if (quoted !== undefined) return quoted.includes(REDACTED) ? whole : `${head}${quote}${REDACTED}${quote}`;
+      if (bare === undefined || bare.startsWith("[") || !literalSecret(bare, all.slice(offset + whole.length))) return whole;
+      return `${head}${REDACTED}`;
+    });
+}
+
+/** Every known secret value (and its base64 form), every secret-shaped string and every labelled secret in `text`, replaced. */
 export function redactSecrets(text: string, values: readonly string[]): string {
   let out = text;
   for (const v of values) {
@@ -102,13 +138,13 @@ export function redactSecrets(text: string, values: readonly string[]): string {
     if (uri !== v) out = out.split(uri).join(REDACTED);
   }
   for (const re of SECRET_SHAPES) out = out.replace(re, REDACTED);
-  return out;
+  return redactLabelled(out);
 }
 
 /**
- * The redactor the runner applies to every text a model reads. The env file is
- * re-read when it changed, so a key Kevin rotates through Setup is covered without
- * a restart.
+ * The redactor the runner applies to every text a model reads. The state dir's
+ * env file is re-read when it changed, so a key User rotates through Setup is
+ * covered without a restart.
  */
 export class SecretRedactor {
   private values: string[] = [];
@@ -123,7 +159,7 @@ export class SecretRedactor {
     this.readAt = t;
     let mtime = 0;
     try {
-      mtime = statSync(join(this.home, ".hormes", "env")).mtimeMs;
+      mtime = statSync(envFilePath(this.env, this.home)).mtimeMs;
     } catch {
       mtime = 0;
     }
@@ -187,6 +223,12 @@ export interface ShellRunOptions {
   readonly stdin?: string | undefined;
   /** Program and argv instead of a zsh command line. */
   readonly argv?: readonly string[] | undefined;
+  /** Additional checkouts the sandbox must never write. Only internal callers set this. */
+  readonly protectedRoots?: readonly string[] | undefined;
+  readonly secretRoots?: readonly string[] | undefined;
+  /** Internal verifier capability. Model tool arguments never populate these fields. */
+  readonly readOnlyWorkspace?: boolean;
+  readonly writableFiles?: readonly string[];
 }
 
 export interface ShellRunResult {
@@ -198,17 +240,26 @@ export interface ShellRunResult {
   readonly cancelled: boolean;
   readonly ms: number;
   readonly error?: string | undefined;
+  readonly isolated?: boolean;
 }
 
 /**
- * Run to completion under a timeout. The command goes through `zsh -lc` so
- * Kevin's PATH applies, with Hormes's keys unset again after the rc files ran;
- * `argv` bypasses the shell for programs the caller spawns itself (git, pnpm,
- * osascript).
+ * Commands run through an isolated, non-login zsh. `argv` is an internal capability
+ * for fixed native operations and trusted self-edit checks, never a model parameter.
  */
-export function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
+export async function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
   const started = Date.now();
   const timeoutMs = Math.min(MAX_SHELL_TIMEOUT_MS, Math.max(1000, opts.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS));
+  let sandbox: ReturnType<typeof shellSandbox> | undefined;
+  try {
+    if (!opts.argv?.length) {
+      const cwd = opts.cwd ?? process.env["HOME"] ?? homedir();
+      await assertWorkspaceIntegrity(cwd, opts.signal);
+      sandbox = shellSandbox(cwd, opts.protectedRoots, opts.secretRoots, opts.readOnlyWorkspace ? opts.writableFiles ?? [] : undefined);
+    }
+  } catch (e) {
+    return { code: null, signal: null, stdout: "", stderr: "", timedOut: false, cancelled: opts.signal?.aborted === true, ms: Date.now() - started, error: (e as Error).message };
+  }
   return new Promise((resolve) => {
     const out = new BoundedBuffer();
     const err = new BoundedBuffer();
@@ -216,11 +267,13 @@ export function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
     let cancelled = false;
     let spawnError: string | undefined;
     let child: ChildProcess;
-    const [file, args] = opts.argv && opts.argv.length > 0 ? [opts.argv[0]!, opts.argv.slice(1)] : ["/bin/zsh", ["-lc", loginShellCommand(opts.command)]];
     try {
+      const argv = sandbox ? [...sandbox.argv, opts.command] : opts.argv!;
+      const [file, ...args] = argv;
       // Its own process group, so a timeout or a stop reaches the whole tree (zsh and the sleep it spawned), not just the shell.
-      child = spawn(file, args, { cwd: opts.cwd ?? process.env["HOME"], env: scrubbedEnv(opts.env ?? process.env), stdio: ["pipe", "pipe", "pipe"], detached: true });
+      child = spawn(file!, args, { cwd: opts.cwd ?? process.env["HOME"], env: sandbox?.env ?? scrubbedEnv(opts.env ?? process.env), stdio: ["pipe", "pipe", "pipe"], detached: true });
     } catch (e) {
+      sandbox?.dispose();
       resolve({ code: null, signal: null, stdout: "", stderr: "", timedOut: false, cancelled: false, ms: Date.now() - started, error: (e as Error).message });
       return;
     }
@@ -247,7 +300,8 @@ export function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
       settled = true;
       clearTimeout(timer);
       opts.signal?.removeEventListener("abort", onAbort);
-      resolve({ code, signal, stdout: out.toString(), stderr: err.toString(), timedOut, cancelled, ms: Date.now() - started, ...(spawnError ? { error: spawnError } : {}) });
+      sandbox?.dispose();
+      resolve({ code, signal, stdout: out.toString(), stderr: err.toString(), timedOut, cancelled, ms: Date.now() - started, ...(sandbox ? { isolated: true } : {}), ...(spawnError ? { error: spawnError } : {}) });
     };
     const timer = setTimeout(() => {
       timedOut = true;
@@ -294,7 +348,7 @@ export function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
 export function describeShellResult(r: ShellRunResult, cap = OUTPUT_CAP, command?: string): string {
   const body = `${r.stdout}${r.stderr ? `${r.stdout ? "\n" : ""}[stderr] ${r.stderr}` : ""}`.trim();
   const status = r.error ? `[could not start: ${r.error}] ` : r.timedOut ? `[stopped after ${Math.round(r.ms / 1000)} s] ` : r.cancelled ? "[cancelled] " : r.code === 0 ? "" : `[exit ${r.code ?? r.signal ?? "?"}] `;
-  const blocked = macOSBlockInOutput(r.stderr, command, r.stdout.trim().length > 0);
+  const blocked = r.isolated && /operation not permitted|permission denied|sandbox.*deny/i.test(r.stderr) ? "Shell isolation denied access. Use the named workspace or a permitted tool; do not grant broader Mac permissions to bypass isolation." : r.isolated ? undefined : macOSBlockInOutput(r.stderr, command, r.stdout.trim().length > 0);
   return `${status}${truncateOutput(body, cap) || "(no output)"}${blocked ? `\n${blocked}` : ""}`;
 }
 
@@ -357,7 +411,7 @@ export interface BackgroundJob {
 }
 
 /**
- * Long-running commands (a dev server, a build watcher) started for Kevin and
+ * Long-running commands (a dev server, a build watcher) started for User and
  * left running. Each one logs to <stateDir>/shell/<id>.log; its pid is what the
  * policy calls an owned process, so a later `kill <pid>` runs without asking.
  */
@@ -366,26 +420,36 @@ export class BackgroundJobs {
 
   constructor(private readonly stateDir: string) {}
 
-  start(command: string, cwd: string, env: NodeJS.ProcessEnv = process.env): BackgroundJob {
+  async start(command: string, cwd: string, env: NodeJS.ProcessEnv = process.env, protectedRoots?: readonly string[], signal?: AbortSignal): Promise<BackgroundJob> {
+    await assertWorkspaceIntegrity(cwd, signal);
+    const sandbox = shellSandbox(cwd, protectedRoots, [this.stateDir]);
     const dir = join(this.stateDir, "shell");
     mkdirSync(dir, { recursive: true });
     const logPath = join(dir, `${newId("job")}.log`);
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
     try {
-      child = spawn("/bin/zsh", ["-lc", loginShellCommand(command)], { cwd, env: scrubbedEnv(env), detached: true, stdio: ["ignore", fd, fd] });
+      child = spawn(sandbox.argv[0]!, [...sandbox.argv.slice(1), command], { cwd, env: sandbox.env, detached: true, stdio: ["ignore", fd, fd] });
+    } catch (error) {
+      sandbox.dispose();
+      throw error;
     } finally {
       closeSync(fd);
     }
-    if (child.pid === undefined) throw new Error("the process did not start");
+    if (child.pid === undefined) {
+      child.on("error", () => {}); // A failed async spawn still emits error after this return.
+      sandbox.dispose();
+      throw new Error("the process did not start");
+    }
     child.unref();
     const job: BackgroundJob = { pid: child.pid, command, logPath, startedAt: Date.now(), cwd };
     this.jobs.set(job.pid, job);
     child.on("exit", (code, signal) => {
+      sandbox.dispose();
       log.info(`background job ${job.pid} ended (${code ?? signal ?? "?"}): ${command.slice(0, 60)}`);
       this.jobs.delete(job.pid);
     });
-    child.on("error", (e) => log.warn(`background job ${job.pid}: ${e.message}`));
+    child.on("error", (e) => { sandbox.dispose(); log.warn(`background job ${job.pid}: ${e.message}`); });
     return job;
   }
 
@@ -398,7 +462,13 @@ export class BackgroundJobs {
     return [...this.jobs.values()];
   }
 
-  /** Stop the jobs started at or after `since` (Kevin pressed stop mid-task); returns how many were signalled. */
+  /** Explicit capability to stop one owned job; never give a sandbox permission to signal unrelated processes. */
+  stop(pid: number, signal: NodeJS.Signals = "SIGTERM"): boolean {
+    if (!this.jobs.has(pid)) return false;
+    try { process.kill(-pid, signal); return true; } catch { return false; }
+  }
+
+  /** Stop the jobs started at or after `since` (User pressed stop mid-task); returns how many were signalled. */
   stopSince(since: number): number {
     let n = 0;
     for (const job of this.list()) {

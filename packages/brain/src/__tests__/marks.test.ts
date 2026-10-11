@@ -8,7 +8,7 @@ import { ComputerToolset, ConfirmationState } from "@hormes/hands";
 import { AgentRegistry } from "@hormes/agents";
 import { Transcript, type LiveSession } from "@hormes/live";
 import type { OverlayCommand, Rect, ScreenMark } from "@hormes/protocol";
-import { ToolRunner, resultText, traceDurationMs } from "../runner.ts";
+import { ToolRunner, resultText } from "../runner.ts";
 import { Delegator } from "../delegator.ts";
 import { AnthropicBrain } from "../anthropic.ts";
 import { OpenAICompatibleBrain } from "../compatible.ts";
@@ -22,7 +22,7 @@ import { brainSystemPrompt, type Brain, type BrainAttachment, type BrainTask } f
 import { FakeHands, fakeServer, makeRunner, makeSink, makeTask } from "./fakes.ts";
 
 /**
- * Kevin circles a region → the delegator hands it to the brain → the brain
+ * User circles a region → the delegator hands it to the brain → the brain
  * shows it to the model; and the other way round: a brain draws on the screen
  * and the hands fly the blob to where they act. Everything here runs against
  * the fakes; no overlay, no Live session, no real screen.
@@ -56,7 +56,7 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 
 const PNG = Buffer.from("PNG-A");
 const REGION: Rect = { x: 10.4, y: 20, w: 100, h: 50.6 };
-const NOTE = "Kevin circled this region of his screen: 10,20 100×51 (global points)";
+const NOTE = "User circled this region of the screen: 10,20 100×51 (global points)";
 
 /** A state dir with one mark screenshot in it, and the attachment that points at it. */
 function markFixture(): { dir: string; attachment: BrainAttachment; rel: string } {
@@ -65,6 +65,17 @@ function markFixture(): { dir: string; attachment: BrainAttachment; rel: string 
   mkdirSync(join(dir, "shots", "2026-09-10"), { recursive: true });
   writeFileSync(join(dir, rel), PNG);
   return { dir, rel, attachment: { path: join(dir, rel), mediaType: "image/png", note: markNote(REGION) } };
+}
+
+/** Attachment content stays exact after the application-owned date and mode context. */
+function assertPromptSuffix(actual: unknown, expected: string): void {
+  assert.equal(typeof actual, "string");
+  const text = actual as string;
+  assert.match(text, /^Current local date: \d{4}-\d{2}-\d{2} \(/);
+  assert.match(text, /General assistant interaction:/);
+  const userAt = text.indexOf('User said: "');
+  assert.ok(userAt > 0);
+  assert.equal(text.slice(userAt), expected);
 }
 
 function withAttachments(task: BrainTask, attachments: readonly BrainAttachment[]): BrainTask {
@@ -86,7 +97,7 @@ test("delegator: pending marks ride with the next task as absolute paths and are
   let settledCalls = 0;
   const live = new FakeLive();
   const transcript = new Transcript(() => 0);
-  transcript.push({ speaker: "kevin", delta: "what is this", startMs: 0, endMs: 600 });
+  transcript.push({ speaker: "user", delta: "what is this", startMs: 0, endMs: 600 });
   const seen: BrainTask[] = [];
   let answer: () => Promise<{ status: "done" | "failed"; summary?: string; error?: string }> = async () => ({ status: "done", summary: "the Save button." });
   const brain: Brain = {
@@ -137,7 +148,7 @@ test("delegator: pending marks ride with the next task as absolute paths and are
   assert.deepEqual(released, []);
 
   // Nothing pending → no attachments field at all, nothing consumed, and no waiting either.
-  transcript.push({ speaker: "kevin", delta: " and now?", startMs: 700, endMs: 1200 });
+  transcript.push({ speaker: "user", delta: " and now?", startMs: 700, endMs: 1200 });
   live.emit("delegation", "item_2", "client", 1200);
   await sleep(30);
   assert.equal(seen.length, 2);
@@ -148,7 +159,7 @@ test("delegator: pending marks ride with the next task as absolute paths and are
   // The brain never took the task (restarting, busy): the marks are pending again for the next one.
   marks.push({ id: "mark_4", rect: REGION, at: 4, screenshotPath: rel, consumed: false });
   answer = async () => ({ status: "failed", error: "the brain is restarting" });
-  transcript.push({ speaker: "kevin", delta: " and this?", startMs: 1300, endMs: 1800 });
+  transcript.push({ speaker: "user", delta: " and this?", startMs: 1300, endMs: 1800 });
   live.emit("delegation", "item_3", "client", 1800);
   await sleep(30);
   assert.equal(seen.length, 3);
@@ -157,7 +168,7 @@ test("delegator: pending marks ride with the next task as absolute paths and are
   assert.deepEqual(released, [["mark_4"]], "a failed task gives the marks back");
   assert.equal(marks.find((m) => m.id === "mark_4")!.consumed, false);
   answer = async () => ({ status: "done", summary: "ok." });
-  transcript.push({ speaker: "kevin", delta: " again", startMs: 1900, endMs: 2200 });
+  transcript.push({ speaker: "user", delta: " again", startMs: 1900, endMs: 2200 });
   live.emit("delegation", "item_4", "client", 2200);
   await sleep(30);
   assert.equal(seen[3]!.attachments?.length, 1, "and they ride with the next task");
@@ -168,7 +179,7 @@ test("delegator: pending marks ride with the next task as absolute paths and are
   assert.equal(loaded.length, 1);
   assert.equal(loaded[0]!.pngBase64, PNG.toString("base64"));
   assert.equal(loaded[0]!.note, NOTE);
-  assert.match(attachmentsPreamble(seen[0]!.attachments), /^Attached image 1: Kevin circled this region of his screen: 10,20 100×51 \(global points\)\n/);
+  assert.match(attachmentsPreamble(seen[0]!.attachments), /^Attached image 1: User circled this region of the screen: 10,20 100×51 \(global points\)\n/);
   assert.equal(attachmentsPreamble(undefined), "");
   assert.equal(attachmentsPreamble([]), "");
 
@@ -178,15 +189,15 @@ test("delegator: pending marks ride with the next task as absolute paths and are
   assert.equal(markNote(REGION, 5 * 3_600_000), `${NOTE}, circled 5 h ago`);
 
   // The prompt numbers the images that really go in; the history version names the regions without claiming pixels.
-  const two: BrainAttachment[] = [seen[0]!.attachments![0]!, { path: join(dir, "gone.png"), mediaType: "image/png", note: "Kevin circled this region of his screen: 0,0 5×5 (global points)" }];
+  const two: BrainAttachment[] = [seen[0]!.attachments![0]!, { path: join(dir, "gone.png"), mediaType: "image/png", note: "User circled this region of the screen: 0,0 5×5 (global points)" }];
   const task = withAttachments(makeTask("what is this"), two);
   assert.match(delegationPrompt(task), /Attached image 1: .*10,20 100×51.*\nAttached image 2: .*0,0 5×5/);
-  const onlyLoaded = delegationPrompt(task, "Kevin", loadAttachments(task));
+  const onlyLoaded = delegationPrompt(task, "User", loadAttachments(task));
   assert.match(onlyLoaded, /Attached image 1: .*10,20 100×51/);
   assert.ok(!onlyLoaded.includes("Attached image 2"), onlyLoaded);
   assert.ok(!onlyLoaded.includes("0,0 5×5"), onlyLoaded);
   const history = historyPrompt(task);
-  assert.equal(history, `Kevin said: "what is this"\n\n${NOTE}\nKevin circled this region of his screen: 0,0 5×5 (global points)`);
+  assertPromptSuffix(history, `User said: "what is this"\n\n${NOTE}\nUser circled this region of the screen: 0,0 5×5 (global points)`);
   assert.equal(attachmentsRecap(undefined), "");
   assert.equal(historyPrompt(makeTask("plain")), delegationPrompt(makeTask("plain")));
 });
@@ -199,53 +210,27 @@ test("runner: the show_* tools map screenshot pixels to global points and put sh
   const steps: string[] = [];
   runner.attach({ thinking: () => undefined, commentary: () => undefined, step: (s) => steps.push(`${s.kind}:${s.tool?.name ?? ""}`), screenshot: () => undefined });
 
-  // Before any screenshot the numbers are global points as given. By default the blob
-  // draws the shape by hand: an orb.trace along the shape's points; `quick` stamps it.
+  // Drawings are ordinary screen annotations, independent of waveform position.
   let r = await runner.run("show_circle", { x: 300, y: 200, radius: 40, label: "here" });
   assert.equal(r.result.kind, "text");
-  assert.match(resultText(r.result), /^drew a circle at 300,200 \(global points\), radius 40; the blob is drawing it; fades in 6 s$/);
-  const traced = overlays[0] as Extract<OverlayCommand, { cmd: "orb.trace" }>;
-  assert.equal(traced.cmd, "orb.trace");
-  assert.equal(traced.points.length, 40, "a circle is sampled to 40 points");
-  assert.equal(traced.closed, true);
-  assert.equal(traced.label, "here");
-  assert.equal(traced.tone, "accent");
-  assert.equal(traced.reason, "show_circle");
-  assert.deepEqual(traced.points[0], { x: 300, y: 160 }, "starts at the top");
-  assert.ok(traced.points.every((pt) => Math.abs(Math.hypot(pt.x - 300, pt.y - 200) - 40) < 1e-6), "every point is on the circle");
-  r = await runner.run("show_circle", { x: 300, y: 200, radius: 40, label: "here", quick: true });
-  assert.deepEqual(overlays[1], { cmd: "circle", x: 300, y: 200, radius: 40, label: "here", tone: "accent" }, "quick: an instant stamp");
-  assert.match(resultText(r.result), /stamped; fades in 6 s$/);
+  assert.match(resultText(r.result), /^drew a circle at 300,200 \(global points\), radius 40; fades in 6 s$/);
+  assert.deepEqual(overlays[0], { cmd: "circle", x: 300, y: 200, radius: 40, label: "here", tone: "accent" });
 
-  // After a screenshot (FakeHands: 100x50 px covering 200x100 points → 0.5 px per point) pixels become points through the same mapping the clicks use.
+  // Screenshot pixels map to global points exactly as computer-use coordinates do.
   await runner.run("screenshot", {});
-  r = await runner.run("show_circle", { x: 50, y: 25, radius: 10, ttlMs: 2000, quick: true });
-  assert.deepEqual(overlays[2], { cmd: "circle", x: 100, y: 50, radius: 20, ttlMs: 2000, tone: "accent" });
+  r = await runner.run("show_circle", { x: 50, y: 25, radius: 10, ttlMs: 2000 });
+  assert.deepEqual(overlays[1], { cmd: "circle", x: 100, y: 50, radius: 20, ttlMs: 2000, tone: "accent" });
   assert.match(resultText(r.result), /fades in 2 s/);
-  await runner.run("show_arrow", { from: [0, 0], to: [50, 25], label: "drag it here", quick: true });
-  assert.deepEqual(overlays[3], { cmd: "arrow", from: { x: 0, y: 0 }, to: { x: 100, y: 50 }, label: "drag it here", tone: "accent" });
-  // A traced arrow: the shaft is dragged as a line, the head stamped once the trace should have landed.
   await runner.run("show_arrow", { from: [0, 0], to: [50, 25], label: "drag it here" });
-  assert.deepEqual(overlays[4], { cmd: "orb.trace", points: [{ x: 0, y: 0 }, { x: 100, y: 50 }], closed: false, tone: "accent", reason: "show_arrow" });
-  assert.equal(overlays.length, 5, "the head waits for the trace");
-  await new Promise((res) => setTimeout(res, traceDurationMs([{ x: 0, y: 0 }, { x: 100, y: 50 }]) + 80));
-  const head = overlays[5] as Extract<OverlayCommand, { cmd: "arrow" }>;
-  assert.equal(head.cmd, "arrow");
-  assert.deepEqual(head.to, { x: 100, y: 50 });
-  assert.equal(head.label, "drag it here");
-  assert.ok(Math.abs(Math.hypot(head.from.x - 100, head.from.y - 50) - 28) < 1e-6, "the head's shaft is 28 points long, ending at the tip");
-  await runner.run("show_rect", { rect: [10, 10, 20, 5], quick: true });
-  assert.deepEqual(overlays[6], { cmd: "rect", rect: { x: 20, y: 20, w: 40, h: 10 }, tone: "accent" });
+  assert.deepEqual(overlays[2], { cmd: "arrow", from: { x: 0, y: 0 }, to: { x: 100, y: 50 }, label: "drag it here", tone: "accent" });
   await runner.run("show_rect", { rect: [10, 10, 20, 5] });
-  assert.deepEqual(overlays[7], { cmd: "orb.trace", points: [{ x: 20, y: 20 }, { x: 60, y: 20 }, { x: 60, y: 30 }, { x: 20, y: 30 }], closed: true, tone: "accent", reason: "show_rect" }, "a rect is its corners, closed");
-  await runner.run("show_text", { x: 5, y: 5, text: "start here", ttlMs: 100 }); // too short to see; clamped up; always instant
-  assert.deepEqual(overlays[8], { cmd: "text", x: 10, y: 10, text: "start here", ttlMs: 500, tone: "accent" });
-  await runner.run("show_stroke", { points: [[0, 0], [10, 0], [10, 10]], ttl_ms: 600_000, quick: true }); // and clamped down
-  assert.deepEqual(overlays[9], { cmd: "stroke", points: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 20 }], ttlMs: 60_000, tone: "accent" });
-  await runner.run("show_stroke", { points: [[0, 0], [10, 0], [10, 10]] });
-  assert.deepEqual(overlays[10], { cmd: "orb.trace", points: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 20 }], closed: false, tone: "accent", reason: "show_stroke" }, "a stroke is traced as given");
+  assert.deepEqual(overlays[3], { cmd: "rect", rect: { x: 20, y: 20, w: 40, h: 10 }, tone: "accent" });
+  await runner.run("show_text", { x: 5, y: 5, text: "start here", ttlMs: 100 });
+  assert.deepEqual(overlays[4], { cmd: "text", x: 10, y: 10, text: "start here", ttlMs: 500, tone: "accent" });
+  await runner.run("show_stroke", { points: [[0, 0], [10, 0], [10, 10]], ttl_ms: 600_000 });
+  assert.deepEqual(overlays[5], { cmd: "stroke", points: [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 20 }], ttlMs: 60_000, tone: "accent" });
   r = await runner.run("show_clear", {});
-  assert.deepEqual(overlays[11], { cmd: "clear" });
+  assert.deepEqual(overlays[6], { cmd: "clear" });
   assert.equal(resultText(r.result), "cleared the drawings");
 
   // Bad input is an error the model can read, not a crash, and draws nothing.
@@ -254,12 +239,8 @@ test("runner: the show_* tools map screenshot pixels to global points and put sh
   assert.equal((await runner.run("show_circle", { x: "a", y: 1, radius: 2 })).result.kind, "error");
   assert.equal((await runner.run("show_rect", { rect: [1, 2, 3] })).result.kind, "error");
   assert.equal((await runner.run("show_text", { x: 1, y: 2, text: "  " })).result.kind, "error");
-  assert.equal(overlays.length, 12);
+  assert.equal(overlays.length, 7);
   assert.ok(steps.includes("tool:show_circle") && steps.includes("error:show_stroke"), steps.join(" | "));
-  // Every drawing tool but show_text and show_clear takes `quick`.
-  for (const name of ["show_circle", "show_arrow", "show_rect", "show_stroke"]) assert.ok("quick" in specByName(name)!.parameters.properties, `${name} has quick`);
-  assert.ok(!("quick" in specByName("show_text")!.parameters.properties));
-
   // The specs are in the shared table (every brain sees them), the thinking channel has words for them, and the standing orders mention drawing.
   for (const s of DRAW_SPECS) assert.equal(specByName(s.name), s);
   assert.deepEqual(ALL_TOOL_SPECS.filter((s) => s.name.startsWith("show_")).map((s) => s.name), ["show_circle", "show_arrow", "show_rect", "show_text", "show_stroke", "show_clear"]);
@@ -270,7 +251,7 @@ test("runner: the show_* tools map screenshot pixels to global points and put sh
   const shape = zodShape(specByName("show_stroke")!);
   assert.deepEqual(shape["points"]!.parse([[1, 2], [3, 4]]), [[1, 2], [3, 4]]);
   assert.throws(() => shape["points"]!.parse([1, 2]));
-  assert.equal(Object.keys(zodShape(specByName("show_circle")!)).sort().join(","), "label,quick,radius,ttlMs,x,y");
+  assert.equal(Object.keys(zodShape(specByName("show_circle")!)).sort().join(","), "label,radius,ttlMs,x,y");
 
   // Without an overlay hook (a runner-only engine) the tool still answers instead of failing.
   const { runner: bare } = makeRunner();
@@ -287,7 +268,7 @@ class ActingHands extends FakeHands {
   }
 }
 
-test("toolset: the blob flies to clicks, drags, scrolls, presses and typing; a drag is traced and a zoom frames its region", async () => {
+test("toolset: click feedback, drag paths and zoom frames stay visible without autonomous waveform movement", async () => {
   const hands = new ActingHands();
   const cmds: OverlayCommand[] = [];
   const ts = new ComputerToolset({ hands, confirmations: new ConfirmationState(), annotate: (c) => cmds.push(c) });
@@ -296,28 +277,25 @@ test("toolset: the blob flies to clicks, drags, scrolls, presses and typing; a d
 
   assert.equal((await ts.run("left_click", { coordinate: [50, 25] })).kind, "text");
   assert.deepEqual(cmds.slice(), [
-    { cmd: "orb.fly", x: 100, y: 50, dwellMs: 1500, reason: "left_click" },
     { cmd: "click-pulse", x: 100, y: 50 },
   ]);
   cmds.length = 0;
 
   assert.equal((await ts.run("double_click", { coordinate: [50, 25] })).kind, "text");
-  assert.equal(cmds[0]?.cmd, "orb.fly");
-  assert.equal((cmds[0] as { reason?: string }).reason, "double_click");
+  assert.deepEqual(cmds, [{ cmd: "click-pulse", x: 100, y: 50 }]);
   cmds.length = 0;
 
   assert.equal((await ts.run("left_click_drag", { start_coordinate: [0, 0], coordinate: [50, 25] })).kind, "text");
   assert.deepEqual(cmds.slice(), [
-    { cmd: "orb.fly", x: 0, y: 0, dwellMs: 1500, reason: "left_click_drag" },
     { cmd: "path", from: { x: 0, y: 0 }, to: { x: 100, y: 50 }, ttlMs: 1500 },
   ]);
   cmds.length = 0;
 
   assert.equal((await ts.run("scroll", { coordinate: [10, 10], scroll_direction: "down", scroll_amount: 2 })).kind, "text");
-  assert.deepEqual(cmds.slice(), [{ cmd: "orb.fly", x: 20, y: 20, dwellMs: 1500, reason: "scroll" }]);
+  assert.deepEqual(cmds, []);
   cmds.length = 0;
   assert.equal((await ts.run("scroll", { scroll_direction: "down", scroll_amount: 2 })).kind, "text");
-  assert.deepEqual(cmds.slice(), [], "a scroll without a point has nowhere to fly");
+  assert.deepEqual(cmds.slice(), [], "scrolling needs no waveform movement");
 
   assert.equal((await ts.run("zoom", { region: [0, 0, 50, 25] })).kind, "image");
   assert.deepEqual(cmds.slice(), [{ cmd: "rect", rect: { x: 0, y: 0, w: 100, h: 50 }, ttlMs: 1500, tone: "accent" }]);
@@ -325,14 +303,14 @@ test("toolset: the blob flies to clicks, drags, scrolls, presses and typing; a d
 
   hands.frame = { x: 300, y: 400, w: 100, h: 20 };
   assert.equal((await ts.run("type", { text: "hello" })).kind, "text");
-  assert.deepEqual(cmds.slice(), [{ cmd: "orb.fly", x: 350, y: 410, dwellMs: 1500, reason: "type" }], "typing flies to the focused element when accessibility knows its frame");
+  assert.deepEqual(cmds, []);
   cmds.length = 0;
   hands.frame = null;
   assert.equal((await ts.run("type", { text: "hello" })).kind, "text");
-  assert.deepEqual(cmds.slice(), [], "no frame, no flight");
+  assert.deepEqual(cmds.slice(), [], "typing needs no waveform movement");
 
   assert.equal((await ts.run("left_mouse_down", {})).kind, "text");
-  assert.deepEqual(cmds.slice(), [{ cmd: "orb.fly", x: 10, y: 10, dwellMs: 1500, reason: "left_mouse_down" }], "a press lands under the pointer");
+  assert.deepEqual(cmds, []);
   cmds.length = 0;
   assert.equal((await ts.run("left_mouse_up", {})).kind, "text");
 
@@ -364,14 +342,14 @@ test("anthropic brain: circled regions go in as base64 image blocks ahead of the
     assert.equal(content.length, 2);
     assert.deepEqual(content[0], { type: "image", source: { type: "base64", media_type: "image/png", data: PNG.toString("base64") } });
     assert.equal(content[1]!.type, "text");
-    assert.match(content[1]!.text!, /Kevin said: "what is this"\n\nAttached image 1: Kevin circled this region of his screen: 10,20 100×51 \(global points\)/);
+    assert.match(content[1]!.text!, /User said: "what is this"\n\nAttached image 1: User circled this region of the screen: 10,20 100×51 \(global points\)/);
 
     // No attachments → the plain string turn, and the earlier exchange is carried as text only.
     await brain.handle(makeTask("and now?"), makeSink().sink);
     const second = server.seen[2]!.body as { messages: Array<{ role: string; content: unknown }> };
     assert.deepEqual(second.messages.map((m) => m.role), ["user", "assistant", "user"]);
     assert.equal(typeof second.messages[0]!.content, "string", "history keeps the words, not the pixels");
-    assert.equal(second.messages[0]!.content, `Kevin said: "what is this"\n\n${NOTE}`, "and names the region without claiming an attached image");
+    assertPromptSuffix(second.messages[0]!.content, `User said: "what is this"\n\n${NOTE}`);
     assert.equal(typeof second.messages[2]!.content, "string");
     await brain.stop();
   } finally {
@@ -395,7 +373,7 @@ test("compatible brain: circled regions are image_url parts when the server take
     const t = server.seen[1]!.body as { messages: Array<{ role: string; content: unknown }> };
     assert.deepEqual(t.messages.map((m) => m.role), ["system", "user"]);
     assert.equal(typeof t.messages[1]!.content, "string");
-    assert.match(String(t.messages[1]!.content), /Kevin said: "what is this"\n\nKevin circled this region of his screen: 10,20 100×51 \(global points\)\n\nThis server cannot receive images/);
+    assert.match(String(t.messages[1]!.content), /User said: "what is this"\n\nUser circled this region of the screen: 10,20 100×51 \(global points\)\n\nThis server cannot receive images/);
     assert.ok(!String(t.messages[1]!.content).includes("Attached image"), "a text-only server is not told an image is attached");
 
     const withImages = new OpenAICompatibleBrain({ runner, baseUrl: server.url, model: "llama3.1", capabilities: { images: true } });
@@ -405,7 +383,7 @@ test("compatible brain: circled regions are image_url parts when the server take
     const parts = i.messages[1]!.content;
     assert.equal(parts.length, 3);
     assert.equal(parts[0]!.type, "text");
-    assert.match(parts[0]!.text!, /Kevin said: "what is this"/);
+    assert.match(parts[0]!.text!, /User said: "what is this"/);
     assert.deepEqual(parts[1], { type: "text", text: NOTE });
     assert.deepEqual(parts[2], { type: "image_url", image_url: { url: `data:image/png;base64,${PNG.toString("base64")}`, detail: "high" } });
     assert.match(parts[0]!.text!, /Attached image 1: /);
@@ -414,7 +392,7 @@ test("compatible brain: circled regions are image_url parts when the server take
     assert.equal((await withImages.handle(makeTask("and now?"), makeSink().sink)).status, "done");
     const h = server.seen[4]!.body as { messages: Array<{ role: string; content: unknown }> };
     assert.deepEqual(h.messages.map((m) => m.role), ["system", "user", "assistant", "user"]);
-    assert.equal(h.messages[1]!.content, `Kevin said: "what is this"\n\n${NOTE}`);
+    assertPromptSuffix(h.messages[1]!.content, `User said: "what is this"\n\n${NOTE}`);
   } finally {
     await server.close();
   }
@@ -476,7 +454,7 @@ test("responses brain: circled regions ride as an input_image item with the firs
     { type: "input_image", image_url: `data:image/png;base64,${PNG.toString("base64")}`, detail: "high" },
   ]);
   assert.equal(shown.content.length, 3);
-  assert.match(shown.content[2]!.text!, /^You answered before seeing what Kevin circled/);
+  assert.match(shown.content[2]!.text!, /^You answered before seeing what User circled\. Look at it now: if your answer changes or was missing what User meant by "this"/);
   let settled = false;
   void late.then(() => (settled = true));
   await sleep(10);
@@ -529,11 +507,11 @@ test("claude brain: circled regions go in as image blocks of the user turn throu
     assert.ok(Array.isArray(content));
     assert.deepEqual(content[0], { type: "image", source: { type: "base64", media_type: "image/png", data: PNG.toString("base64") } });
     assert.equal(content[1]!.type, "text");
-    assert.match(content[1]!.text!, /Kevin said: "what is this"\n\nAttached image 1: Kevin circled this region of his screen: 10,20 100×51 \(global points\)/);
+    assert.match(content[1]!.text!, /User said: "what is this"\n\nAttached image 1: User circled this region of the screen: 10,20 100×51 \(global points\)/);
 
     // Without attachments the turn is the plain string it always was.
     assert.equal((await brain.handle(makeTask("and now?"), makeSink().sink)).status, "done");
-    assert.equal(sdk.seen[1]!.message.content, 'Kevin said: "and now?"');
+    assertPromptSuffix(sdk.seen[1]!.message.content, 'User said: "and now?"');
   } finally {
     await brain.stop();
   }

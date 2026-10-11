@@ -9,7 +9,7 @@ import type { RunOutcome, ToolRunner } from "./runner.ts";
  * order the calls were made either way, which is what every transport expects.
  *
  * In the ordered branch the batch stops at the first call that did not go
- * through: a `needs-confirmation` (the question must reach Kevin before anything
+ * through: a `needs-confirmation` (the question must reach User before anything
  * else happens — the brain used to guarantee that by ending its turn with the
  * question, one call per turn), a refusal, or any error (the calls after it were
  * planned on the assumption it worked). The calls not run get an error result
@@ -26,10 +26,10 @@ export function allReadOnly(calls: readonly BatchCall[]): boolean {
 }
 
 /** Why the rest of an ordered batch was not run, or undefined when this outcome lets the batch go on. */
-export function haltReason(call: BatchCall, outcome: RunOutcome): string | undefined {
+export function haltReason(call: BatchCall, outcome: RunOutcome, userName = "User"): string | undefined {
   switch (outcome.result.kind) {
     case "needs-confirmation":
-      return `not run: ${call.name} is waiting for Kevin's answer; ask him and stop`;
+      return `not run: ${call.name} is waiting for ${userName}'s answer; ask ${userName} and stop`;
     case "error":
       return /^refused:/.test(outcome.result.message) ? `not run: ${call.name} was refused earlier in this turn` : `not run: ${call.name} failed earlier in this turn (${outcome.result.message.slice(0, 120)})`;
     default:
@@ -57,7 +57,7 @@ export async function runToolBatch(
     opts.before?.(c);
     const outcome = await runner.run(c.name, c.input);
     out.push(outcome);
-    halted = haltReason(c, outcome);
+    halted = haltReason(c, outcome, runner.userName);
   }
   return out;
 }

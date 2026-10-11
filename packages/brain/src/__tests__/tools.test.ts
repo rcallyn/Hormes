@@ -11,11 +11,11 @@ import { htmlToText, parseDuckDuckGo } from "../web.ts";
 import { globToRegExp } from "../files.ts";
 import { redactSecrets, runShell, secretValues, truncateOutput } from "../shell.ts";
 import { zodShape } from "../claude.ts";
-import { ALL_TOOL_SPECS, AGENT_SPECS, OBSERVATION_CLAUSE, SELF_SPECS, SYSTEM_SPECS, THREAD_SPECS, THREAD_TOOL_NAMES, WORKER_SPECS, WORKER_TOOL_ALIASES, specByName, threadToolName } from "../tools.ts";
+import { ALL_TOOL_SPECS, AGENT_SPECS, OBSERVATION_CLAUSE, SELF_SPECS, SYSTEM_SPECS, THREAD_SPECS, specByName, toolSpecsFor } from "../tools.ts";
 import { progressLine } from "../responses.ts";
 import { FakeHands, makeRunner, makeSink, makeTask } from "./fakes.ts";
 
-/** A home of its own under the temp dir, so ~ paths in the tests never touch Kevin's. */
+/** A home of its own under the temp dir, so ~ paths in the tests never touch User's. */
 function fakeHome(): string {
   const home = mkdtempSync(join(tmpdir(), "jh-home-"));
   mkdirSync(join(home, ".ssh"), { recursive: true });
@@ -91,7 +91,7 @@ test("file tools: read with a window, write and edit inside Hormes's places, ref
   const over2 = await runner.run("write_file", { path: other, content: "new" });
   assert.equal(over2.result.kind, "text", resultText(over2.result));
 
-  // A folder Kevin named in his request is writable without asking.
+  // A folder User named in his request is writable without asking.
   runner.attach(log.sink, makeTask(`save the summary to ${join(home, "Documents")}/summary.md`));
   const named = await runner.run("write_file", { path: join(home, "Documents", "summary.md"), content: "# summary" });
   assert.equal(named.result.kind, "text", resultText(named.result));
@@ -166,29 +166,36 @@ test("file tools: list_dir descends to a depth and skips node_modules; search_fi
 
 test("run_shell: anything non-destructive runs with secrets scrubbed, output is capped and streamed, destructive asks, never refuses, background jobs return a pid Hormes may kill", async () => {
   const home = fakeHome();
-  const { runner } = makeRunner({ home, env: { ...process.env, OPENAI_API_KEY: "sk-must-not-leak", ANTHROPIC_API_KEY: "ant-must-not-leak" } });
+  const { runner, toolset } = makeRunner({ home, env: { ...process.env, OPENAI_API_KEY: "sk-must-not-leak", ANTHROPIC_API_KEY: "ant-must-not-leak" } });
   const log = makeSink();
-  runner.attach(log.sink, makeTask("run things"));
+  runner.attach(log.sink, makeTask(`run things in ${home}`));
 
   const echo = await runner.run("run_shell", { command: "echo hello there" });
   assert.equal(resultText(echo.result), "hello there");
   assert.ok(log.thinking.some((t) => t.startsWith("echo: hello there")), `stdout tails reach the thinking channel: ${log.thinking.join(" | ")}`);
 
-  // Dumping the environment asks (Kevin's shell may export keys of its own); a key by name is refused; and a
+  // Dumping the environment asks (User's shell may export keys of its own); a key by name is refused; and a
   // scan that names neither finds nothing: scrubbedEnv removed the keys and the login shell unset them again after ~/.zprofile ran.
   const dump = await runner.run("run_shell", { command: "env | grep -c 'must-not-leak' || true" });
   assert.equal(dump.result.kind, "needs-confirmation");
   assert.match(resultText(dump.result), /dumps the environment/);
   assert.match(resultText((await runner.run("run_shell", { command: "echo $OPENAI_API_KEY" })).result), /refused: .*reveal OPENAI_API_KEY/);
-  const scan = await runner.run("run_shell", { command: `perl -e 'print join(",", grep { $ENV{$_} eq "sk-must-not-leak" || $ENV{$_} eq "ant-must-not-leak" } keys %ENV) || "none"'` });
+  // A script that reads every variable is an environment dump too (W1-6, RAIL-11): it asks, and after the yes it finds nothing.
+  const scanCommand = `perl -e 'print join(",", grep { $ENV{$_} eq "sk-must-not-leak" || $ENV{$_} eq "ant-must-not-leak" } keys %ENV) || "none"'`;
+  assert.equal((await runner.run("run_shell", { command: scanCommand })).result.kind, "needs-confirmation");
+  toolset.confirmations.arm();
+  const scan = await runner.run("run_shell", { command: scanCommand });
   assert.equal(resultText(scan.result).trim(), "none", "Hormes's keys never enter the child's environment, rc files included");
-  const rc = await runShell({ command: 'echo "${OPENAI_API_KEY:-UNSET}"', env: { ...process.env, OPENAI_API_KEY: "sk-must-not-leak" } });
+  const rc = await runShell({ command: 'echo "${OPENAI_API_KEY:-UNSET}"', cwd: home, env: { ...process.env, OPENAI_API_KEY: "sk-must-not-leak" } });
   assert.equal(rc.stdout.trim(), "UNSET", "the login shell's own export is undone before the command runs");
   // Whatever slips out is redacted before a model reads it: a known value, its base64, and anything key-shaped.
   const echoed = await runner.run("run_shell", { command: `echo sk-must-not-leak; echo ${Buffer.from("sk-must-not-leak").toString("base64")}; echo sk-abcdefghijklmnopqrstuvwxyz0123456789` });
   assert.equal(resultText(echoed.result), "[redacted secret]\n[redacted secret]\n[redacted secret]");
 
-  const install = await runner.run("run_shell", { command: "npm install --dry-run >/dev/null 2>&1; echo would-run", cwd: tmpdir() });
+  // npm writes a debug log under its cache (~/.npm/_logs) on every run and checks the registry for a newer npm: a home
+  // and a cache of the test's own keep the real ones untouched, and the update check stays off.
+  const npmHome = mkdtempSync(join(home, "jh-npm-"));
+  const install = await runner.run("run_shell", { command: `HOME=${npmHome} npm_config_cache=${npmHome}/cache npm_config_update_notifier=false npm install --dry-run --offline >/dev/null 2>&1; echo would-run`, cwd: npmHome });
   assert.match(resultText(install.result), /would-run/, "the allowlist is gone: installs run");
 
   const big = await runner.run("run_shell", { command: "seq 1 20000" });
@@ -295,11 +302,11 @@ test("applescript, open_url and the clipboard go through the gates", async () =>
   assert.equal(resultText(four.result), "4");
   const send = await runner.run("applescript", { script: 'tell application "Mail" to send theMessage' });
   assert.equal(send.result.kind, "needs-confirmation");
-  assert.match(resultText(send.result), /sends a message on Kevin's behalf/);
+  assert.match(resultText(send.result), /sends a message on User's behalf/);
   const off = await runner.run("applescript", { script: 'tell application "System Events" to tell process "1Password" to keystroke "x"' });
   assert.match(resultText(off.result), /refused: 1Password/);
   const shell = await runner.run("applescript", { script: 'do shell script "cat ~/.hormes/env"' });
-  assert.match(resultText(shell.result), /refused: .*secrets/);
+  assert.match(resultText(shell.result), /refused: AppleScript cannot execute shell commands/);
   assert.match(resultText((await runner.run("applescript", { script: 'tell application "System Events" to shut down' })).result), /refused: .*never list/);
 
   assert.match(resultText((await runner.run("open_url", { url: "ftp://example.com" })).result), /refused: only http and https/);
@@ -335,7 +342,7 @@ test("tool table: the new specs are complete, zod-shaped, and have progress line
   assert.match(specByName("self_apply")!.description, /apply the change to Hormes and restart it\?/);
   // What the other brains and the MCP listing read says what was measured: applescript is a slow process, never
   // for the front app or a page; search_files honours (?i) and smart case; read_focused_text fails in Chromium.
-  assert.match(specByName("applescript")!.description, /often seconds — never for what a fast tool answers: frontmost_app for the front app .*browser_\* tools/);
+  assert.match(specByName("applescript")!.description, /arbitrary source requires one-off approval/);
   assert.match(specByName("search_files")!.description, /Case-insensitive when the pattern has no uppercase letter.*\(\?i\)/);
   assert.match(specByName("read_focused_text")!.description, /Fails in Chromium browsers .*use browser_read or browser_find there/);
   assert.match(specByName("frontmost_app")!.description, /about 20 ms/);
@@ -348,20 +355,13 @@ test("tool table: the new specs are complete, zod-shaped, and have progress line
   assert.ok(!/\b1280\b/.test(JSON.stringify(specByName("screenshot"))), "no stale quick-shot size in the screenshot spec");
 });
 
-test("tool table: the four thread specs replace the worker specs after the agents (67 stays), carry the split rule, the same-turn rule and 'do not thread_wait', cap thread_wait at 240 s, accept worker_* as aliases by name, have progress lines, and are not the runner's without a scheduler", async () => {
+test("tool table: the four thread specs follow the agents (71 with the automations), carry the split rule, the same-turn rule and 'do not thread_wait', cap thread_wait at 240 s, have progress lines, and are not the runner's without a scheduler", async () => {
   assert.deepEqual(THREAD_SPECS.map((s) => s.name), ["thread_start", "thread_wait", "thread_read", "thread_stop"]);
   const names = ALL_TOOL_SPECS.map((s) => s.name);
   assert.equal(names.indexOf("thread_start"), names.indexOf("agent_start") + 1, "THREAD_SPECS follow AGENT_SPECS in the table");
-  assert.equal(ALL_TOOL_SPECS.length, 67);
+  assert.equal(ALL_TOOL_SPECS.length, 74);
   assert.equal(AGENT_SPECS.length, 5, "a Thread is not an Agent: the agent tools are unchanged");
-  assert.ok(!names.some((n) => n.startsWith("worker_")), "the worker_* names are gone from the spec list");
-  assert.equal(WORKER_SPECS, THREAD_SPECS, "the deprecated alias still compiles for one release");
-  // Aliases: the scheduler answers the old names for one release; the mapping is by name only.
-  assert.deepEqual(WORKER_TOOL_ALIASES, { worker_start: "thread_start", worker_wait: "thread_wait", worker_read: "thread_read", worker_stop: "thread_stop" });
-  for (const [old, now] of Object.entries(WORKER_TOOL_ALIASES)) assert.equal(threadToolName(old), now);
-  assert.equal(threadToolName("thread_read"), "thread_read");
-  assert.equal(threadToolName("left_click"), undefined);
-  assert.deepEqual([...THREAD_TOOL_NAMES].sort(), ["thread_read", "thread_start", "thread_stop", "thread_wait", "worker_read", "worker_start", "worker_stop", "worker_wait"]);
+  assert.ok(!("kind" in (specByName("agent_start")!.parameters.properties as Record<string, unknown>)), "agent_start takes `tool`; no second spelling");
   // The rule the standing orders do not carry: one thread per independent app, in the same turn as the
   // brain's own first action; do not thread_wait; a thread's speak_progress speaks once with its name.
   const start = specByName("thread_start")!;
@@ -369,12 +369,12 @@ test("tool table: the four thread specs replace the worker specs after the agent
   assert.match(start.description, /in the SAME turn as your own first action/);
   assert.match(start.description, /Keep the part that needs the screen yourself/);
   assert.match(start.description, /split off only work that does not depend on yours/);
-  assert.match(start.description, /never touches the pointer, keyboard or front app/);
+  assert.match(start.description, /never touches the pointer, keyboard, front app or front browser tab/);
   assert.match(start.description, /applescript \(Apple events/);
-  assert.match(start.description, /browser_\* tools, files, run_shell and the web/);
+  assert.match(start.description, /browser_read, browser_find and browser_tabs to read the browser, web_fetch and web_search to load a page, files and run_shell/);
   assert.match(start.description, /lane 'screen' waits its turn for the pointer and keyboard/);
   assert.match(start.description, /At most 3 alongside you/);
-  assert.match(start.description, /Hormes tells Kevin the split in one line, so do not announce it/);
+  assert.match(start.description, /Hormes tells User the split in one line, so do not announce it/);
   // The serializer's rule, in the model's words: a thread_start rides alongside the first action and is never halted by its question.
   assert.match(start.description, /may be issued alongside your first action in one exec: it never waits for it and is never held back by its question/);
   assert.match(start.description, /Do not thread_wait: end your turn/);
@@ -393,18 +393,21 @@ test("tool table: the four thread specs replace the worker specs after the agent
   assert.match(wait.description, /default 120, at most 240/);
   assert.match(wait.description, /Rarely right/);
   assert.match(wait.description, /end your turn instead/);
-  assert.match(wait.description, /what Kevin was already told so you do not repeat it/);
+  assert.match(wait.description, /what User was already told so you do not repeat it/);
   const waitTimeout = wait.parameters.properties["timeout"] as { minimum: number; maximum: number };
   assert.deepEqual([waitTimeout.minimum, waitTimeout.maximum], [1, 240], "shorter than the 300 s wall clock the main brain runs under");
-  assert.match(specByName("thread_read")!.description, /queued, starting, thinking, acting, waiting for the screen, waiting on Kevin's yes, paused, done, failed, stopped/, "the one status vocabulary");
-  assert.match(specByName("thread_stop")!.description, /Kevin hears one line that it stopped/);
+  assert.match(specByName("thread_read")!.description, /queued, starting, thinking, acting, waiting for the screen, waiting on User's yes, paused, done, failed, stopped/, "the one status vocabulary");
+  assert.match(specByName("thread_stop")!.description, /User hears one line that it stopped/);
   for (const n of ["thread_read", "thread_stop"]) assert.deepEqual(Object.keys(zodShape(specByName(n)!)), ["name"], n);
-  // Progress lines for the timeline exist for the old names (responses.ts is not this pass's file: the thread_* lines are a seam).
-  assert.equal(progressLine("worker_start", { name: "Spotify", task: "play Focus" }), "Starting Spotify on the side.");
-  // A plain ToolRunner has no scheduler: the thread tools (and their aliases) are the engine's runner's, not its.
+  // Progress lines for the timeline: one per thread tool.
+  assert.equal(progressLine("thread_start", { name: "Spotify", task: "play Focus" }), "Starting Spotify on the side.");
+  assert.equal(progressLine("thread_wait", { name: "all" }), "Waiting for the other hands.");
+  assert.equal(progressLine("thread_read", { name: "Slack" }), "Checking on Slack.");
+  assert.equal(progressLine("thread_stop", { name: "Slack" }), "Stopping Slack.");
+  // A plain ToolRunner has no scheduler: the thread tools are the engine's runner's, not its.
   const { runner } = makeRunner();
   runner.attach(makeSink().sink, makeTask("play focus on spotify"));
-  for (const n of ["thread_start", "thread_wait", "thread_read", "thread_stop", "worker_start"]) {
+  for (const n of ["thread_start", "thread_wait", "thread_read", "thread_stop"]) {
     const r = await runner.run(n, { name: "Spotify", task: "play Focus" });
     assert.equal(r.result.kind, "error", n);
     assert.match(resultText(r.result), new RegExp(`unknown tool ${n}`), `${n} is not available here`);
@@ -432,20 +435,20 @@ test("tool table: the six acting tools carry the observation clause once, word f
   assert.match(specByName("type")!.description, /when no now: line follows and what landed matters — one screenshot/);
 });
 
-test("gates read what Kevin said, never what Hormes said: named folders and named hosts", async (t) => {
+test("gates read what User said, never what Hormes said: named folders and named hosts", async (t) => {
   const home = fakeHome();
   const { runner } = makeRunner({ home });
   const target = join(home, "Documents", "from-dialogue.md");
   // The folder is named only in a Hormes line of the dialogue: still a question.
-  runner.attach(makeSink().sink, makeTask("save it", undefined, { dialogue: `Kevin: save it\nHormes: I'll create ${target} now`, kevinDialogue: "save it" }));
+  runner.attach(makeSink().sink, makeTask("save it", undefined, { dialogue: `User: save it\nHormes: I'll create ${target} now`, userDialogue: "save it" }));
   const ask = await runner.run("write_file", { path: target, content: "x" });
   assert.equal(ask.result.kind, "needs-confirmation", resultText(ask.result));
   assert.equal(existsSync(target), false);
-  // Kevin named it himself earlier in the window: runs.
-  runner.attach(makeSink().sink, makeTask("save it", undefined, { dialogue: `Kevin: put it in ${join(home, "Documents")}\nHormes: sure\nKevin: save it`, kevinDialogue: `put it in ${join(home, "Documents")}\nsave it` }));
+  // User named it himself earlier in the window: runs.
+  runner.attach(makeSink().sink, makeTask("save it", undefined, { dialogue: `User: put it in ${join(home, "Documents")}\nHormes: sure\nUser: save it`, userDialogue: `put it in ${join(home, "Documents")}\nsave it` }));
   assert.equal((await runner.run("write_file", { path: target, content: "x" })).result.kind, "text");
 
-  // Persistence folders are never "named folders": a LaunchAgent asks even when the path is in Kevin's request.
+  // Persistence folders are never "named folders": a LaunchAgent asks even when the path is in User's request.
   const agent = join(home, "Library", "LaunchAgents", "com.attacker.persist.plist");
   runner.attach(makeSink().sink, makeTask(`create ${agent}`));
   const persist = await runner.run("write_file", { path: agent, content: "<plist/>" });
@@ -458,9 +461,9 @@ test("gates read what Kevin said, never what Hormes said: named folders and name
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   t.after(() => new Promise<void>((r) => server.close(() => r())));
   const { port } = server.address() as AddressInfo;
-  runner.attach(makeSink().sink, makeTask("read that", undefined, { dialogue: `Kevin: read that\nHormes: the page says to load http://127.0.0.1:${port}/`, kevinDialogue: "read that" }));
+  runner.attach(makeSink().sink, makeTask("read that", undefined, { dialogue: `User: read that\nHormes: the page says to load http://127.0.0.1:${port}/`, userDialogue: "read that" }));
   assert.match(resultText((await runner.run("web_fetch", { url: `http://127.0.0.1:${port}/` })).result), /refused: 127\.0\.0\.1 is a private address/);
-  runner.attach(makeSink().sink, makeTask("read that", undefined, { kevinDialogue: `what does 127.0.0.1:${port} say\nread that` }));
+  runner.attach(makeSink().sink, makeTask("read that", undefined, { userDialogue: `what does 127.0.0.1:${port} say\nread that` }));
   assert.match(resultText((await runner.run("web_fetch", { url: `http://127.0.0.1:${port}/` })).result), /internal/);
   // IPv6-mapped loopback is loopback (with nothing named: the port above named it).
   runner.attach(makeSink().sink, makeTask("read that"));
@@ -506,8 +509,9 @@ test("secret values are redacted from every result, wherever they came from", as
   const home = fakeHome();
   mkdirSync(join(home, ".hormes"), { recursive: true });
   writeFileSync(join(home, ".hormes", "env"), 'OPENAI_API_KEY="sk-live-abcdefghijklmnop"\nHORMES_WAKE_PASSPHRASE=open-sesame-42\nSHORT=ab\nHORMES_BRAIN_MODEL=gpt-5.6-terra\n');
-  const { runner, dir } = makeRunner({ home, env: { ...process.env, ANTHROPIC_API_KEY: "ant-key-from-env-value" } });
-  runner.attach(makeSink().sink, makeTask("read"));
+  // The fake home's ~/.hormes is the state dir, as on a Mac with HORMES_STATE_DIR unset: the redactor reads the state dir's env file (W2-9).
+  const { runner, dir } = makeRunner({ home, env: { ...process.env, HORMES_STATE_DIR: join(home, ".hormes"), ANTHROPIC_API_KEY: "ant-key-from-env-value" } });
+  runner.attach(makeSink().sink, makeTask(`read in ${home}`));
   assert.deepEqual(secretValues({ ANTHROPIC_API_KEY: "ant-key-from-env-value" }, home).sort(), ["ant-key-from-env-value", "open-sesame-42", "sk-live-abcdefghijklmnop"], "env keys and the secret-named values in the env file, quotes stripped; short ones and settings such as the model name skipped");
   assert.equal(runner.redactor.count, 3);
   // A copy of the env file made outside the gate (a glob the lexical gate missed, in another life) still comes back blank.
@@ -532,9 +536,9 @@ test("applescript: native reads of secret stores, split literals and computed sh
   runner.attach(makeSink().sink, makeTask("automate"));
   assert.match(resultText((await runner.run("applescript", { script: `read (POSIX file "${join(home, ".hormes", "env")}")` })).result), /refused: .*~\/\.hormes\/env/);
   assert.match(resultText((await runner.run("applescript", { script: `set f to POSIX file "${join(home, ".ssh", "id_ed25519")}"\nread f` })).result), /refused: .*~\/\.ssh/);
-  assert.match(resultText((await runner.run("applescript", { script: 'do shell script "cat ~/.hormes/en" & "v"' })).result), /refused: .*~\/\.hormes\/env/);
-  assert.match(resultText((await runner.run("applescript", { script: 'set p to "~/.hormes/env"\ndo shell script "cat " & p' })).result), /refused: .*~\/\.hormes\/env/);
-  assert.match(resultText((await runner.run("applescript", { script: 'do shell script "cat " & somePath' })).result), /refused: do shell script with a computed command/);
+  assert.match(resultText((await runner.run("applescript", { script: 'do shell script "cat ~/.hormes/en" & "v"' })).result), /refused: AppleScript cannot execute shell commands/);
+  assert.match(resultText((await runner.run("applescript", { script: 'set p to "~/.hormes/env"\ndo shell script "cat " & p' })).result), /refused: AppleScript cannot execute shell commands/);
+  assert.match(resultText((await runner.run("applescript", { script: 'do shell script "cat " & somePath' })).result), /refused: AppleScript cannot execute shell commands/);
   assert.match(resultText((await runner.run("applescript", { script: 'system attribute "OPENAI_API_KEY"' })).result), /refused: .*OPENAI_API_KEY/);
   const built = await runner.run("applescript", { script: 'set a to ".hormes/"\nset b to "env"\nread (POSIX file (a & b))' });
   assert.equal(built.result.kind, "needs-confirmation");
@@ -553,7 +557,7 @@ test("applescript: native reads of secret stores, split literals and computed sh
   assert.match(resultText(keys.result), /1Password is in front/);
   assert.equal((await front.runner.run("applescript", { script: "return 1 + 1" })).result.kind, "text", "a script without keystrokes does not care who is in front");
 
-  // The running checkout: file tools and the shell ask even when Kevin named the folder; agent_start there asks.
+  // The running checkout: file tools and the shell ask even when User named the folder; agent_start there asks.
   const repo = join(home, "hormes");
   mkdirSync(join(repo, "packages", "core", "src"), { recursive: true });
   writeFileSync(join(repo, "packages", "core", "src", "policy.ts"), "export const x = 1;\n");
@@ -569,4 +573,58 @@ test("applescript: native reads of secret stores, split literals and computed sh
   const agent = await runner.run("agent_start", { tool: "codex", cwd: repo, prompt: "change policy.ts" });
   assert.equal(agent.result.kind, "needs-confirmation", resultText(agent.result));
   assert.match(resultText(agent.result), /Hormes's own checkout/);
+});
+
+// ------------------------------------------------------------ the user's name ---
+
+test("the user's name: the runner's refusals and questions say the name the engine passes — the shell gate, the path gate, the URL gate and the AppleScript gate", async () => {
+  const home = fakeHome();
+  const { runner } = makeRunner({ home, userName: () => "Sam" });
+  assert.equal(runner.userName, "Sam");
+  runner.attach(makeSink().sink, makeTask("do a few things"));
+  const push = await runner.run("run_shell", { command: "gh pr create --fill" });
+  assert.equal(push.result.kind, "needs-confirmation");
+  assert.match(resultText(push.result), /that posts to GitHub on Sam's behalf; ask first\. Ask Sam to confirm out loud, then stop; do not retry until Sam says yes\./);
+  const key = await runner.run("read_file", { path: join(home, ".ssh", "id_ed25519") });
+  assert.equal(key.result.kind, "error");
+  assert.match(resultText(key.result), /holds secrets; Hormes never reads or writes it, and Sam handles it$/);
+  const page = await runner.run("web_fetch", { url: "http://192.168.1.20/status" });
+  assert.match(resultText(page.result), /refused: 192\.168\.1\.20 is a private address; Hormes fetches it only when Sam names it/);
+  const admin = await runner.run("applescript", { script: 'do shell script "ls" with administrator privileges' });
+  assert.match(resultText(admin.result), /refused: that script needs an administrator password; Sam does that$/);
+  for (const r of [push, key, page, admin]) assert.doesNotMatch(resultText(r.result), /User/);
+  // The default runner still says User, word for word as before.
+  const { runner: plain } = makeRunner({ home });
+  plain.attach(makeSink().sink, makeTask("do a few things"));
+  assert.match(resultText((await plain.run("run_shell", { command: "gh pr create --fill" })).result), /that posts to GitHub on User's behalf; ask first\. Ask User to confirm out loud, then stop; do not retry until User says yes\./);
+});
+
+test("tool table: toolSpecsFor renders the table for another name — the same names, parameters, required, enums, order and count, no literal User anywhere; the default is the table itself", () => {
+  assert.equal(toolSpecsFor("User"), ALL_TOOL_SPECS, "the same reference: byte-identical for the prompt cache");
+  assert.equal(toolSpecsFor(""), ALL_TOOL_SPECS, "an unset name is the default");
+  const sam = toolSpecsFor("Sam");
+  assert.equal(sam.length, ALL_TOOL_SPECS.length);
+  assert.equal(sam.length, 74);
+  const strip = (v: unknown): unknown => JSON.parse(JSON.stringify(v, (k, x) => (k === "description" ? undefined : x)));
+  let named = 0;
+  for (const [i, spec] of ALL_TOOL_SPECS.entries()) {
+    const s = sam[i]!;
+    assert.equal(s.name, spec.name, `${i}: the same tool in the same place`);
+    assert.deepEqual(strip(s.parameters), strip(spec.parameters), `${spec.name}: parameters, required and enums are untouched`);
+    assert.deepEqual(s.parameters.required, spec.parameters.required, `${spec.name}: required`);
+    assert.doesNotMatch(JSON.stringify(s), /User/, spec.name);
+    assert.doesNotMatch(JSON.stringify(spec), /\b(he|him|his|himself)\b/, `${spec.name}: no pronoun is assumed for the user, so the name renders for anyone`);
+    assert.equal(JSON.stringify(s).replace(/\bSam\b/g, "User"), JSON.stringify(spec), `${spec.name}: only the name moves (whole word: "Same gates" stays)`);
+    if (/User/.test(JSON.stringify(spec))) named++;
+  }
+  assert.ok(named >= 25, `${named} specs say the name in a description or a parameter description`);
+  const shell = sam.find((s) => s.name === "run_shell")!;
+  assert.match(shell.description, /^Run a shell command on Sam's Mac/);
+  assert.equal((shell.parameters.properties["cwd"] as { description: string }).description, "specific workspace folder (required for isolation)", "parameter descriptions take the name too");
+  assert.match((sam.find((s) => s.name === "automation_set")!.parameters.properties["echo"] as { description: string }).description, /Sam's words: 'Weekdays at 07:10, ring "Wake up, Sam"\.'/);
+  // A subset renders the same way.
+  const subset = toolSpecsFor("Sam", [specByName("thread_start")!]);
+  assert.equal(subset.length, 1);
+  assert.match(subset[0]!.description, /named for Sam to hear \('Spotify', 'Slack'\)/);
+  assert.equal(toolSpecsFor("User", subset), subset, "the default hands a subset back untouched too");
 });
