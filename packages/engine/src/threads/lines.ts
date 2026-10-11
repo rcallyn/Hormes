@@ -2,14 +2,14 @@ import { progressLine } from "@hormes/brain";
 import { MAIN_THREAD_ID, type Thread, type ThreadLane } from "@hormes/protocol";
 
 /**
- * The words a thread gets and the words Kevin hears about one. Deterministic
+ * The words a thread gets and the words User hears about one. Deterministic
  * English from the table, never a model: "what is Spotify doing" costs microseconds
- * and never touches the running turn. Every line Kevin hears is cut to
+ * and never touches the running turn. Every line User hears is cut to
  * THREAD_LINE_CHARS; the brief a thread's brain reads rides in the task's dialogue
- * slot, never in `request` (the gates read that as Kevin's words).
+ * slot, never in `request` (the gates read that as User's words).
  */
 
-/** The lines Kevin hears are short: a summary or a reason is cut here. */
+/** The lines User hears are short: a summary or a reason is cut here. */
 export const THREAD_LINE_CHARS = 80;
 
 /** A phrase the status line quotes ("playing Focus") is cut here. */
@@ -22,11 +22,11 @@ export function cutLine(text: string | undefined, max = THREAD_LINE_CHARS): stri
 
 /**
  * What a thread's brain is told, in the dialogue slot. The lane rules, the one
- * job, the spoken-progress budget, depth one, and Kevin's own words for the gates.
+ * job, the spoken-progress budget, depth one, and User's own words for the gates.
  * Byte-identical developer instructions across every process keep the prompt
- * cache warm (REDESIGN.md §18): nothing per thread goes anywhere but this text.
+ * cache warm (the per-thread line cache): nothing per thread goes anywhere but this text.
  */
-export function threadBrief(name: string, task: string, lane: ThreadLane, parentRequest: string, userName = "Kevin"): string {
+export function threadBrief(name: string, task: string, lane: ThreadLane, parentRequest: string, userName = "User"): string {
   const laneText =
     lane === "background"
       ? "Lane: background. You have no pointer, keyboard, front app or front browser tab. Act through applescript (Apple events: Spotify, Music, Finder, Notes, Calendar…), browser_read, browser_find and browser_tabs to read the browser, web_fetch and web_search to load a page, the file tools and run_shell (never `open` an app or `osascript`). A tool that needs the screen is refused: do the rest and report that the screen is needed."
@@ -34,7 +34,7 @@ export function threadBrief(name: string, task: string, lane: ThreadLane, parent
   return `Hormes (to its thread ${name}): You are one of Hormes's threads, named ${name}. Your one job: ${task.trim()} ${laneText} speak_progress speaks once per turn, as "${name}: …" — use it for one thing worth hearing, otherwise work in silence and end with one sentence of what you did; Hormes speaks it for you. Never call thread_* or self_*. ${userName}'s own words, for names and gates: "${parentRequest.replace(/\s+/g, " ").trim().slice(0, 400)}".`;
 }
 
-/** Kevin's answer as the confirmation turn quotes it: one line, at most this long. */
+/** User's answer as the confirmation turn quotes it: one line, at most this long. */
 export const ANSWER_CHARS = 200;
 
 /**
@@ -43,13 +43,13 @@ export const ANSWER_CHARS = 200;
  * act only on a yes: "yeah, no, don't send it" must not re-send. Without words (the Console's
  * Allow, a click) it is the plain yes.
  */
-export function confirmationResume(userName = "Kevin", words?: string): string {
+export function confirmationResume(userName = "User", words?: string): string {
   const said = (words ?? "").replace(/\s+/g, " ").trim().slice(0, ANSWER_CHARS);
   if (!said) return `\n\nHormes (to its thread): ${userName} said yes. Call the same tool again with exactly the same arguments, then finish your job.`;
   return `\n\nHormes (to its thread): ${userName} answered your question: "${said}". If that is a yes, call the same tool again with exactly the same arguments, then finish your job. If it is not a yes, do not call it; end your turn with one sentence.`;
 }
 
-/** The re-ask when a thread's question left the floor unanswered (Kevin moved on, or it went stale): spoken once per re-ask. */
+/** The re-ask when a thread's question left the floor unanswered (User moved on, or it went stale): spoken once per re-ask. */
 export function stillAsksLine(name: string, question: string): string {
   return `${name} still asks: ${cutLine(question, 160)}`;
 }
@@ -59,16 +59,16 @@ export function noAnswerLine(name: string): string {
   return `${name} stopped with no answer. Ask me again to retry.`;
 }
 
-/** The end when Kevin talked past a question he heard and it left the desk: never asked again behind his back. */
+/** The end when User talked past a question he heard and it left the desk: never asked again behind his back. */
 export function movedOnLine(name: string): string {
   return `${name} stopped. You moved on from its question. Ask me again to retry.`;
 }
 
 /** The default's text, for the pins. */
-export const CONFIRMATION_RESUME: string = confirmationResume("Kevin");
+export const CONFIRMATION_RESUME: string = confirmationResume("User");
 
 /** The continuation text after a pause. */
-export function resumeText(steps: number, userName = "Kevin"): string {
+export function resumeText(steps: number, userName = "User"): string {
   return `\n\nHormes (to its thread): ${userName} paused you at step ${steps}; carry on from where you were.`;
 }
 
@@ -79,7 +79,7 @@ export function resumeText(steps: number, userName = "Kevin"): string {
  */
 export function phraseForTool(name: string, input: unknown): string | undefined {
   const line = progressLine(name, input).replace(/\.\s*$/, "");
-  // The voice's fallback for a tool it has no words for is "Checking <tool name>": not a phrase Kevin should hear.
+  // The voice's fallback for a tool it has no words for is "Checking <tool name>": not a phrase User should hear.
   if (!line || line === `Checking ${name.replace(/_/g, " ")}`) return undefined;
   return lowerFirst(cutLine(line, PHRASE_CHARS));
 }
@@ -145,7 +145,7 @@ export function threadLine(t: Thread, now: number, phrase?: string): string {
       return cutLine(`${name} is ${phrase ?? "working"} — ${s} seconds in`);
     case "waiting-screen":
       return `${name} is waiting for the screen — ${s} seconds in`;
-    case "waiting-kevin":
+    case "waiting-user":
       return cutLine(t.question ? `${name} is waiting on you: ${lowerFirst(t.question)}` : `${name} is waiting on your yes`);
     case "paused":
       return `${name} is paused at step ${t.steps}`;
@@ -172,7 +172,7 @@ export function shortStatus(t: Thread): string {
       return "working";
     case "waiting-screen":
       return "waiting for the screen";
-    case "waiting-kevin":
+    case "waiting-user":
       return "waiting on you";
     case "paused":
       return "paused";
@@ -192,7 +192,7 @@ export function mainLine(main: Thread, now: number): string {
     case "thinking":
     case "acting":
       return `I am working on it — ${s} seconds in`;
-    case "waiting-kevin":
+    case "waiting-user":
       return cutLine(main.question ? `I am waiting on your yes: ${lowerFirst(main.question)}` : "I am waiting on your yes");
     case "waiting-screen":
       return `I am waiting for the screen — ${s} seconds in`;

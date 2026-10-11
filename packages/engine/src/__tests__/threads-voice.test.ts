@@ -248,7 +248,7 @@ test("both stop sources inside one name window — the ear's partial 'stop', the
       await engine.stop();
     }
   }
-  // Kevin presses Stop while Live's window is open.
+  // User presses Stop while Live's window is open.
   {
     const w = world();
     const { engine, live } = w;
@@ -272,7 +272,7 @@ test("both stop sources inside one name window — the ear's partial 'stop', the
   }
 });
 
-test("cross-source named stop, the ear first: the ear hears 'stop' … 'stop the slack one' and stops Slack; Live's fragments ' stop' + ' the slack one' for the SAME words arrive with one thread left — the main turn still runs, Spotify is busy, 0 stop rows, brain.cancels 0; Live's delegation of the words is 'already answered' and Kevin hears 'Slack stopped.' exactly once, judged past the 600 ms coalescer", async () => {
+test("cross-source named stop, the ear first: the ear hears 'stop' … 'stop the slack one' and stops Slack; Live's fragments ' stop' + ' the slack one' for the SAME words arrive with one thread left — the main turn still runs, Spotify is busy, 0 stop rows, brain.cancels 0; Live's delegation of the words is 'already answered' and User hears 'Slack stopped.' exactly once, judged past the 600 ms coalescer", async () => {
   const w = world();
   const { engine, live, brain, clock } = w;
   try {
@@ -355,7 +355,7 @@ test("cross-source named stop, Live first: the fragments ' stop' + ' the slack o
   }
 });
 
-test("thread.answer main / no: the main lane's question is dropped, the main record leaves waiting-kevin (idle in snapshot.threads[0]), Live is told once, and a Deny with nothing waiting only toasts", async () => {
+test("thread.answer main / no: the main lane's question is dropped, the main record leaves waiting-user (idle in snapshot.threads[0]), Live is told once, and a Deny with nothing waiting only toasts", async () => {
   const w = world();
   const { engine, live, brain, events } = w;
   try {
@@ -371,15 +371,15 @@ test("thread.answer main / no: the main lane's question is dropped, the main rec
     assert.equal(r.kind, "needs-confirmation", JSON.stringify(r));
     brain.resolve!({ status: "done", summary: r.kind === "needs-confirmation" ? r.question : "" });
     await settle();
-    assert.equal(engine.snapshot().threads![0]!.status, "waiting-kevin");
+    assert.equal(engine.snapshot().threads![0]!.status, "waiting-user");
     assert.ok(engine.confirmations.pending);
     live.instructions.length = 0;
     events.length = 0;
     await engine.command({ type: "thread.answer", threadId: MAIN_THREAD_ID, yes: false });
     assert.equal(engine.confirmations.pending, undefined);
     assert.equal(engine.desk.floor, undefined);
-    assert.equal(engine.snapshot().threads![0]!.status, "idle", "the main record left waiting-kevin without waiting for a Delegator phase");
-    assert.deepEqual(live.instructions.filter((i) => /^Kevin denied "/.test(i)).length, 1, live.instructions.join(" | "));
+    assert.equal(engine.snapshot().threads![0]!.status, "idle", "the main record left waiting-user without waiting for a Delegator phase");
+    assert.deepEqual(live.instructions.filter((i) => /^User denied "/.test(i)).length, 1, live.instructions.join(" | "));
     assert.ok(events.some((e) => e.type === "toast" && e.text === "denied"));
     // Nothing waiting: a toast, no instruction, the record untouched.
     live.instructions.length = 0;
@@ -392,7 +392,7 @@ test("thread.answer main / no: the main lane's question is dropped, the main rec
   }
 });
 
-test("'spotify, skip this song' from Live is a follow-up turn on Spotify's own brain (its first turn superseded, cancel once, the second task carries Kevin's words), the main turn not superseded; 'pause slack' / 'carry on slack' are the table's too", async () => {
+test("'spotify, skip this song' from Live is a follow-up turn on Spotify's own brain (its first turn superseded, cancel once, the second task carries User's words), the main turn not superseded; 'pause slack' / 'carry on slack' are the table's too", async () => {
   const w = world();
   const { engine, live, brain } = w;
   try {
@@ -404,7 +404,7 @@ test("'spotify, skip this song' from Live is a follow-up turn on Spotify's own b
     await until(() => spotify.tasks.length === 2);
     assert.equal(spotify.cancels, 1, "the running turn was interrupted once");
     assert.equal(spotify.tasks[1]!.request, "skip this song");
-    assert.match(spotify.tasks[1]!.dialogue, /Kevin \(to Spotify\): skip this song/);
+    assert.match(spotify.tasks[1]!.dialogue, /User \(to Spotify\): skip this song/);
     assert.equal(brain.cancels, 0, "the main brain's turn was not superseded");
     assert.equal(brain.tasks.length, 1);
     assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_1")!.status, "running");
@@ -421,7 +421,7 @@ test("'spotify, skip this song' from Live is a follow-up turn on Spotify's own b
     nextUtterance(w);
     delegate(w, "hormes carry on slack", "item_4");
     await until(() => slack.tasks.length === 2);
-    assert.match(slack.tasks[1]!.dialogue, /Kevin paused you at step/);
+    assert.match(slack.tasks[1]!.dialogue, /User paused you at step/);
     assert.ok(busy(named(w, "Slack")));
     assert.equal(brain.cancels, 0);
     await until(() => live.commentary.length >= 1);
@@ -449,7 +449,7 @@ test("thread.answer: Allow on Spotify's pane while Slack's question holds the fl
     await engine.runner.run("thread_start", { name: "Slack", task: "send the message", lane: "screen" });
     await until(() => results["Slack"]!.length === 1 && engine.threads.floorThread()?.name === "Slack");
     await engine.runner.run("thread_start", { name: "Spotify", task: "clear the queue", lane: "screen" });
-    await until(() => results["Spotify"]!.length === 1 && named(w, "Spotify")?.status === "waiting-kevin");
+    await until(() => results["Spotify"]!.length === 1 && named(w, "Spotify")?.status === "waiting-user");
     const slackId = named(w, "Slack")!.id;
     const spotifyId = named(w, "Spotify")!.id;
     events.length = 0;
@@ -486,7 +486,7 @@ test("thread.answer: Allow on Spotify's pane while Slack's question holds the fl
     assert.equal(live.currentState, "started");
     assert.equal(rows<StopRow>(w, "stop").length, 0, "never the interrupt");
     await until(() => engine.snapshot().delegations.find((d) => d.liveId === "item_2")!.status === "cancelled");
-    assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_2")!.summary, "Kevin stopped this thread");
+    assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_2")!.summary, "User stopped this thread");
     assert.ok(events.some((e) => e.type === "toast" && e.text === "main thread stopped"));
   } finally {
     await engine.stop();

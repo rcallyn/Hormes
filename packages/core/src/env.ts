@@ -9,8 +9,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 /** Repo root, resolved from this file rather than cwd so every entry point agrees. */
 export const REPO_ROOT = resolve(HERE, "..", "..", "..");
 
-export function expandHome(p: string): string {
-  return p.startsWith("~") ? join(homedir(), p.slice(1)) : p;
+export function expandHome(p: string, home: string = homedir()): string {
+  return p.startsWith("~") ? join(home, p.slice(1)) : p;
 }
 
 /** Where a key came from, so the doctor can say so when one of them is stale. */
@@ -20,24 +20,35 @@ const sources = new Map<string, KeySource>();
 
 /**
  * Keys Hormes owns. For these the env file WINS over the shell: a stale
- * OPENAI_API_KEY exported by ~/.zshrc must not shadow the key Kevin put in
+ * OPENAI_API_KEY exported by ~/.zshrc must not shadow the key User put in
  * ~/.hormes/env on purpose. Everything else keeps dotenv convention (shell wins).
  */
 const OWNED_KEYS: ReadonlySet<string> = new Set([
-  "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY", "HORMES_BRAIN_BASE_URL",
+  "OPENAI_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY", "HORMES_BRAIN_BASE_URL",
   "HORMES_BRAIN", "HORMES_BRAIN_MODEL", "HORMES_VOICE", "HORMES_LIVE_MODEL", "HORMES_MEMORY_MODEL",
 ]);
 
-/** Minimal dotenv: KEY=VALUE lines, no interpolation. */
+/**
+ * One env-file line as its key and value, or undefined for a blank line, a comment or no `=`.
+ * A shell habit's `export KEY=value` is KEY: read as anything else, the value would ride into
+ * every child under a name scrubbedEnv does not know (W1-6, INS-4).
+ */
+function envLineKey(line: string): { readonly key: string; readonly value: string } | undefined {
+  const t = line.trim().replace(/^export\s+/, "");
+  if (!t || t.startsWith("#")) return undefined;
+  const eq = t.indexOf("=");
+  if (eq === -1) return undefined;
+  return { key: t.slice(0, eq).trim(), value: t.slice(eq + 1).trim() };
+}
+
+/** Minimal dotenv: KEY=VALUE lines (an `export ` in front is allowed), no interpolation. */
 function loadDotenv(path: string): void {
   if (!existsSync(path)) return;
   for (const raw of readFileSync(path, "utf8").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    const key = line.slice(0, eq).trim();
-    let value = line.slice(eq + 1).trim();
+    const parsed = envLineKey(raw);
+    if (!parsed) continue;
+    const key = parsed.key;
+    let value = parsed.value;
     if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
@@ -69,13 +80,18 @@ export function keySource(key: string): KeySource {
   return sources.get(key) ?? (process.env[key] ? "shell" : "none");
 }
 
-function stateDirFromEnv(): string {
-  return expandHome(process.env["HORMES_STATE_DIR"] || "~/.hormes");
+/** The state dir: HORMES_STATE_DIR, or ~/.hormes when it is unset or empty. A leading ~ is `home`. */
+function stateDirFromEnv(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+  return expandHome(env["HORMES_STATE_DIR"] || "~/.hormes", home);
 }
 
-/** Path of the state-dir env file (secrets live here, mode 0600). */
-export function envFilePath(): string {
-  return join(stateDirFromEnv(), "env");
+/**
+ * Path of the state-dir env file (secrets live here, mode 0600), the one loadEnv reads. With no
+ * arguments it is this process's. The brain's SecretRedactor passes the env and home it was built
+ * with, so the rule for which file holds the keys lives here once (W2-9). Reads nothing.
+ */
+export function envFilePath(env: NodeJS.ProcessEnv = process.env, home: string = homedir()): string {
+  return join(stateDirFromEnv(env, home), "env");
 }
 
 /**
@@ -96,9 +112,7 @@ export function writeEnvSecrets(patch: Partial<Record<SecretKey, string | null>>
   }
   const out: string[] = [];
   for (const raw of existing) {
-    const line = raw.trim();
-    const eq = line.indexOf("=");
-    const key = !line || line.startsWith("#") || eq === -1 ? undefined : line.slice(0, eq).trim();
+    const key = envLineKey(raw)?.key;
     if (key !== undefined && pending.has(key)) {
       const v = pending.get(key);
       if (v) out.push(`${key}=${v}`);
@@ -127,10 +141,11 @@ export function writeEnvSecrets(patch: Partial<Record<SecretKey, string | null>>
 }
 
 /** Which secrets are configured, without exposing them. */
-export function secretsPresent(): { openai: boolean; anthropic: boolean; brainApiKey: boolean } {
+export function secretsPresent(): { openai: boolean; anthropic: boolean; brainApiKey: boolean; gemini: boolean } {
   loadEnv();
   return {
     openai: Boolean(process.env["OPENAI_API_KEY"]),
+    gemini: Boolean(process.env["GEMINI_API_KEY"]),
     anthropic: Boolean(process.env["ANTHROPIC_API_KEY"]),
     brainApiKey: Boolean(process.env["HORMES_BRAIN_API_KEY"]),
   };
@@ -138,6 +153,7 @@ export function secretsPresent(): { openai: boolean; anthropic: boolean; brainAp
 
 export interface HormesConfig {
   readonly openaiApiKey: string | undefined;
+  readonly geminiApiKey?: string | undefined;
   /** Optional; the default brain (Claude Code) does not need it. */
   readonly anthropicApiKey: string | undefined;
   readonly liveModel: string;
@@ -157,7 +173,7 @@ export interface HormesConfig {
   readonly codexBin: string | undefined;
   readonly handsBin: string;
   /**
-   * The Responses model the memory extractor calls (Kevin's OpenAI key; dollars, never
+   * The Responses model the memory extractor calls (User's OpenAI key; dollars, never
    * the ChatGPT plan). Undefined = the memory package's default, a mini-class id the
    * doctor picks once from a free `GET /v1/models`. Memory never uses Codex.
    */
@@ -176,6 +192,7 @@ export function readConfig(): HormesConfig {
   const level = env["HORMES_LOG_LEVEL"];
   return {
     openaiApiKey: env["OPENAI_API_KEY"] || undefined,
+    geminiApiKey: env["GEMINI_API_KEY"] || undefined,
     anthropicApiKey: env["ANTHROPIC_API_KEY"] || undefined,
     liveModel: env["HORMES_LIVE_MODEL"] || "gpt-live-1",
     liveVoice: env["HORMES_VOICE"] || "ballad",

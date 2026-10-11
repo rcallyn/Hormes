@@ -9,7 +9,7 @@ import { Engine } from "../engine.ts";
 import { FakeLive, RecordingHands, current, settle, world, type World } from "./world.ts";
 
 /**
- * Problems, typed (REDESIGN §16): every problem line carries a kind, one remedy and when
+ * Problems, typed (typed liveness and problems): every problem line carries a kind, one remedy and when
  * it was first seen; the list dedupes by kind + text; a fixed problem clears itself; the
  * remedy button (`problem.retry`) re-runs that kind's check. Plus the disk preflight
  * (a fake statvfs), the crash report row, and the GPT-Live-1 error classifier.
@@ -150,7 +150,7 @@ test("Live errors are typed by the classifier: a limit is voice.limit with Retry
   assert.equal(classifyLiveError("response_input_buffer_full: Backend response input history is limited to 128 items and 32768 U…"), "limit");
   assert.equal(classifyLiveError("rate_limit_exceeded: Rate limit reached for gpt-live-1"), "limit");
   assert.equal(classifyLiveError("invalid_api_key: Incorrect API key provided"), "key");
-  assert.equal(classifyLiveError("OPENAI_API_KEY is missing; set it in ~/.hormes/env (Setup › Voice writes it)"), "key");
+  assert.equal(classifyLiveError("OPENAI_API_KEY is missing; set it in ~/.hormes/env (Console › Audio writes it)"), "key");
   assert.equal(classifyLiveError("live socket closed before start (code 1006)"), "connection");
   assert.equal(classifyLiveError("live session did not start within 15000ms"), "connection");
   assert.equal(classifyLiveError("unknown_parameter: nope"), "other");
@@ -173,7 +173,7 @@ test("Live errors are typed by the classifier: a limit is voice.limit with Retry
     live.emit("error", new Error("context_injection_incomplete: The session closed before the estimated context"), "x");
     assert.equal(typed(w).length, 1, "an append racing a close is not a problem");
     live.emit("error", new Error("invalid_api_key: Incorrect API key provided"), "y");
-    assert.deepEqual(ofKind(w, "voice.key")[0]!.remedy, { label: "Open Setup", open: "hormes://setup" });
+    assert.deepEqual(ofKind(w, "voice.key")[0]!.remedy, { label: "Open Settings", open: "hormes://settings" });
     // The limit clears itself after 30 s; the key row stays (nothing fixes a key by waiting).
     clock.t += Engine.VOICE_LIMIT_CLEAR_MS - 1000;
     tick(w);
@@ -205,7 +205,7 @@ test("Live errors are typed by the classifier: a limit is voice.limit with Retry
   }
 });
 
-test("no OPENAI_API_KEY is voice.key with Open Setup; a failed start is typed by its message and Go retries it", async () => {
+test("no OPENAI_API_KEY is voice.key with Open Settings; a failed start is typed by its message and Go retries it", async () => {
   const w = world();
   const { engine, live } = w;
   try {
@@ -215,7 +215,7 @@ test("no OPENAI_API_KEY is voice.key with Open Setup; a failed start is typed by
     engine.config = { ...engine.config, openaiApiKey: undefined };
     await engine.wake("test");
     assert.equal(engine.currentPhase, "error");
-    assert.deepEqual(ofKind(w, "voice.key").map((p) => p.remedy), [{ label: "Open Setup", open: "hormes://setup" }]);
+    assert.deepEqual(ofKind(w, "voice.key").map((p) => p.remedy), [{ label: "Open Settings", open: "hormes://settings" }]);
     engine.config = { ...engine.config, openaiApiKey: key };
     live.failStart = true;
     await engine.wake("test");
@@ -381,7 +381,7 @@ test("a reconnect whose start fails: the counting row ends and the failed start'
   }
 });
 
-test("an exhausted quota is a billing problem, not a limit: voice.key with Open Setup, and it does not clear after 30 s", async () => {
+test("an exhausted quota is a billing problem, not a limit: voice.key with Open Settings, and it does not clear after 30 s", async () => {
   assert.equal(classifyLiveError("insufficient_quota: You exceeded your current quota, please check your plan and billing details."), "key");
   assert.equal(classifyLiveError("billing_hard_limit_reached: Billing hard limit has been reached"), "key");
   assert.equal(classifyLiveError("rate_limit_exceeded: Rate limit reached for gpt-live-1: Limit 3, Used 3, Requested 1"), "limit");
@@ -397,7 +397,7 @@ test("an exhausted quota is a billing problem, not a limit: voice.key with Open 
     assert.equal(ofKind(w, "voice.limit").length, 0);
     const key = ofKind(w, "voice.key");
     assert.equal(key.length, 1);
-    assert.deepEqual(key[0]!.remedy, { label: "Open Setup", open: "hormes://setup" });
+    assert.deepEqual(key[0]!.remedy, { label: "Open Settings", open: "hormes://settings" });
     clock.t += Engine.VOICE_LIMIT_CLEAR_MS + 5000;
     tick(w);
     assert.equal(ofKind(w, "voice.key").length, 1, "nothing fixes a quota by waiting");
@@ -431,7 +431,7 @@ test("the disk preflight runs before every capture: a disk that fills mid-sessio
   }
 });
 
-test("brain.local is a ProblemKind of its own (the amber, Kevin-does-a-thing class beside permission.*), carries a copyable command in its remedy, and its Retry restarts the brain like the other brain kinds", async () => {
+test("brain.local is a ProblemKind of its own (the amber, User-does-a-thing class beside permission.*), carries a copyable command in its remedy, and its Retry restarts the brain like the other brain kinds", async () => {
   const starts = { n: 0 };
   const brain = {
     kind: "fake",
@@ -453,7 +453,7 @@ test("brain.local is a ProblemKind of its own (the amber, Kevin-does-a-thing cla
     engine.problemOf(kind, "Local brain: Ollama 0.34.0 is up but nothing on it can call tools. In a terminal: ollama pull qwen3.5:27b (17 GB, fits this Mac).", remedy);
     const rows = ofKind(w, kind);
     assert.equal(rows.length, 1);
-    assert.equal(rows[0]!.remedy?.copy, "ollama pull qwen3.5:27b", "the command Kevin runs himself rides on the remedy; no surface runs it");
+    assert.equal(rows[0]!.remedy?.copy, "ollama pull qwen3.5:27b", "the command User runs himself rides on the remedy; no surface runs it");
     assert.deepEqual(rows[0]!.remedy?.command, { type: "problem.retry", kind: "brain.local" });
     const before = starts.n;
     await engine.command({ type: "problem.retry", kind });

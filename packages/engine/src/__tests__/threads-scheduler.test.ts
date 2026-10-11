@@ -78,7 +78,7 @@ const fakeConnector: AgentConnector = {
   read: async () => "",
 };
 
-function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory?: (q: string, signal: AbortSignal) => Promise<string | undefined>; look?: () => Promise<string | undefined>; factory?: boolean; coalesceMs?: number; withMain?: boolean; /** A brain's `stop()` takes this long (a real app-server's does). */ stopDelayMs?: number; /** How long a superseded turn's brain may take to let go. */ supersedeWaitMs?: number; /** A brain's `handle` ignores `cancel()` and the abort: it never returns. */ deaf?: boolean; /** The user's name the lines say (default: none wired, so "Kevin"). */ userName?: string } = {}): Harness {
+function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory?: (q: string, signal: AbortSignal) => Promise<string | undefined>; look?: () => Promise<string | undefined>; factory?: boolean; coalesceMs?: number; withMain?: boolean; /** A brain's `stop()` takes this long (a real app-server's does). */ stopDelayMs?: number; /** How long a superseded turn's brain may take to let go. */ supersedeWaitMs?: number; /** A brain's `handle` ignores `cancel()` and the abort: it never returns. */ deaf?: boolean; /** The user's name the lines say (default: none wired, so "User"). */ userName?: string } = {}): Harness {
   const clock = { t: 1_757_500_000_000 };
   const now = (): number => clock.t;
   const dir = mkdtempSync(join(tmpdir(), "jh-threads-sched-"));
@@ -125,7 +125,7 @@ function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory
     overlays,
     appleScripts,
     acquires,
-    parent: { id: "dlg_parent", liveId: "item_1", request: "tell ben on slack i'm late and play focus on spotify", kevinDialogue: "tell ben on slack i'm late and play focus on spotify", offsetMs: 1000 },
+    parent: { id: "dlg_parent", liveId: "item_1", request: "tell ben on slack i'm late and play focus on spotify", userDialogue: "tell ben on slack i'm late and play focus on spotify", offsetMs: 1000 },
     script: undefined,
     startResult: undefined,
     byName: (name) => brains.find((b) => b.name === name),
@@ -503,7 +503,7 @@ test("the background lane refuses every FOCUS tool with the lane line and no hel
   assert.equal(h.acquires.length, 1);
   assert.equal(h.acquires[0]!.actor, h.spawned().find((t) => t.name === "Slack")!.id);
   assert.equal(h.acquires[0]!.opts.priority, false);
-  assert.equal(h.acquires[0]!.opts.rank, 1, "the second admission: rank 1 (Kevin's hands and main come before every thread)");
+  assert.equal(h.acquires[0]!.opts.rank, 1, "the second admission: rank 1 (User's hands and main come before every thread)");
   assert.equal(h.hands.named("key").length, 1, "the key went out through the acting helper");
   assert.equal(h.handsBg.named("screenshot").length, 1, "the eyes' shot still reads through the reading helper");
   assert.equal(h.hands.named("screenshot").length, 0);
@@ -511,7 +511,7 @@ test("the background lane refuses every FOCUS tool with the lane line and no hel
   h.scheduler.dispose();
 });
 
-test("a follow-up supersedes the running turn on the same brain (brain.cancel once, the record closed cancelled, the process kept), the next turn carries Kevin's words and his marks; a follow-up on a finished or unknown thread is false", async () => {
+test("a follow-up supersedes the running turn on the same brain (brain.cancel once, the record closed cancelled, the process kept), the next turn carries User's words and his marks; a follow-up on a finished or unknown thread is false", async () => {
   const h = harness();
   h.script = async () => undefined;
   h.start("Spotify");
@@ -519,22 +519,22 @@ test("a follow-up supersedes the running turn on the same brain (brain.cancel on
   const fb = h.byName("Spotify")!;
   const id = h.spawned()[0]!.id;
   const first = h.scheduler.turnsOf(id)[0]!;
-  const ok = await h.scheduler.followUp(id, "skip this song", { items: [{ id: "u1", speaker: "kevin", text: "spotify, skip this song", startMs: 1, endMs: 2, at: h.clock.t, final: true }], marks: [{ path: "/tmp/m.png", mediaType: "image/png", note: "Kevin circled this", kind: "mark" }] });
+  const ok = await h.scheduler.followUp(id, "skip this song", { items: [{ id: "u1", speaker: "user", text: "spotify, skip this song", startMs: 1, endMs: 2, at: h.clock.t, final: true }], marks: [{ path: "/tmp/m.png", mediaType: "image/png", note: "User circled this", kind: "mark" }] });
   assert.equal(ok, true);
   await until(() => fb.tasks.length === 2);
   assert.equal(fb.cancels, 1);
   assert.equal(fb.stops, 0);
   assert.equal(fb.tasks[1]!.request, "skip this song");
   assert.equal(fb.tasks[1]!.confirmation, false);
-  assert.match(fb.tasks[1]!.dialogue, /Kevin \(to Spotify\): skip this song$/);
-  assert.match(fb.tasks[1]!.kevinDialogue ?? "", /skip this song$/);
+  assert.match(fb.tasks[1]!.dialogue, /User \(to Spotify\): skip this song$/);
+  assert.match(fb.tasks[1]!.userDialogue ?? "", /skip this song$/);
   assert.ok(fb.tasks[1]!.attachments?.some((a) => a.kind === "mark"));
   assert.ok(fb.tasks[1]!.attachments?.some((a) => a.kind === "screen"), "a fresh eyes' shot too");
   const turns = h.scheduler.turnsOf(id);
   assert.equal(turns.length, 2);
   assert.equal(turns[0]!.id, first.id);
   assert.equal(turns[0]!.status, "cancelled");
-  assert.equal(turns[0]!.summary, "superseded by Kevin's follow-up");
+  assert.equal(turns[0]!.summary, "superseded by User's follow-up");
   assert.equal(turns[1]!.status, "running");
   assert.equal(h.spawned()[0]!.turns, 2);
   assert.ok(busy(h.spawned()[0]));
@@ -560,14 +560,14 @@ test("answerYes arms only when the floor is that thread's: refused with the floo
   };
   assert.deepEqual(await h.scheduler.answerYes("t_nobody"), { ok: false, reason: "no question is waiting" });
   h.start("Slack", "send the message", "screen");
-  await until(() => h.spawned()[0]?.status === "waiting-kevin");
+  await until(() => h.spawned()[0]?.status === "waiting-user");
   const slackId = h.spawned()[0]!.id;
   assert.equal(h.desk.floor?.laneId, slackId);
   assert.equal(h.voice.says.length, 1, "spoken once, with its name");
   assert.match(h.voice.says[0]!, /^Slack asks: /);
   assert.equal(h.scheduler.turnsOf(slackId)[0]!.status, "awaiting-confirmation");
   h.start("Spotify", "clear the queue", "screen");
-  await until(() => h.spawned().find((t) => t.name === "Spotify")?.status === "waiting-kevin");
+  await until(() => h.spawned().find((t) => t.name === "Spotify")?.status === "waiting-user");
   const spotifyId = h.spawned().find((t) => t.name === "Spotify")!.id;
   assert.equal(h.desk.queuedCount, 1);
   // The queued thread's record carries ITS question's words, not the "Queued behind Slack's question…" text its brain read.
@@ -586,11 +586,11 @@ test("answerYes arms only when the floor is that thread's: refused with the floo
   assert.equal(h.byName("Slack")!.tasks[1]!.confirmation, true);
   assert.equal(h.spawned().find((t) => t.name === "Slack")!.turns, 2);
   await until(() => h.spawned().find((t) => t.name === "Slack")?.status === "done");
-  // The queue moved: Spotify's question is on the floor, spoken with its name; Kevin says no.
+  // The queue moved: Spotify's question is on the floor, spoken with its name; User says no.
   await until(() => h.desk.floor?.laneId === spotifyId);
   assert.ok(h.voice.says.some((s) => /^Spotify asks: /.test(s)));
-  // One `waiting-kevin` row per thread: the promotion re-spoke the question, it did not re-record the status.
-  const waitingRows = h.rows("thread.status").filter((r) => r.status === "waiting-kevin");
+  // One `waiting-user` row per thread: the promotion re-spoke the question, it did not re-record the status.
+  const waitingRows = h.rows("thread.status").filter((r) => r.status === "waiting-user");
   assert.equal(waitingRows.filter((r) => r.threadId === slackId).length, 1);
   assert.equal(waitingRows.filter((r) => r.threadId === spotifyId).length, 1, "the queued question was recorded once, when its turn ended; the promotion wrote no second row");
   assert.equal(waitingRows.find((r) => r.threadId === spotifyId)!.detail, h.table.get(spotifyId)!.question, "and with the question's own words");
@@ -598,7 +598,7 @@ test("answerYes arms only when the floor is that thread's: refused with the floo
   assert.equal(await h.scheduler.answerNo(spotifyId), true);
   assert.equal(h.desk.floor, undefined);
   await until(() => h.spawned().find((t) => t.name === "Spotify")?.status === "stopped");
-  assert.equal(h.spawned().find((t) => t.name === "Spotify")!.detail, "Kevin said no");
+  assert.equal(h.spawned().find((t) => t.name === "Spotify")!.detail, "User said no");
   assert.equal(results["Spotify"]!.length, 1, "never clicked");
   assert.equal(await h.scheduler.answerNo("t_nobody"), false);
   h.scheduler.dispose();
@@ -615,16 +615,16 @@ test("pause: the turn is superseded (brain.cancel once), the lease released, the
   assert.equal(h.byName("Spotify")!.cancels, 1);
   assert.equal(h.byName("Spotify")!.stops, 0, "the process stays warm");
   assert.equal(h.table.get(spotify.id)!.status, "paused");
-  assert.equal(h.table.get(spotify.id)!.detail, "Kevin paused it");
+  assert.equal(h.table.get(spotify.id)!.detail, "User paused it");
   assert.equal(h.scheduler.turnsOf(spotify.id)[0]!.status, "cancelled");
-  assert.equal(h.scheduler.turnsOf(spotify.id)[0]!.summary, "Kevin paused it");
+  assert.equal(h.scheduler.turnsOf(spotify.id)[0]!.summary, "User paused it");
   assert.deepEqual(h.rows("thread.status").map((r) => [r.threadId, r.status]), [[spotify.id, "paused"]]);
   assert.equal(h.scheduler.statusLine("spotify"), "Spotify is paused at step 0");
   assert.equal(await h.scheduler.pause(spotify.id), false, "already paused");
   assert.equal(h.scheduler.running(), 2, "paused threads are live");
   await h.scheduler.resume(spotify.id);
   await until(() => h.byName("Spotify")!.tasks.length === 2);
-  assert.match(h.byName("Spotify")!.tasks[1]!.dialogue, /Kevin paused you at step 0; carry on/);
+  assert.match(h.byName("Spotify")!.tasks[1]!.dialogue, /User paused you at step 0; carry on/);
   assert.ok(busy(h.table.get(spotify.id)));
   await h.scheduler.pauseAll();
   assert.equal(h.table.count("paused"), 2);
@@ -672,7 +672,7 @@ test("speak_progress on a thread speaks once per turn as '<Name>: …' and never
   h.scheduler.dispose();
 });
 
-test("stop by kevin speaks '<Name> stopped.', by cut is silent, by the brain (thread_stop) answers the brain; stopNamed is case-insensitive and false for a finished thread; thread_wait waits for a settled or waiting thread and reads a finished one", async () => {
+test("stop by user speaks '<Name> stopped.', by cut is silent, by the brain (thread_stop) answers the brain; stopNamed is case-insensitive and false for a finished thread; thread_wait waits for a settled or waiting thread and reads a finished one", async () => {
   const h = harness();
   h.script = async () => undefined;
   const task = { delegationId: "item_1", request: h.parent.request, dialogue: "", confirmation: false, offsetMs: 0, signal: new AbortController().signal };
@@ -686,12 +686,12 @@ test("stop by kevin speaks '<Name> stopped.', by cut is silent, by the brain (th
   const waiting = h.scheduler.tool("thread_wait", { name: "Spotify", timeout: 5 }, { task });
   await settle(20);
   assert.equal(await h.scheduler.stopNamed("SPOTIFY"), true);
-  assert.match(text(await waiting), /^Spotify: stopped — Kevin stopped it \(Kevin was told: "Spotify stopped\."\)/);
+  assert.match(text(await waiting), /^Spotify: stopped — User stopped it \(User was told: "Spotify stopped\."\)/);
   assert.deepEqual(h.voice.says, ["Spotify stopped."]);
   assert.equal(await h.scheduler.stopNamed("spotify"), false, "finished: not live");
   assert.equal(await h.scheduler.stop("t_nobody"), false);
   const stopped = await h.scheduler.tool("thread_stop", { name: "Slack" }, { task });
-  assert.match(text(stopped), /^Slack stopped \(0 steps\)\. Kevin was told: "Slack stopped\."$/);
+  assert.match(text(stopped), /^Slack stopped \(0 steps\)\. User was told: "Slack stopped\."$/);
   assert.deepEqual(h.voice.says, ["Spotify stopped.", "Slack stopped."]);
   assert.equal(h.byName("Slack")!.cancels, 1);
   assert.equal(h.byName("Slack")!.stops, 1);
@@ -713,7 +713,7 @@ test("stop by kevin speaks '<Name> stopped.', by cut is silent, by the brain (th
   noParent.scheduler.dispose();
 });
 
-test("statusLine through the scheduler: the tool's phrase while acting, the question while waiting on Kevin, the overview for two; threadNames lists the live spawned names; anyScreenBusy is true only for a screen thread at work", async () => {
+test("statusLine through the scheduler: the tool's phrase while acting, the question while waiting on User, the overview for two; threadNames lists the live spawned names; anyScreenBusy is true only for a screen thread at work", async () => {
   const h = harness();
   const holds = new Map<string, () => void>();
   h.script = async (job) => {
@@ -746,27 +746,27 @@ test("statusLine through the scheduler: the tool's phrase while acting, the ques
   assert.equal(h.scheduler.statusLine("slack"), "Slack is waiting on you: send it to Ben?");
   assert.deepEqual(h.voice.says, ["Slack asks: send it to Ben?"]);
   assert.equal(h.scheduler.speakQuestion("Hormes", "May I?"), false, "the main lane's: the engine speaks for it");
-  assert.equal(h.scheduler.anyScreenBusy(), false, "waiting on Kevin is not at work");
+  assert.equal(h.scheduler.anyScreenBusy(), false, "waiting on User is not at work");
   await h.scheduler.cancelAll("done");
   assert.equal(h.scheduler.statusLine(), "nothing is running");
   h.scheduler.dispose();
 });
 
-test("apps are claimed from open_app, `tell application`, and a browser host; a tagged orb.fly from the thread's toolset carries `thread` to the overlay and lands on the record as `at`; the summaries carry the app and the lane", async () => {
+test("apps are claimed from open_app, `tell application`, and a browser host; a click pulse from the thread's toolset lands on the record as `at`; the summaries carry the app and the lane", async () => {
   const h = harness();
   h.script = async (job) => {
     await job.runner.run("applescript", { script: 'tell application "Spotify" to play track "x"' });
     await job.runner.run("web_fetch", { url: "https://example.com/x" });
     // The blob's fly rides the toolset's annotate: tagged with the thread.
-    (job.runner as unknown as { opts: { toolset: { opts: { annotate?: (c: OverlayCommand) => void } } } }).opts.toolset.opts.annotate?.({ cmd: "orb.fly", x: 100.4, y: 200.6, reason: "click" });
+    (job.runner as unknown as { opts: { toolset: { opts: { annotate?: (c: OverlayCommand) => void } } } }).opts.toolset.opts.annotate?.({ cmd: "click-pulse", x: 100.4, y: 200.6 });
     (job.runner as unknown as { opts: { toolset: { opts: { annotate?: (c: OverlayCommand) => void } } } }).opts.toolset.opts.annotate?.({ cmd: "rect", rect: { x: 0, y: 0, w: 1, h: 1 } });
     return undefined;
   };
   h.start("Spotify");
   await until(() => h.overlays.length === 2);
   const id = h.spawned()[0]!.id;
-  const fly = h.overlays.find((c) => c.cmd === "orb.fly") as Extract<OverlayCommand, { cmd: "orb.fly" }>;
-  assert.equal(fly.thread, id, "tagged with the thread");
+  const fly = h.overlays.find((c) => c.cmd === "click-pulse") as Extract<OverlayCommand, { cmd: "click-pulse" }>;
+  assert.equal(fly.cmd, "click-pulse", "click feedback is forwarded");
   assert.equal((h.overlays.find((c) => c.cmd === "rect") as { thread?: string }).thread, undefined, "a shape is untagged");
   assert.deepEqual(h.table.get(id)!.at, { x: 100, y: 201 });
   await settle(60);
@@ -788,17 +788,17 @@ test("apps are claimed from open_app, `tell application`, and a browser host; a 
 
 test("the task carries the memory block (bounded at 250 ms: a hanging hook leaves it out) and the composite look in notes[0] before the identity note; with eyes off no screenshot is taken", async () => {
   let hang = false;
-  const memory = (q: string, signal: AbortSignal): Promise<string | undefined> => (hang ? new Promise((r) => signal.addEventListener("abort", () => r(undefined))) : Promise.resolve(`Kevin prefers Focus (asked: ${q.slice(0, 20)})`));
+  const memory = (q: string, signal: AbortSignal): Promise<string | undefined> => (hang ? new Promise((r) => signal.addEventListener("abort", () => r(undefined))) : Promise.resolve(`User prefers Focus (asked: ${q.slice(0, 20)})`));
   const h = harness({ memory, look: async () => "now: Spotify in front; playlist Focus selected" });
   h.script = async () => ({ status: "done", summary: "ok." });
   h.start("Spotify");
   await until(() => h.byName("Spotify")?.tasks.length === 1);
   const task = h.byName("Spotify")!.tasks[0]!;
-  assert.match(task.memory ?? "", /^Kevin prefers Focus/);
+  assert.match(task.memory ?? "", /^User prefers Focus/);
   assert.equal(task.notes?.[0], "now: Spotify in front; playlist Focus selected");
   assert.match(task.notes?.[1] ?? "", /^you are Hormes's thread Spotify; your job: Spotify's job$/);
-  assert.equal(task.kevinDialogue, h.parent.kevinDialogue);
-  assert.doesNotMatch(task.kevinDialogue ?? "", /prefers Focus/, "never inside kevinDialogue");
+  assert.equal(task.userDialogue, h.parent.userDialogue);
+  assert.doesNotMatch(task.userDialogue ?? "", /prefers Focus/, "never inside userDialogue");
   hang = true;
   const t0 = Date.now();
   h.start("Slack");
@@ -822,7 +822,7 @@ test("idle end: a thread paused for THREAD_IDLE_END_MS (here after its question)
     return { status: "done", summary: r.kind === "needs-confirmation" ? r.question : "sent." };
   };
   h.start("Slack", "send it", "screen");
-  await until(() => h.spawned()[0]?.status === "waiting-kevin");
+  await until(() => h.spawned()[0]?.status === "waiting-user");
   assert.equal(await h.scheduler.pause(h.spawned()[0]!.id), true);
   const other: ThreadParent = { ...h.parent, id: "dlg_other" };
   h.script = async () => undefined;
@@ -941,7 +941,7 @@ test("sleep leaves 0 processes when a brain's stop() takes real time: the pool c
   h.scheduler.dispose();
 });
 
-test("a follow-up on a thread waiting on Kevin takes its question off the floor before the next turn: nothing is armable, floorThread is undefined, and the question queued behind it is promoted and spoken", async () => {
+test("a follow-up on a thread waiting on User takes its question off the floor before the next turn: nothing is armable, floorThread is undefined, and the question queued behind it is promoted and spoken", async () => {
   const h = harness();
   const clicks: string[] = [];
   h.script = async (job) => {
@@ -955,10 +955,10 @@ test("a follow-up on a thread waiting on Kevin takes its question off the floor 
     return { status: "done", summary: r.kind === "needs-confirmation" ? r.question : "sent." };
   };
   h.start("Slack", "send it to Ben", "screen");
-  await until(() => h.spawned()[0]?.status === "waiting-kevin");
+  await until(() => h.spawned()[0]?.status === "waiting-user");
   const slackId = h.spawned()[0]!.id;
   h.start("Spotify", "clear the queue", "screen");
-  await until(() => h.spawned().find((t) => t.name === "Spotify")?.status === "waiting-kevin");
+  await until(() => h.spawned().find((t) => t.name === "Spotify")?.status === "waiting-user");
   const spotifyId = h.spawned().find((t) => t.name === "Spotify")!.id;
   assert.equal(h.desk.floor?.laneId, slackId);
   assert.equal(h.desk.queuedCount, 1);
@@ -972,7 +972,7 @@ test("a follow-up on a thread waiting on Kevin takes its question off the floor 
   assert.match(h.voice.says[says]!, /^Spotify asks: /);
   assert.equal(h.table.get(slackId)!.question, undefined, "the record forgot the question");
   assert.equal(h.table.get(slackId)!.status, "thinking");
-  // Kevin's "yes" now answers Spotify, never Slack's abandoned question: Slack's re-asked click must queue, not land.
+  // User's "yes" now answers Spotify, never Slack's abandoned question: Slack's re-asked click must queue, not land.
   await until(() => clicks.length === 1);
   assert.equal(clicks[0], "needs-confirmation", "Slack asked again (queued behind Spotify's); no click landed");
   assert.equal(h.hands.named("click").length, 0);
@@ -983,7 +983,7 @@ test("a follow-up on a thread waiting on Kevin takes its question off the floor 
     return r.kind === "needs-confirmation" ? undefined : { status: "done", summary: "sent." };
   };
   lone.start("Mail", "send it", "screen");
-  await until(() => lone.spawned()[0]?.status === "waiting-kevin");
+  await until(() => lone.spawned()[0]?.status === "waiting-user");
   await lone.scheduler.followUp(lone.spawned()[0]!.id, "never mind, archive it");
   assert.equal(lone.desk.floor, undefined);
   assert.equal(lone.root.pending, undefined);
@@ -1013,7 +1013,7 @@ test("a follow-up while the brain still boots becomes its first turn — exactly
   const fb = h.byName("Spotify")!;
   assert.equal(fb.tasks.length, 1, "ONE handle: the follow-up is the first turn, the first task never ran beside it");
   assert.equal(fb.tasks[0]!.request, "skip this song");
-  assert.match(fb.tasks[0]!.dialogue, /^Hormes \(to its thread Spotify\)[\s\S]*Kevin \(to Spotify\): skip this song$/, "its dialogue carries the brief and the words");
+  assert.match(fb.tasks[0]!.dialogue, /^Hormes \(to its thread Spotify\)[\s\S]*User \(to Spotify\): skip this song$/, "its dialogue carries the brief and the words");
   assert.equal(fb.cancels, 0, "nothing to supersede");
   assert.equal(h.scheduler.turnsOf(spotifyId).length, 1);
   assert.equal(h.scheduler.turnsOf(spotifyId)[0]!.status, "running");
@@ -1112,7 +1112,7 @@ test("answerNo on a live thread that is not waiting drops only its question and 
   assert.ok(busy(h.table.get(id)), "still live");
   assert.equal(h.byName("Slack")!.stops, 0);
   asks.n++;
-  await until(() => h.table.get(id)?.status === "waiting-kevin");
+  await until(() => h.table.get(id)?.status === "waiting-user");
   assert.equal(h.desk.floor?.laneId, id);
   assert.equal(h.desk.floor?.name, "Slack", "the lane kept its name");
   assert.match(h.voice.says[h.voice.says.length - 1]!, /^Slack asks: /);
@@ -1122,9 +1122,9 @@ test("answerNo on a live thread that is not waiting drops only its question and 
   h.scheduler.dispose();
 });
 
-test("the user's name: the lines a thread's brain reads say the name — thread_start's refusal, the brief's gate line, a pause's detail and continuation, a stop's detail and thread_wait's told line; for another name no literal Kevin and the same words otherwise", async () => {
-  const lines: Record<"Kevin" | "Sam", string[]> = { Kevin: [], Sam: [] };
-  for (const who of ["Kevin", "Sam"] as const) {
+test("the user's name: the lines a thread's brain reads say the name — thread_start's refusal, the brief's gate line, a pause's detail and continuation, a stop's detail and thread_wait's told line; for another name no literal User and the same words otherwise", async () => {
+  const lines: Record<"User" | "Sam", string[]> = { User: [], Sam: [] };
+  for (const who of ["User", "Sam"] as const) {
     const h = harness(who === "Sam" ? { userName: "Sam" } : {});
     h.script = async () => undefined;
     const task = { delegationId: "item_1", request: h.parent.request, dialogue: "", confirmation: false, offsetMs: 0, signal: new AbortController().signal };
@@ -1149,25 +1149,25 @@ test("the user's name: the lines a thread's brain reads say the name — thread_
     h.scheduler.dispose();
   }
   // The defaults, as the older pins read them.
-  assert.equal(lines.Kevin[0], "thread_start needs a name Kevin will hear (one word, usually the app)");
-  assert.match(lines.Kevin[1]!, /Kevin's own words, for names and gates: "tell ben on slack/);
-  assert.equal(lines.Kevin[2], "Kevin paused it");
-  assert.match(lines.Kevin[3]!, /Kevin paused you at step 0; carry on from where you were\.$/);
-  assert.match(lines.Kevin[4]!, /^Spotify: stopped — Kevin stopped it \(Kevin was told: "Spotify stopped\."\)/);
-  assert.equal(lines.Kevin[5], "Kevin stopped it");
-  // Another name: the same six lines, the name in every one, no literal Kevin anywhere.
-  assert.equal(lines.Sam.length, lines.Kevin.length);
+  assert.equal(lines.User[0], "thread_start needs a name User will hear (one word, usually the app)");
+  assert.match(lines.User[1]!, /User's own words, for names and gates: "tell ben on slack/);
+  assert.equal(lines.User[2], "User paused it");
+  assert.match(lines.User[3]!, /User paused you at step 0; carry on from where you were\.$/);
+  assert.match(lines.User[4]!, /^Spotify: stopped — User stopped it \(User was told: "Spotify stopped\."\)/);
+  assert.equal(lines.User[5], "User stopped it");
+  // Another name: the same six lines, the name in every one, no literal User anywhere.
+  assert.equal(lines.Sam.length, lines.User.length);
   for (let i = 0; i < lines.Sam.length; i++) {
-    assert.doesNotMatch(lines.Sam[i]!, /Kevin/, lines.Sam[i]);
+    assert.doesNotMatch(lines.Sam[i]!, /User/, lines.Sam[i]);
     assert.match(lines.Sam[i]!, /Sam/, lines.Sam[i]);
-    assert.equal(lines.Sam[i]!.replaceAll("Sam", "Kevin"), lines.Kevin[i]!, `line ${i} reads the same for another name`);
+    assert.equal(lines.Sam[i]!.replaceAll("Sam", "User"), lines.User[i]!, `line ${i} reads the same for another name`);
   }
   // The pure texts, and the default constant the older imports read.
-  assert.equal(CONFIRMATION_RESUME, confirmationResume("Kevin"));
+  assert.equal(CONFIRMATION_RESUME, confirmationResume("User"));
   assert.equal(confirmationResume("Sam"), "\n\nHormes (to its thread): Sam said yes. Call the same tool again with exactly the same arguments, then finish your job.");
-  assert.equal(resumeText(3), resumeText(3, "Kevin"));
+  assert.equal(resumeText(3), resumeText(3, "User"));
   assert.equal(resumeText(3, "Sam"), "\n\nHormes (to its thread): Sam paused you at step 3; carry on from where you were.");
   const brief = threadBrief("Spotify", "play Focus", "background", "play focus", "Sam");
-  assert.doesNotMatch(brief, /Kevin/);
-  assert.equal(brief.replaceAll("Sam", "Kevin"), threadBrief("Spotify", "play Focus", "background", "play focus"));
+  assert.doesNotMatch(brief, /User/);
+  assert.equal(brief.replaceAll("Sam", "User"), threadBrief("Spotify", "play Focus", "background", "play focus"));
 });

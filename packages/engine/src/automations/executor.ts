@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readlinkSync, renameSync, statSync } from "node:
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { HANDS_OFF_APPS, classifyAction, classifyUrl, clockOf, openPathReason, pressKeyReason, describeInstant, expandPath, newId, riskyUrlReason, secretPathReason, snoozeDefault, type ActionContext, type Decision, type Ledger } from "@hormes/core";
 import { runShell, type Brain, type BrainResult, type BrainSink, type BrainTask } from "@hormes/brain";
-import { KEVIN_QUIET_MS, NativeRequestError, USER_IDLE_POLL_MS, WAIT_MAX_MS, isHandsBusyMessage, type FocusedText, type FrontmostInfo, type NativeHands, type UserIdle } from "@hormes/hands";
+import { USER_QUIET_MS, NativeRequestError, USER_IDLE_POLL_MS, WAIT_MAX_MS, isHandsBusyMessage, type FocusedText, type FrontmostInfo, type NativeHands, type UserIdle } from "@hormes/hands";
 import { AUTOMATION_LINE_CHARS, automationKind, recipeNamed, ringOf, type Automation, type AutomationAction, type AutomationActionKind, type AutomationKind, type AutomationPress, type Delegation, type EngineEvent, type ProblemKind, type ProblemRemedy, type Settings } from "@hormes/protocol";
 import type { LaneRunner } from "../threads/runner.ts";
 
@@ -30,11 +30,11 @@ const RECIPE_OUTPUT_CHARS = 120;
 /** How long `open` waits for `/usr/bin/open`. */
 const OPEN_TIMEOUT_MS = 10_000;
 /** A headless brain turn is told this much before the user's prompt. */
-export function headlessNote(userName = "Kevin"): string {
+export function headlessNote(userName = "User"): string {
   return `You run headless for one of ${userName}'s automations while away: nobody answers a question, so never call a tool that would need a yes — answer with what you can see and do freely, in one or two sentences.`;
 }
 /** The default's text, for the pins. */
-export const HEADLESS_NOTE: string = headlessNote("Kevin");
+export const HEADLESS_NOTE: string = headlessNote("User");
 
 // -------------------------------------------------------------------- seams
 
@@ -147,7 +147,7 @@ export interface ExecutorOptions {
   readonly brainSpentToday: () => number;
   /** A fire about to wake the brain reserves its budget under its row's id, so two rows due in one tick cannot both pass the cap; the façade clears it when the fire settles. */
   readonly reserveBrain: (automationId: string, seconds: number) => void;
-  /** The user's name as the lines say it (the engine's effective name; "Kevin" when none is wired). */
+  /** The user's name as the lines say it (the engine's effective name; "User" when none is wired). */
   readonly userName?: (() => string) | undefined;
   /** How a busy `open` or `press` waits between `user_idle` reads (tests move a virtual clock); default setTimeout. */
   readonly sleep?: ((ms: number) => Promise<void>) | undefined;
@@ -220,27 +220,27 @@ export class AutomationExecutor {
 
   /**
    * The helper held an `open` or a `press` because the user's hands are on the machine (W2-4). Nobody is asked and
-   * nothing is billed: `user_idle` is read every USER_IDLE_POLL_MS until the quiet window (KEVIN_QUIET_MS) has passed,
+   * nothing is billed: `user_idle` is read every USER_IDLE_POLL_MS until the quiet window (USER_QUIET_MS) has passed,
    * for at most WAIT_MAX_MS. True when it passed in time (or `user_idle` cannot be read), so the caller sends once more.
    */
   private async waitForQuiet(): Promise<boolean> {
     const until = this.opts.now() + WAIT_MAX_MS;
     for (;;) {
       const idle = await this.opts.hands.request<UserIdle>("user_idle", {}, 1500).catch(() => undefined);
-      if (idle === undefined || idle.foreignMs >= KEVIN_QUIET_MS) return true;
+      if (idle === undefined || idle.foreignMs >= USER_QUIET_MS) return true;
       if (this.opts.now() >= until) return false;
       await this.sleep(USER_IDLE_POLL_MS);
     }
   }
 
-  /** The step's failure when the user's hands never left the machine: "Kevin was using the keyboard or mouse, so Zoom was not opened." */
+  /** The step's failure when the user's hands never left the machine: "User was using the keyboard or mouse, so Zoom was not opened." */
   private busyDetail(what: string): string {
     return `${this.userName} was using the keyboard or mouse, so ${what}.`;
   }
 
   /** The user's name as every line here says it. */
   private get userName(): string {
-    return this.opts.userName?.() || "Kevin";
+    return this.opts.userName?.() || "User";
   }
 
   /** The island's line for a row: alarm "07:10 · name", timer "name · 12:00 is up", reminder "name", routine / watcher "name · what it did" (a reminder whose acting kind did something says so too). */
@@ -264,7 +264,7 @@ export class AutomationExecutor {
   }
 
   /**
-   * Run the row's actions in Kevin's order; the first failure stops the chain (a line kind
+   * Run the row's actions in User's order; the first failure stops the chain (a line kind
    * before a failing acting kind has already rung — that is the order he set). The line, the
    * calm second line and the presses are the island's; every text is redacted. Awake, the
    * line kinds are one instruction to Live for the whole fire.
@@ -285,7 +285,7 @@ export class AutomationExecutor {
     const spoken: string[] = [];
     // A session opening: what each line kind would have sounded, rung only if the session never opens (`holdForSession`).
     const held: EngineEvent[] = [];
-    // The actions run in the order Kevin set them — `then` is his sequence — and the first failure stops the chain.
+    // The actions run in the order User set them — `then` is his sequence — and the first failure stops the chain.
     for (const action of a.then) {
       if (ctx.muted && LINE_KINDS.has(action.kind)) continue;
       actions.push(action.kind);

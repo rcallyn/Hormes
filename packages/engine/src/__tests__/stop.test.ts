@@ -8,7 +8,7 @@ import { delegate, frame, nextUtterance, rows, settle, until, world } from "./wo
  * Two stops. An INTERRUPT (a spoken "stop", the `interrupt` command) ends the work
  * and the speech and keeps the session open and listening: Live has no interrupt,
  * so it is local — the speaker is flushed and every output frame is dropped for a
- * while (until Kevin speaks or 2.5 s pass), the running delegation is cancelled and
+ * while (until User speaks or 2.5 s pass), the running delegation is cancelled and
  * the brain's cancel called, a hands request in flight is failed so its late answer
  * never acts, the voice is told, a toast says "stopped". A STOP (the Stop button,
  * the `stop` command) does all of that and then CLOSES the session — the meter
@@ -56,10 +56,10 @@ test("interrupt: output audio is dropped for the gate window, the running delega
     assert.ok(took < 150 * RUNNER_SLACK, `interrupt returned in ${took} ms (under ${150 * RUNNER_SLACK})`);
     assert.equal(brain.cancels, 1, "the brain's cancel was called");
     assert.equal(engine.snapshot().delegations[0]?.status, "cancelled");
-    assert.equal(engine.snapshot().delegations[0]?.summary, "Kevin pressed stop");
+    assert.equal(engine.snapshot().delegations[0]?.summary, "User pressed stop");
     assert.ok(events.some((e) => e.type === "speaker-flush"), "the speaker was flushed");
     assert.ok(events.some((e) => e.type === "toast" && e.text === "stopped"), "a toast says stopped");
-    assert.deepEqual(live.instructions, ["Kevin pressed stop. Stop speaking now and wait."], "the voice was told once — not also asked to acknowledge");
+    assert.deepEqual(live.instructions, ["User pressed stop. Stop speaking now and wait."], "the voice was told once — not also asked to acknowledge");
     assert.equal(engine.outputGated, true);
     assert.notEqual(engine.currentPhase, "speaking", "no longer speaking, whatever the transcript said a moment ago");
     // The session is still open and ours.
@@ -92,7 +92,7 @@ test("interrupt: output audio is dropped for the gate window, the running delega
     live.emit("audio", frame());
     assert.equal(audio.length, 1, "after the window, audio flows again");
 
-    // A second interrupt and Kevin's voice: the gate ends the moment he speaks.
+    // A second interrupt and User's voice: the gate ends the moment he speaks.
     await engine.command({ type: "interrupt" });
     assert.equal(engine.outputGated, true);
     live.emit("audio", frame());
@@ -100,7 +100,7 @@ test("interrupt: output audio is dropped for the gate window, the running delega
     // "never mind" begins with a stop phrase, but the press already cut the voice: nothing is audible to say it over,
     // so it lifts the gate and is not a second stop.
     live.emit("inputTranscript", " never mind", 3000, 3400);
-    assert.equal(engine.outputGated, false, "Kevin spoke: the gate is lifted");
+    assert.equal(engine.outputGated, false, "User spoke: the gate is lifted");
     assert.deepEqual(rows<StopRow>(w, "stop").map((r) => r.how), ["pressed", "pressed"], "one row per press, none for his words");
     live.emit("audio", frame());
     assert.equal(audio.length, 2);
@@ -125,7 +125,7 @@ test("interrupt with nothing running is harmless: a flush, a toast, the voice to
     assert.equal(engine.snapshot().delegations.length, 0);
     assert.ok(events.some((e) => e.type === "speaker-flush"));
     assert.ok(events.some((e) => e.type === "toast" && e.text === "stopped"));
-    assert.equal(live.instructions.filter((i) => /Kevin pressed stop/.test(i)).length, 1);
+    assert.equal(live.instructions.filter((i) => /User pressed stop/.test(i)).length, 1);
     assert.equal(engine.currentPhase, "listening");
     assert.equal(engine.snapshot().session?.id, "sess_1");
     // Asleep: still harmless, and honest about it.
@@ -162,11 +162,11 @@ test("a spoken \"stop\" is an interrupt: the delegation is cancelled, the brain'
     live.emit("inputTranscript", " stop", live.nowMs + 200, live.nowMs + 500);
     await settle();
     assert.equal(engine.snapshot().delegations[0]?.status, "cancelled");
-    assert.equal(engine.snapshot().delegations[0]?.summary, "Kevin said stop");
+    assert.equal(engine.snapshot().delegations[0]?.summary, "User said stop");
     assert.equal(brain.cancels, 1, "the brain's cancel was called");
     assert.ok(events.some((e) => e.type === "speaker-flush"), "the speaker was flushed");
     assert.ok(events.some((e) => e.type === "toast" && e.text === "stopped"), "a toast says stopped");
-    assert.deepEqual(live.instructions, ["Kevin said stop. Stop speaking now and wait."], "one instruction, for the whole stop");
+    assert.deepEqual(live.instructions, ["User said stop. Stop speaking now and wait."], "one instruction, for the whole stop");
     assert.equal(engine.outputGated, true, "the gate is set — the 'stop' fragment itself does not lift it");
     assert.equal(live.currentState, "started", "the session stays open: a spoken stop is not the transport's stop");
     assert.equal(engine.snapshot().session?.id, "sess_1");
@@ -177,7 +177,7 @@ test("a spoken \"stop\" is an interrupt: the delegation is cancelled, the brain'
     await settle();
     assert.equal(hands.named("type").length, 0, "nothing was typed after the spoken stop");
 
-    // The voice's sentence in flight is dropped; Kevin's next utterance lifts the gate. It starts past the stop's end
+    // The voice's sentence in flight is dropped; User's next utterance lifts the gate. It starts past the stop's end
     // plus the transcript's GAP_MS: words inside the stop's own utterance never lift it (V10).
     audio.length = 0;
     live.emit("audio", frame());
@@ -195,7 +195,7 @@ test("a spoken \"stop\" is an interrupt: the delegation is cancelled, the brain'
 });
 
 /**
- * Kevin: "once we press stop we can't wake; the stop button just stays there" and
+ * User: "once we press stop we can't wake; the stop button just stays there" and
  * "even though i pressed stop im still getting billed and time is still going up".
  * After a Stop during a running delegation: the delegation is cancelled before the
  * brain's (slow) cancel is awaited, the phase is asleep and the session closed
@@ -238,7 +238,7 @@ test("stop aftermath: nothing is left running, armed or billed; asleep at once; 
     const snap = engine.snapshot();
     assert.equal(snap.delegations.filter((d) => d.status === "running" || d.status === "awaiting-confirmation").length, 0, "nothing running or awaiting");
     assert.equal(snap.delegations[0]!.status, "cancelled");
-    assert.equal(snap.delegations[0]!.summary, "Kevin pressed stop");
+    assert.equal(snap.delegations[0]!.summary, "User pressed stop");
     assert.equal(engine.confirmations.pending, undefined, "the stopped task's question is not armed for a later yes");
     assert.equal(engine.outputGated, false, "no gate: there is no session to gate");
     assert.equal(engine.transportState, "asleep");
@@ -250,7 +250,7 @@ test("stop aftermath: nothing is left running, armed or billed; asleep at once; 
     const next = lives[1]!;
     assert.equal(engine.snapshot().session?.id, "sess_2");
     await engine.command({ type: "say-text", text: "open safari" });
-    assert.ok(next.instructions.some((i) => /Kevin just typed/.test(i)));
+    assert.ok(next.instructions.some((i) => /User just typed/.test(i)));
     assert.equal(live.instructions.length, 0, "nothing went to the closed session");
     hands.ops.length = 0;
     nextUtterance(w);

@@ -7,7 +7,7 @@ import { delegate, rows, until, world, type World } from "./world.ts";
 
 /**
  * The two latency stamps that make "speech end → first visible action" measurable
- * on every delegation (docs/LATENCY.md §5): `speechEndAt` — the end of Kevin's
+ * on every delegation (docs/LATENCY.md §5): `speechEndAt` — the end of User's
  * triggering utterance, on the wall clock: when its last input delta arrived (PERF-6;
  * Live's session timeline drifts from the wall clock) — and `firstActionAt` — the first
  * acting tool that returned ok (a look-only tool and a failed acting tool do not count).
@@ -53,7 +53,7 @@ test("timings: speechEndAt is the wall clock of the triggering utterance's last 
     await engine.ready();
     engine.updateSettings({ idleSleepMinutes: 0 });
     await engine.wake("test");
-    // Kevin speaks; Live delegates 600 ms of wall clock after the utterance's last delta arrived (its decision). The
+    // User speaks; Live delegates 600 ms of wall clock after the utterance's last delta arrived (its decision). The
     // session timeline (1000 → 1900) says nothing about the wall clock: it lags it here by 600 ms.
     clock.t += 1900;
     const live = w.live;
@@ -129,10 +129,10 @@ test("timings: with no acting tool nothing is stamped as an action, and speechEn
   }
 });
 
-test("timings: a thread's steps land on ITS OWN delegation (threadId) with their own marks, never the parent's; the parent's first tool is its thread_start and it has no action; 61 s of thread actions never move lastKevinAt (the presence gate's clock)", async () => {
+test("timings: a thread's steps land on ITS OWN delegation (threadId) with their own marks, never the parent's; the parent's first tool is its thread_start and it has no action; 61 s of thread actions never move lastUserAt (the presence gate's clock)", async () => {
   const w = world();
   const { engine, brain, clock } = w;
-  const lastKevinAt = (): number => (engine as unknown as { lastKevinAt: number }).lastKevinAt;
+  const lastUserAt = (): number => (engine as unknown as { lastUserAt: number }).lastUserAt;
   try {
     let acted!: () => void;
     const actedP = new Promise<void>((r) => (acted = r));
@@ -151,11 +151,11 @@ test("timings: a thread's steps land on ITS OWN delegation (threadId) with their
     await engine.wake("test");
     delegate(w, "hormes tell ben on slack and play focus on spotify", "item_1");
     assert.ok(await until(() => brain.tasks.length === 1), "the main brain has the task (the runner is attached)");
-    const kevinBefore = lastKevinAt();
+    const userBefore = lastUserAt();
     const started = await engine.runner.run("thread_start", { name: "Spotify", task: "play Focus" });
     assert.equal(started.result.kind, "text");
     await actedP;
-    assert.equal(lastKevinAt(), kevinBefore, "61 s of a thread's actions are not Kevin's presence");
+    assert.equal(lastUserAt(), userBefore, "61 s of a thread's actions are not User's presence");
     const d = engine.snapshot().delegations[0]!;
     assert.equal(d.steps.filter((s) => s.thread === "Spotify" && s.kind === "tool").length, 0, "a thread's steps never land on the parent");
     // thread_start is the main brain's own tool step; the thread's reads are on its own record, not the main brain's first tool or action.

@@ -29,7 +29,7 @@ export const SLOW_SETTLE_TOOLS: ReadonlySet<string> = new Set(["browser_click", 
 
 /**
  * What a BACKGROUND lane's observer watches: the browser tools only. A background
- * thread never touches the pointer or the front app, so a line about Kevin's front
+ * thread never touches the pointer or the front app, so a line about User's front
  * window after its `tell application "Spotify" to play` is 150–300 ms spent on a nudge
  * in the wrong direction; a page load is worth the line. Pass as `only`.
  */
@@ -124,7 +124,7 @@ export class ActionObserver {
  * the queue would hold every act behind it for nothing — and the hands-free management
  * tools: a `thread_start` issued in the same breath as a `left_click` (the split rule
  * asks for exactly that) must not wait behind the click nor be halted when the click
- * asks Kevin — Spotify's thread has nothing to do with the Send button. `self_*` stay
+ * asks User — Spotify's thread has nothing to do with the Send button. `self_*` stay
  * in the queue: they act on Hormes's own code. Everything else acts, or may.
  */
 export const SERIALIZER_BYPASS: ReadonlySet<string> = new Set([
@@ -135,7 +135,7 @@ export const SERIALIZER_BYPASS: ReadonlySet<string> = new Set([
 ]);
 
 /** batch.ts's words for a call not run because an earlier one in the same batch did not go through (serializer.test.ts pins them equal). */
-export function haltReasonFor(name: string, outcome: RunOutcome, userName = "Kevin"): string | undefined {
+export function haltReasonFor(name: string, outcome: RunOutcome, userName = "User"): string | undefined {
   switch (outcome.result.kind) {
     case "needs-confirmation":
       return `not run: ${name} is waiting for ${userName}'s answer; ask ${userName} and stop`;
@@ -150,7 +150,7 @@ export interface ActingSerializerOptions {
   /** Tools that bypass the queue (default SERIALIZER_BYPASS); a runner subclass adds its own passive tools. */
   readonly bypass?: ReadonlySet<string>;
   readonly now?: () => number;
-  /** The user's name in the halt line (release F1), read live; default "Kevin". */
+  /** The user's name in the halt line (release F1), read live; default "User". */
   readonly userName?: () => string;
 }
 
@@ -216,7 +216,7 @@ export class ActingSerializer {
       out = { result: { kind: "error", message: (e as Error).message }, ms: 0 };
     }
     this.ran++;
-    const reason = haltReasonFor(name, out, this.opts.userName?.() || "Kevin");
+    const reason = haltReasonFor(name, out, this.opts.userName?.() || "User");
     // Halt what was queued behind this call at the moment it settled — not what comes later.
     if (reason) for (const q of this.queue) q.resolve(reason);
     this.finish(entry);

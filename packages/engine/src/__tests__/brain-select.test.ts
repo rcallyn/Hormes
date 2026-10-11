@@ -101,7 +101,7 @@ test("auto skips a Codex that is installed but not signed in without a problem l
     assert.equal(engine.brainInfo.kind, "openai-responses");
     assert.match(engine.brainInfo.detail, /responses delegation via gpt-5\.6-terra \(auto: no other brain is signed in or configured\)/);
     assert.equal(engine.snapshot().setup.brainResolved, "openai-responses");
-    // Not configured is not a problem: no key, no login, nothing Kevin asked for.
+    // Not configured is not a problem: no key, no login, nothing User asked for.
     assert.deepEqual(brainProblems(engine.snapshot()).filter((p) => /codex|claude|anthropic|compatible/i.test(p.text)), []);
   } finally {
     await engine.stop();
@@ -161,14 +161,14 @@ test("a test-injected brain is used as-is and does not claim a resolved kind", a
 });
 
 // ---- the local brain -------------------------------------------------------------------------
-// Explicit only: `local` is Kevin's pick in Settings › Brain, never auto's. Discovery is answered
+// Explicit only: `local` is User's pick in Settings › Brain, never auto's. Discovery is answered
 // by the `discoverLocal` seam; the brain's own probe (GET /v1/models) and memory's calls go to a
 // tiny HTTP stand-in for Ollama that records every request and refuses anything but reads.
 
 const ofKind = (engine: Engine, kind: ProblemKind): readonly Problem[] => engine.typedProblems().filter((p) => p.kind === kind);
 const LOCAL_REMEDY = { label: "Retry", command: { type: "problem.retry", kind: "brain.local" } };
 const BRAIN_REMEDY = { label: "Retry", command: { type: "problem.retry", kind: "brain.unavailable" } };
-const SETUP_REMEDY = { label: "Open Setup", open: "hormes://setup" };
+const SETTINGS_REMEDY = { label: "Open Settings", open: "hormes://settings" };
 
 /** A scripted discovery: what the next look answers, and how many looks were made. */
 function scriptedDiscovery(first: LocalServerStatus): { answer: LocalServerStatus; looks: number; discoverLocal: () => Promise<LocalServerStatus> } {
@@ -259,7 +259,7 @@ test("explicit local, a server with nothing that can call tools: the row carries
   }
 });
 
-test("explicit local, the picked id is not on the server: Open Setup with the pull as copy, the listed ids named", async () => {
+test("explicit local, the picked id is not on the server: Open Settings with the pull as copy, the listed ids named", async () => {
   const w = world("local", false, { brainModel: "qwen3.5:9b" });
   const status = localStatus("http://127.0.0.1:11434", [localModel("qwen3.5:27b"), localModel("gemma4:26b")]);
   const engine = new Engine({ config: w.config, connectors: [], exec: noShell, ...fakeMemory(), discoverLocal: async () => status });
@@ -269,7 +269,7 @@ test("explicit local, the picked id is not on the server: Open Setup with the pu
     const local = ofKind(engine, "brain.local");
     assert.equal(local.length, 1);
     assert.equal(local[0]!.text, "Local brain: qwen3.5:9b is not on Ollama 0.34.0 (it has qwen3.5:27b, gemma4:26b). Pull it, or pick another.");
-    assert.deepEqual(local[0]!.remedy, { ...SETUP_REMEDY, copy: "ollama pull qwen3.5:9b" });
+    assert.deepEqual(local[0]!.remedy, { ...SETTINGS_REMEDY, copy: "ollama pull qwen3.5:9b" });
     assert.equal(engine.snapshot().setup.local.picked, undefined, "nothing was picked for him");
   } finally {
     await engine.stop();
@@ -365,7 +365,7 @@ test("the heal timer: under local with nothing answering, a server that appears 
     tick();
     await settle(20);
     assert.equal(d.looks, looksAfterHeal, "a ready local brain arms no heal");
-    // Another kind: never armed. Kevin picks auto with the server gone; minutes pass; no look.
+    // Another kind: never armed. User picks auto with the server gone; minutes pass; no look.
     d.answer = localNone();
     engine.updateSettings({ brain: "auto" });
     assert.ok(await until(() => engine.brainInfo.kind === "openai-responses", 5000));
@@ -444,7 +444,7 @@ test("the heal timer takes the unique-name shortcut the resolver takes: brainMod
     assert.match(engine.brainInfo.detail, /^Local · qwen3\.5:27b on Ollama 0\.34\.0/);
     assert.deepEqual(ofKind(engine, "brain.local"), []);
     assert.deepEqual(ofKind(engine, "brain.unavailable"), []);
-    assert.equal(engine.snapshot().setup.local.picked, undefined, "a name match is Kevin's pick, not the engine's");
+    assert.equal(engine.snapshot().setup.local.picked, undefined, "a name match is User's pick, not the engine's");
   } finally {
     await engine.stop();
     await server.close();
@@ -479,7 +479,7 @@ test("a server that resolved the pick and still refused the start (a token it wa
     }
     assert.equal(d.looks, looksAtStart + 2, "the timer looked each minute");
     assert.equal(restarts.n, 0, "an unchanged server that refused is not tried again by the timer");
-    // Kevin's Retry is his click: it tries now, and the refusal stands.
+    // User's Retry is his click: it tries now, and the refusal stands.
     await engine.retryProblem("brain.local");
     assert.equal(restarts.n, 1);
     assert.equal(engine.brainInfo.kind, "openai-responses");
@@ -531,7 +531,7 @@ test("a settings change that lands while the heal timer's own restart is past it
   const inner = engine as unknown as { tick(): void; brainRestart: Promise<void> | undefined; localHealAt: number };
   let hooked = 0;
   let restartInFlightAtHook: boolean | undefined;
-  // The compatible probe (GET /v1/models) runs inside LocalBrain.start — after startBrain read `settings.brain`. Kevin clicks Backend → Automatic at that instant.
+  // The compatible probe (GET /v1/models) runs inside LocalBrain.start — after startBrain read `settings.brain`. User clicks Backend → Automatic at that instant.
   server.before = (r) => {
     if (r.path !== "/v1/models" || hooked++ > 0) return;
     restartInFlightAtHook = inner.brainRestart !== undefined;
@@ -551,7 +551,7 @@ test("a settings change that lands while the heal timer's own restart is past it
     assert.ok(await until(() => inner.brainRestart === undefined && engine.brainInfo.ready, 5000), "the restart finished");
     await settle(50);
     assert.equal(engine.currentSettings.brain, "auto");
-    assert.equal(engine.brainInfo.kind, "openai-responses", "the brain follows the setting Kevin ended on, not the one the pass started with");
+    assert.equal(engine.brainInfo.kind, "openai-responses", "the brain follows the setting User ended on, not the one the pass started with");
     assert.equal(engine.snapshot().setup.brainResolved, "openai-responses");
     assert.equal(inner.localHealAt, 0, "under auto the heal is disarmed");
     assert.deepEqual(ofKind(engine, "brain.local"), []);

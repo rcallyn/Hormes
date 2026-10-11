@@ -42,8 +42,8 @@ test("rebuildFrom(ledger): a thread live in yesterday's file and one live in tod
   ledger.append({ at: yesterday + 5000, type: "thread.said", threadId: "t_a", text: "Spotify: on it." });
   const b = mk("t_b", "Slack", yesterday + 6000, { lane: "screen" });
   ledger.append({ at: yesterday + 6000, type: "thread.started", thread: b });
-  ledger.append({ at: yesterday + 7000, type: "thread.status", threadId: "t_b", status: "waiting-kevin", detail: "send it to Ben?" });
-  ledger.append({ at: now - 60_000, type: "thread.ended", threadId: "t_b", status: "stopped", summary: "Kevin stopped it", steps: 2, seconds: 9000 });
+  ledger.append({ at: yesterday + 7000, type: "thread.status", threadId: "t_b", status: "waiting-user", detail: "send it to Ben?" });
+  ledger.append({ at: now - 60_000, type: "thread.ended", threadId: "t_b", status: "stopped", summary: "User stopped it", steps: 2, seconds: 9000 });
   const c = mk("t_c", "Mail", now - 30_000);
   ledger.append({ at: now - 30_000, type: "thread.started", thread: c });
   ledger.append({ at: now - 20_000, type: "thread.status", threadId: "t_c", status: "waiting-screen", detail: "hormes has the screen" });
@@ -71,7 +71,7 @@ test("rebuildFrom(ledger): a thread live in yesterday's file and one live in tod
   assert.equal(table.get("t_a")!.turns, 1);
   assert.equal(table.get("t_b")!.status, "stopped", "read back as it ended");
   assert.equal(table.get("t_b")!.doneAt, now - 60_000, "with its own clock");
-  assert.equal(table.get("t_b")!.detail, "Kevin stopped it");
+  assert.equal(table.get("t_b")!.detail, "User stopped it");
   assert.equal(table.get("t_b")!.steps, 2);
   assert.equal(table.get("t_c")!.status, "failed");
   assert.equal(table.liveCount(), 0, "nothing is live: nothing acts");

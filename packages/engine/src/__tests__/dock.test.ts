@@ -8,18 +8,18 @@ import { Engine } from "../engine.ts";
 import { rows, until, world, type World } from "./world.ts";
 
 /**
- * One Hormes in the Dock (REDESIGN §14, "Learned since"): the engine READS the Dock
+ * One Hormes in the Dock (installation hygiene, "Learned since"): the engine READS the Dock
  * 20 s after start — `defaults export com.apple.dock -` and `lsappinfo list` for the
  * Foreground helpers, never lsregister — and two Hormes tiles become the typed problem
  * `dock` with Fix the Dock as its remedy. The fix runs only on `problem.retry {kind:"dock"}`
- * (Kevin's press): the Dock half of `pnpm hormes dock --fix` — import behind the mod-count
+ * (User's press): the Dock half of `pnpm hormes dock --fix` — import behind the mod-count
  * check, `killall Dock` — then a re-read clears the row, and tick() reads once more 10 s
  * later. A helper alive is the tile no import removes: the row keeps its cause and the
  * press says "Dock written", never "fixed". Every command goes through a scripted exec;
  * no Dock, no file, no Trash is touched.
  */
 
-// The sanitized exports of Kevin's own Dock, shared with the install library's tests.
+// The sanitized exports of User's own Dock, shared with the install library's tests.
 const fixture = (name: string): string => readFileSync(fileURLToPath(new URL(`../../../install/src/__tests__/fixtures/${name}`, import.meta.url)), "utf8");
 const TWO = fixture("dock-two-tiles.xml");
 const CLEAN = fixture("dock-clean.xml");
@@ -27,7 +27,7 @@ const CLEANED = serializePlistXml(parsePlistXml(CLEAN));
 // The reading hands helper as `lsappinfo list` printed it on 2026-09-17: LaunchServices checked it in as a
 // second Foreground "Hormes" from the same bundle — the second tile no plist repair removes.
 const RUNNING_HELPER = fixture("lsappinfo-helper.txt");
-const HELPER = { pid: 66017, bundleId: "com.kevinliu.hormes", executable: "/Applications/Hormes.app/Contents/MacOS/hormes-hands", type: "Foreground" };
+const HELPER = { pid: 66017, bundleId: "com.hormes.app", executable: "/Applications/Hormes.app/Contents/MacOS/hormes-hands", type: "Foreground" };
 const HELPER_CLAUSE = "hormes-hands pid 66017 is a Foreground app (the second tile), but the pin is fine; rebuild the helper (pnpm build:mac) and relaunch, then Fix the Dock clears the leftover";
 
 interface Call {
@@ -121,7 +121,7 @@ test("a clean Dock raises nothing; a Dock that cannot be read (headless, `defaul
   try {
     await w2.engine.start();
     assert.equal(w2.engine.checkDock("test"), undefined);
-    assert.equal(ofKind(w2, "dock").length, 0, "no Dock to read is not a problem of Kevin's");
+    assert.equal(ofKind(w2, "dock").length, 0, "no Dock to read is not a problem of User's");
   } finally {
     await w2.engine.stop();
   }
@@ -343,14 +343,14 @@ test("dockProblemText: two tiles with a pin is the line; more is the count; a re
   if (recents?.kind !== "array") return;
   const three = dictSet(two, "recent-apps", { kind: "array", items: [...recents.items, recents.items[0]!] });
   assert.equal(Engine.dockProblemText(read(serializePlistXml(three))), "3 Hormes tiles in the Dock");
-  // Unpinned, one recent: one tile — nothing the fix could do, so no row (pinning is Kevin's).
+  // Unpinned, one recent: one tile — nothing the fix could do, so no row (pinning is User's).
   const apps = dictGet(clean, "persistent-apps");
   assert.equal(apps?.kind, "array");
   if (apps?.kind !== "array") return;
   const unpinned = dictSet(dictSet(clean, "persistent-apps", { kind: "array", items: [apps.items[0]!] }), "recent-apps", recents);
   assert.equal(Engine.dockProblemText(read(serializePlistXml(unpinned))), undefined);
   // A pin at the old build path.
-  assert.equal(Engine.dockProblemText(read(fixture("dock-stale-url.xml"))), "The Dock's Hormes pin points at file:///Users/kevinliu/hormes/build/Hormes.app/");
+  assert.equal(Engine.dockProblemText(read(fixture("dock-stale-url.xml"))), "The Dock's Hormes pin points at file:///Users/user/jarvis/build/Hormes.app/");
   assert.deepEqual(Engine.DOCK_REMEDY, REMEDY);
 });
 

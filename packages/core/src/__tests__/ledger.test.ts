@@ -12,7 +12,7 @@ import { Marks } from "../marks.ts";
 // the two day files whatever the machine's zone.
 const local = (day: number, h: number, m: number, s = 0): number => new Date(2026, 8, day, h, m, s).getTime();
 
-function item(id: string, speaker: "kevin" | "hormes", text: string, at: number): TranscriptItem {
+function item(id: string, speaker: "user" | "hormes", text: string, at: number): TranscriptItem {
   return { id, speaker, text, startMs: 0, endMs: 1000, at, final: true };
 }
 
@@ -20,7 +20,7 @@ function delegation(id: string, createdAt: number): Delegation {
   return { id, liveId: `live_${id}`, createdAt, offsetMs: 0, request: "do the thing", status: "running", steps: [], timings: { delegatedAt: createdAt } };
 }
 
-const heard = (at: number, text: string, id = `h${at}`): LedgerRow => ({ at, type: "heard", item: item(id, "kevin", text, at) });
+const heard = (at: number, text: string, id = `h${at}`): LedgerRow => ({ at, type: "heard", item: item(id, "user", text, at) });
 const said = (at: number, text: string, id = `s${at}`): LedgerRow => ({ at, type: "said", item: item(id, "hormes", text, at) });
 
 function fresh(): Ledger {
@@ -65,7 +65,7 @@ test("sessions: a session crossing midnight is one summary, its rows span both f
   assert.equal(a.said, 1);
   assert.equal(a.delegations, 1);
   // The first heard line, whitespace collapsed, cut at 60 characters.
-  assert.equal(a.title, "Hey Hormes, what is the Claude session doing on the auth br");
+  assert.equal(a.title, "Hey Hormes, what is the Claude session doing on the auth bra");
   assert.equal(a.title.length, 60);
   assert.equal(a.resumedFrom, undefined);
 
@@ -111,7 +111,7 @@ test("sessions: a pause → resume chain links through resumedFrom, each with it
   ledger.append(heard(t(1), "read me the plan"));
   ledger.append(said(t(2), "the plan is…"));
   ledger.append({ at: t(3), type: "pause", sessionId: "A", usageSeconds: 180 });
-  // The server's word for the close the pause asked for; the summary says what Kevin did.
+  // The server's word for the close the pause asked for; the summary says what User did.
   ledger.append({ at: t(3, 1), type: "session.closed", sessionId: "A", reason: "close_requested", usageSeconds: 180 });
   // The resume announces the new session before its started row lands.
   ledger.append({ at: t(6), type: "resume", sessionId: "B", resumedFrom: "A", pausedMs: 179_000 });
@@ -138,7 +138,7 @@ test("sessions: a pause → resume chain links through resumedFrom, each with it
   assert.equal(bRows[0]?.type === "resume" ? bRows[0].pausedMs : 0, 179_000);
 });
 
-test("sessions: a client-requested close reads as what Kevin did — paused, stopped — and other reasons are kept", () => {
+test("sessions: a client-requested close reads as what User did — paused, stopped — and other reasons are kept", () => {
   const ledger = fresh();
   const t = (m: number, s = 0) => local(11, 16, m, s);
   // A pressed stop closes the session: close_requested → "stopped".
@@ -186,7 +186,7 @@ test("sessions: a resume row in the previous day's file still belongs to the ses
   ledger.append({ at: local(10, 23, 0), type: "session.started", sessionId: "A", voice: "cedar" });
   ledger.append({ at: local(10, 23, 30), type: "pause", sessionId: "A", usageSeconds: 100 });
   ledger.append({ at: local(10, 23, 30, 1), type: "session.closed", sessionId: "A", reason: "close_requested", usageSeconds: 100 });
-  // Kevin pressed Go at 23:59:59; the new session's started row landed after midnight.
+  // User pressed Go at 23:59:59; the new session's started row landed after midnight.
   ledger.append({ at: local(10, 23, 59, 59), type: "resume", sessionId: "B", resumedFrom: "A", pausedMs: 1_800_000 });
   ledger.append({ at: local(11, 0, 0, 1), type: "session.started", sessionId: "B", voice: "cedar", resumedFrom: "A" });
   ledger.append(heard(local(11, 0, 1), "morning"));
@@ -301,7 +301,7 @@ test("conversations: a tombstone against any session of the chain lands on the c
   assert.deepEqual(states(), { C: undefined, B: undefined, A: undefined }, "no rows: active, nothing stamped");
 
   // Trashed through the RESUMED session's id: both summaries of the chain say so; C is untouched.
-  ledger.append({ at: local(12, 14, 2), type: "conversation.trashed", chainId: "B", by: "kevin" });
+  ledger.append({ at: local(12, 14, 2), type: "conversation.trashed", chainId: "B", by: "user" });
   assert.deepEqual(states(), { C: undefined, B: "trashed", A: "trashed" });
   const a = ledger.sessions().find((s) => s.id === "A")!;
   assert.equal(a.trashedAt, local(12, 14, 2));
@@ -339,12 +339,12 @@ test("conversations: a tombstone against any session of the chain lands on the c
   assert.equal(ledger.sessions().find((s) => s.id === "A")!.name, undefined);
 
   // Last row by `at` wins, whatever the file order: a late-written row with an EARLIER `at` does not undo the newer verdict.
-  ledger.append({ at: local(12, 14, 1), type: "conversation.trashed", chainId: "A", by: "kevin" });
+  ledger.append({ at: local(12, 14, 1), type: "conversation.trashed", chainId: "A", by: "user" });
   assert.equal(ledger.conversation("A")?.state, "active");
   assert.equal(ledger.conversation("A")?.updatedAt, local(12, 14, 9));
 
   // Unknown ids are counted, never fatal — and never stamp anyone.
-  ledger.append({ at: local(12, 15, 0), type: "conversation.trashed", chainId: "nope", by: "kevin" });
+  ledger.append({ at: local(12, 15, 0), type: "conversation.trashed", chainId: "nope", by: "user" });
   assert.equal(ledger.unresolvedConversationRows(), 1);
   assert.deepEqual(states(), { C: undefined, B: "active", A: "active" });
   assert.equal(ledger.conversation("nope"), undefined);
@@ -357,7 +357,7 @@ test("conversations: readSession carries the chain's tombstones from today's fil
   // Today: an OPEN session D (no closed row) whose span runs to the end of the file, and the moves.
   ledger.append({ at: local(12, 13, 0), type: "session.started", sessionId: "D", voice: "cedar" });
   ledger.append(heard(local(12, 13, 1), "hello"));
-  ledger.append({ at: local(12, 14, 2), type: "conversation.trashed", chainId: "B", by: "kevin" });
+  ledger.append({ at: local(12, 14, 2), type: "conversation.trashed", chainId: "B", by: "user" });
   ledger.append({ at: local(12, 14, 3), type: "conversation.restored", chainId: "A" });
   ledger.append({ at: local(12, 14, 4), type: "conversation.pinned", chainId: "D", pinned: true });
   ledger.append({ at: local(12, 14, 5), type: "grant", chainId: "A", app: "Mail", actionClass: "send", until: local(12, 15, 0) });
@@ -390,8 +390,33 @@ test("conversations: now.cleared / now.restored per session, last by `at`; the r
   ledger.append({ at: local(12, 10, 7), type: "agent.hidden", agentId: "sessions:codex:1", hidden: false });
   assert.deepEqual(ledger.hiddenAgents(), ["sessions:claude:2"]);
   // ledger.moved and agent.hidden rows are nobody's session rows.
-  ledger.append({ at: local(12, 10, 8), type: "ledger.moved", day: "2026-09-01", what: "ledger", to: "trash", path: "/x", by: "kevin" });
+  ledger.append({ at: local(12, 10, 8), type: "ledger.moved", day: "2026-09-01", what: "ledger", to: "trash", path: "/x", by: "user" });
   assert.ok(!ledger.readSession("S").some((r) => r.type === "ledger.moved" || r.type === "agent.hidden"));
+});
+
+test("automations: the six automation.* / recipe.* rows written inside an open session are the record's, never the session's; a row type from a newer daemon still falls through", () => {
+  const ledger = fresh();
+  ledger.append({ at: local(12, 10, 0), type: "session.started", sessionId: "S", voice: "cedar" });
+  ledger.append(heard(local(12, 10, 1), "wake me at seven ten on weekdays"));
+  const automation = {
+    id: "auto_1", name: "Wake up", when: { kind: "every" as const, every: { kind: "weekly" as const, days: ["mon" as const], at: "07:10" as const }, phrase: "mon 07:10" },
+    then: [{ kind: "chime" as const, line: "Wake up, User" }], clauses: { quiet: "override" as const }, echo: "Monday at 7:10, a chime", state: "armed" as const,
+    fires: 0, missed: 0, createdAt: local(12, 10, 2), updatedAt: local(12, 10, 2), createdBy: { by: "brain" as const, request: "wake me at seven ten" },
+  };
+  ledger.append({ at: local(12, 10, 2), type: "automation.set", automation, by: "brain" });
+  ledger.append({ at: local(12, 10, 3), type: "automation.fired", id: "auto_1", actions: ["chime"], ok: true, line: "07:10 · Wake up", ms: 4 });
+  ledger.append({ at: local(12, 10, 4), type: "automation.state", id: "auto_1", state: "snoozed", by: "user", until: local(12, 10, 14) });
+  ledger.append({ at: local(12, 10, 5), type: "automation.missed", id: "auto_1", dueAt: local(12, 10, 4), why: "mac-slept" });
+  ledger.append({ at: local(12, 10, 6), type: "recipe.set", recipe: { name: "tests", command: "pnpm test", timeoutSeconds: 120, approvedAt: local(12, 10, 6) }, by: "user" });
+  ledger.append({ at: local(12, 10, 7), type: "recipe.trashed", name: "tests" });
+  ledger.append(said(local(12, 10, 8), "armed"));
+  ledger.append({ at: local(12, 10, 9), type: "session.closed", sessionId: "S", reason: "sleep", usageSeconds: 9 });
+  assert.deepEqual(ledger.readSession("S").map((r) => r.type), ["session.started", "heard", "said", "session.closed"], "the automation rows are not the session's");
+  assert.equal(ledger.read(local(12, 10, 0)).filter((r) => r.type.startsWith("automation.") || r.type.startsWith("recipe.")).length, 6, "the day file keeps all six");
+  // A type this build does not know (a newer daemon's) is read, kept in the day, and placed by position like any unknown row of before 2026-09-13.
+  ledger.append({ at: local(12, 10, 10), type: "automation.something-new", id: "auto_1" } as unknown as LedgerRow);
+  assert.equal(ledger.read(local(12, 10, 0)).length, 11);
+  assert.ok(ledger.sessions().some((s) => s.id === "S"));
 });
 
 test("conversations: a chain whose root day is gone resolves to the last known session; the old tombstone is counted, not applied", () => {
@@ -399,7 +424,7 @@ test("conversations: a chain whose root day is gone resolves to the last known s
   // Only B's day is live: its resumedFrom names an A the ledger never saw start.
   ledger.append({ at: local(11, 14, 6, 1), type: "session.started", sessionId: "B", voice: "cedar", resumedFrom: "A" });
   ledger.append({ at: local(11, 14, 8), type: "session.closed", sessionId: "B", reason: "idle", usageSeconds: 60 });
-  ledger.append({ at: local(12, 14, 2), type: "conversation.trashed", chainId: "A", by: "kevin" });
+  ledger.append({ at: local(12, 14, 2), type: "conversation.trashed", chainId: "A", by: "user" });
   ledger.append({ at: local(12, 14, 3), type: "conversation.renamed", chainId: "B", name: "still here" });
   assert.equal(ledger.chainRootOf("B"), "B");
   assert.equal(ledger.unresolvedConversationRows(), 1);
@@ -467,7 +492,7 @@ test("search: a hit says the state of its conversation (a rail that hides a tras
   ledger.append({ at: local(12, 9, 2), type: "session.closed", sessionId: "C", reason: "idle", usageSeconds: 5 });
   assert.ok(ledger.search("plan").every((h) => h.state === "active"));
 
-  ledger.append({ at: local(12, 10, 0), type: "conversation.trashed", chainId: "A", by: "kevin" });
+  ledger.append({ at: local(12, 10, 0), type: "conversation.trashed", chainId: "A", by: "user" });
   ledger.append({ at: local(12, 10, 1), type: "conversation.archived", chainId: "C" });
   assert.deepEqual(
     ledger.search("plan").map((h) => [h.sessionId, h.chainId, h.state]),
@@ -546,10 +571,10 @@ test("memory.* audit rows are the record's own: appended to today's file they ne
   const t = (m: number) => local(12, 9, m);
   ledger.append({ at: t(0), type: "session.started", sessionId: "A", voice: "cedar" });
   ledger.append(heard(t(1), "remember that I prefer dark mode"));
-  ledger.append({ at: t(1), type: "memory.added", id: "m_1", kind: "preference", origin: "kevin" });
+  ledger.append({ at: t(1), type: "memory.added", id: "m_1", kind: "preference", origin: "user" });
   ledger.append({ at: t(2), type: "session.closed", sessionId: "A", reason: "idle", usageSeconds: 10 });
   ledger.append({ at: t(3), type: "memory.run", sessionId: "A", extractor: "rules", added: 1, updated: 0, noop: 2, refused: 0, ms: 12 });
-  ledger.append({ at: t(4), type: "memory.forgotten", id: "m_1", by: "kevin" });
+  ledger.append({ at: t(4), type: "memory.forgotten", id: "m_1", by: "user" });
   ledger.append({ at: t(5), type: "memory.restored", id: "m_1" });
   ledger.append({ at: t(6), type: "memory.updated", id: "m_1" });
   ledger.append({ at: t(7), type: "session.started", sessionId: "B", voice: "cedar" });
@@ -581,7 +606,7 @@ test("the walk reads the last WALK_DAYS day files: a session older than the wind
   assert.equal(WALK_DAYS, 60);
 });
 
-test("a hide older than WALK_DAYS still hides: agent.hidden is Kevin's decision about the rail, gathered from every day file; the later row wins across the window's edge; sessions() stays bounded", () => {
+test("a hide older than WALK_DAYS still hides: agent.hidden is User's decision about the rail, gathered from every day file; the later row wins across the window's edge; sessions() stays bounded", () => {
   const ledger = fresh();
   const day0 = new Date(2026, 3, 1, 12, 0, 0).getTime();
   const DAY = 24 * 3_600_000;
@@ -594,7 +619,7 @@ test("a hide older than WALK_DAYS still hides: agent.hidden is Kevin's decision 
   assert.equal(ledger.days().length, WALK_DAYS + 1, "day 0 is outside the window");
   assert.deepEqual(ledger.sessions().map((s) => s.id), [], "session attribution is bounded by the window");
   assert.deepEqual(ledger.hiddenAgents(), ["sessions:codex:long-lived"], "the hide from day 0 holds; the agent shown again on day 0 stays shown");
-  // Inside the window Kevin shows the long-lived one again, then hides another: the later rows win.
+  // Inside the window User shows the long-lived one again, then hides another: the later rows win.
   ledger.append({ at: day0 + WALK_DAYS * DAY + 1000, type: "agent.hidden", agentId: "sessions:codex:long-lived", hidden: false });
   ledger.append({ at: day0 + WALK_DAYS * DAY + 2000, type: "agent.hidden", agentId: "sessions:codex:new", hidden: true });
   assert.deepEqual(ledger.hiddenAgents(), ["sessions:codex:new"]);
@@ -621,7 +646,7 @@ test("before 2026-09-13: a day file with the old row type, a delegation.step who
     said(local(11, 9, 6), "Playing something quiet."),
     { at: local(11, 9, 7), type: "session.closed", sessionId: "?", reason: "idle", usageSeconds: 400 },
   ];
-  const torn = JSON.stringify({ at: local(11, 9, 8), type: "heard", item: item("h_torn", "kevin", "and then the Mac slept", local(11, 9, 8)) }).slice(0, 40);
+  const torn = JSON.stringify({ at: local(11, 9, 8), type: "heard", item: item("h_torn", "user", "and then the Mac slept", local(11, 9, 8)) }).slice(0, 40);
   appendFileSync(join(ledger.dir, Ledger.fileNameFor(t0)), `${rows.map((r) => JSON.stringify(r)).join("\n")}\n${torn}`);
 
   const read = ledger.read(t0);

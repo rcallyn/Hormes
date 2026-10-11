@@ -27,7 +27,7 @@ test("settings patches: null clears optional fields, required fields keep their 
 
   // The wake word block merges field-wise, so a partial patch keeps the other defaults.
   engine.updateSettings({ wake: { enabled: true, phrases: ["computer"], auth: "touch-id" } });
-  assert.deepEqual(engine.snapshot().settings.wake, { enabled: true, phrases: ["computer"], auth: "touch-id" });
+  assert.deepEqual(engine.snapshot().settings.wake, { enabled: true, phrases: ["computer"], auth: "touch-id", trigger: "word" });
   engine.updateSettings({ wake: { auth: "none" } as never });
   assert.deepEqual(engine.snapshot().settings.wake, { ...DEFAULT_SETTINGS.wake, auth: "none" });
 });
@@ -115,7 +115,7 @@ test("brain `local` round-trips through settings.json with an empty model (best 
   // `automations` (design11, 2026-09-14), `audio` (design12, 2026-09-16) and `userName` (release F1, 2026-09-20) are the keys added since: the automations block (switch, unattended kinds, quiet hours, recipes) and the audio block (Recording).
   assert.deepEqual(
     [...SETTINGS_KEYS].sort(),
-    ["accent", "audio", "autoWake", "automations", "brain", "brainBaseUrl", "brainModel", "effort", "idleSleepMinutes", "language", "ledgerRetentionDays", "memory", "micDeviceId", "observe", "onboarded", "orbHome", "orbPosition", "reflexes", "shotsRetentionDays", "threadOverflow", "threads", "typedWakes", "userName", "voice", "wake", "warmThreads"],
+    ["accent", "audio", "autoWake", "automations", "brain", "brainBaseUrl", "brainModel", "effort", "geminiModel", "geminiVoice", "idleSleepMinutes", "language", "ledgerRetentionDays", "memory", "micDeviceId", "observe", "orbHome", "orbPosition", "ownerApproval", "proactive", "reflexes", "shotsRetentionDays", "threadOverflow", "threads", "typedWakes", "userName", "voice", "voiceProvider", "wake", "warmThreads"],
   );
   assert.ok(!SETTINGS_KEYS.some((k) => /local/i.test(k)));
 });
@@ -148,7 +148,7 @@ test("V6 · a settings.json from before 2026-09-16 (no `audio`) loads DEFAULT_AU
   writeFileSync(path, before);
   const engine = bare(stateDir);
   assert.deepEqual(engine.snapshot().settings.audio, DEFAULT_AUDIO);
-  assert.deepEqual(DEFAULT_AUDIO, { recording: false }, "Recording is off until Kevin turns it on");
+  assert.deepEqual(DEFAULT_AUDIO, { recording: false }, "Recording is off until User turns it on");
   assert.equal(readFileSync(path, "utf8"), before, "reading the default writes nothing — a missing known key is not unknown");
   assert.ok((SETTINGS_KEYS as readonly string[]).includes("audio"), "the cover pin compiles only with the key listed");
 
@@ -198,7 +198,7 @@ const RECORDING_STATE: AudioState = {
   rung: 1,
   wiring: "hardware",
   hears: { name: "MacBook Pro Microphone", uid: "BuiltInMicrophoneDevice", rate: 48000, channels: 1, transport: "built-in" },
-  speaks: { name: "Kevin's AirPods Pro", uid: "AP-out", rate: 48000, channels: 2, transport: "bluetooth" },
+  speaks: { name: "User's AirPods Pro", uid: "AP-out", rate: 48000, channels: 2, transport: "bluetooth" },
   tapFormat: "48000 Hz ×1 Float32",
   recording: true,
   fallback: false,

@@ -219,7 +219,7 @@ test("ear: a careful kind never fires on a prefix that is merely waiting for the
   h.ear.hear("scroll down", false, 4, 8);
   await tick(45);
   assert.deepEqual(h.ran.map((r) => r.label).slice(1), ["scroll down"]);
-  // A careful kind that Kevin actually stops at fires once the window passes.
+  // A careful kind that User actually stops at fires once the window passes.
   h.ear.hear("press enter", false, 5, 9);
   await tick(140);
   assert.deepEqual(h.ran.map((r) => r.label).slice(2), ["press enter"]);
@@ -246,7 +246,7 @@ test("ear: quiesce (a stop or a pause) keeps the segment with its words consumed
   h.ear.hear("type hello", true, 7, 2);
   await tick(20);
   assert.equal(h.ran.length, 1, "not typed again");
-  // Kevin's next command inside the same segment is judged on its own words.
+  // User's next command inside the same segment is judged on its own words.
   h.ear.hear("type hello scroll down", false, 7, 3);
   await tick(45);
   assert.deepEqual(h.ran.map((r) => r.label).slice(1), ["scroll down"]);

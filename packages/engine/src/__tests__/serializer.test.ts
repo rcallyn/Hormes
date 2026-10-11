@@ -42,7 +42,7 @@ test("haltReasonFor is batch.ts's haltReason, word for word", () => {
   for (const t of ["self_edit", "self_apply", "self_check", "self_discard", "left_click", "type", "applescript", "run_shell", "browser_navigate", "write_file"]) assert.ok(!SERIALIZER_BYPASS.has(t), `${t} takes the queue`);
 });
 
-test("a thread_start / thread_stop / agent_start / agent_send issued alongside a left_click that asks Kevin starts at once and answers its own text — never `not run:`", async () => {
+test("a thread_start / thread_stop / agent_start / agent_send issued alongside a left_click that asks User starts at once and answers its own text — never `not run:`", async () => {
   for (const mgmt of ["thread_start", "thread_stop", "agent_start", "agent_send"]) {
     const s = new ActingSerializer();
     const click = deferred();
@@ -59,7 +59,7 @@ test("a thread_start / thread_stop / agent_start / agent_send issued alongside a
     click.resolve(question());
     assert.equal((await pClick).result.kind, "needs-confirmation");
     assert.deepEqual((await pMgmt).result, { kind: "text", text: "started Spotify alongside" }, `${mgmt} answers its own result`);
-    assert.deepEqual((await pTyped).result, { kind: "error", message: "not run: left_click is waiting for Kevin's answer; ask Kevin and stop" }, "the act behind the click is halted, as before");
+    assert.deepEqual((await pTyped).result, { kind: "error", message: "not run: left_click is waiting for User's answer; ask User and stop" }, "the act behind the click is halted, as before");
     assert.equal(s.halted, 1);
     assert.equal(s.ran, 1, "the management tool is not counted as an act");
   }
@@ -95,9 +95,9 @@ test("I1: two acting calls issued together run in arrival order — the second s
 });
 
 test("I2: a needs-confirmation from the first acting call makes the queued second answer batch.ts's text without touching the hands; a refusal and an error halt the same way; a call issued after the halt runs", async () => {
-  // batch.ts names the call that did not go through (the one waiting for Kevin), the same words for every call behind it.
+  // batch.ts names the call that did not go through (the one waiting for User), the same words for every call behind it.
   for (const [outcome, expect] of [
-    [question(), "not run: left_click is waiting for Kevin's answer; ask Kevin and stop"],
+    [question(), "not run: left_click is waiting for User's answer; ask User and stop"],
     [refused(), "not run: left_click was refused earlier in this turn"],
     [failed(), "not run: left_click failed earlier in this turn (no control named Save)"],
   ] as const) {
@@ -136,9 +136,9 @@ test("I6: drain answers every queued acting call `stopped: <reason>`; the one in
   const pa = s.run("type", () => a.promise);
   const pb = s.run("key", () => ((b.started = true), b.promise));
   const pc = s.run("open_app", () => ((c.started = true), c.promise));
-  assert.equal(s.drain("Kevin pressed stop"), 2);
-  assert.deepEqual((await pb).result, { kind: "error", message: "stopped: Kevin pressed stop" });
-  assert.deepEqual((await pc).result, { kind: "error", message: "stopped: Kevin pressed stop" });
+  assert.equal(s.drain("User pressed stop"), 2);
+  assert.deepEqual((await pb).result, { kind: "error", message: "stopped: User pressed stop" });
+  assert.deepEqual((await pc).result, { kind: "error", message: "stopped: User pressed stop" });
   assert.equal(b.started || c.started, false);
   a.resolve({ result: { kind: "error", message: "cancelled: stopped" }, ms: 1 });
   assert.equal((await pa).result.kind, "error");

@@ -231,7 +231,7 @@ export class ThreadTurns {
     return d;
   }
 
-  /** Kevin's words to this thread, on its record. */
+  /** User's words to this thread, on its record. */
   utterance(item: TranscriptItem): void {
     this.opts.log.append({ kind: "utterance", item });
   }

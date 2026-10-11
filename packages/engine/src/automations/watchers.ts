@@ -139,7 +139,7 @@ export class Watchers {
   }
 
   /**
-   * Start watching for a row. A folder is read NOW — while Kevin is at the Mac, so the
+   * Start watching for a row. A folder is read NOW — while User is at the Mac, so the
    * per-folder TCC prompt shows at set-up, never at 3 a.m. Returns the read error when
    * the folder cannot be listed (EPERM, ENOENT); the caller raises the problem, and the
    * first listing that works becomes the baseline. `asOf` (a restart) is the daemon's last

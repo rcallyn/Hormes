@@ -129,7 +129,7 @@ test("ear: a typed reflex whose words differ from what Live heard is undone with
     );
     const keys = hands.named("key").map((k) => k.params["combo"]);
     assert.ok(keys.includes("cmd+z"), `⌘Z was pressed (${keys.join(",")})`);
-    assert.ok(live.instructions.some((i) => /by reflex but Kevin said something else; it has been undone/.test(i)));
+    assert.ok(live.instructions.some((i) => /by reflex but User said something else; it has been undone/.test(i)));
     const d = engine.snapshot().delegations.find((x) => x.liveId === "item_1")!;
     assert.ok(d.steps.some((s) => /reflex mismatch/.test(s.text ?? "")), "the mismatch is on the record");
     // The request is itself a type reflex: the delegator typed the full sentence after the undo.
@@ -163,7 +163,7 @@ test("ear: Settings.reflexes off switches the layer off (ear and delegation alik
     engine.ear("stop", false, 2, 2);
     await until(() => engine.snapshot().delegations[0]!.status === "cancelled" && brain.cancels === 1);
     assert.equal(engine.snapshot().delegations[0]!.status, "cancelled");
-    assert.equal(engine.snapshot().delegations[0]!.summary, "Kevin said stop");
+    assert.equal(engine.snapshot().delegations[0]!.summary, "User said stop");
     assert.equal(brain.cancels, 1);
     // Asleep: partials are ignored.
     await engine.command({ type: "sleep" });
@@ -186,10 +186,10 @@ test("dictation: \"start dictating\" types the ear's finals into the focused fie
     await settle();
     hands.ops.length = 0;
     engine.ear("start dictating", true, 1, 1);
-    await until(() => engine.isDictating && engine.currentPhase === "acting" && live.instructions.some((i) => /Kevin is dictating/.test(i)));
+    await until(() => engine.isDictating && engine.currentPhase === "acting" && live.instructions.some((i) => /User is dictating/.test(i)));
     assert.equal(engine.isDictating, true);
     assert.equal(engine.currentPhase, "acting");
-    assert.ok(live.instructions.some((i) => /Kevin is dictating/.test(i)));
+    assert.ok(live.instructions.some((i) => /User is dictating/.test(i)));
     engine.ear("start dictating dear ana thanks for the notes new line see you tomorrow", true, 1, 2);
     await until(() => hands.named("type").length === 2);
     assert.deepEqual(hands.named("type").map((t) => t.params["text"]), ["dear ana thanks for the notes ", "see you tomorrow "]);
@@ -199,8 +199,8 @@ test("dictation: \"start dictating\" types the ear's finals into the focused fie
     await until(() => engine.snapshot().delegations.find((x) => x.liveId === "item_1")?.status === "cancelled");
     const d = engine.snapshot().delegations.find((x) => x.liveId === "item_1")!;
     assert.equal(d.status, "cancelled");
-    assert.equal(d.summary, "Kevin is dictating");
-    // Focus lands in a password field: nothing is typed, dictation ends, Kevin is told.
+    assert.equal(d.summary, "User is dictating");
+    // Focus lands in a password field: nothing is typed, dictation ends, User is told.
     hands.secure = true;
     engine.ear("my secret word", true, 2, 3);
     await until(() => !engine.isDictating && live.instructions.some((i) => /Dictation stopped: the focused field is a password field/.test(i)));
@@ -237,7 +237,7 @@ test("typed while dictating: a line from the Console's composer is the voice's, 
     hands.ops.length = 0;
     await engine.command({ type: "say-text", text: "open safari" });
     assert.equal(hands.named("open_app").length, 0, "no reflex while dictating");
-    assert.ok(live.instructions.some((i) => /Kevin just typed .*"open safari"\. Respond to it now/.test(i)), "the voice takes the line");
+    assert.ok(live.instructions.some((i) => /User just typed .*"open safari"\. Respond to it now/.test(i)), "the voice takes the line");
     engine.ear("stop dictating", true, 2, 2);
     await until(() => !engine.isDictating);
     assert.equal(engine.isDictating, false);
@@ -246,7 +246,7 @@ test("typed while dictating: a line from the Console's composer is the voice's, 
   }
 });
 
-test("circle that: the blob traces a frame around the element under the cursor (else the front window)", async () => {
+test("circle that: a screen annotation frames around the element under the cursor (else the front window)", async () => {
   const w = world();
   const { engine, overlays } = w;
   try {
@@ -257,11 +257,10 @@ test("circle that: the blob traces a frame around the element under the cursor (
     await settle();
     overlays.length = 0;
     engine.ear("circle that", true, 1, 1);
-    await until(() => overlays.some((o) => o.cmd === "orb.trace"));
-    const trace = overlays.find((o) => o.cmd === "orb.trace");
-    assert.ok(trace && trace.cmd === "orb.trace", "an orb.trace went to the overlay");
+    await until(() => overlays.some((o) => o.cmd === "stroke"));
+    const trace = overlays.find((o) => o.cmd === "stroke");
+    assert.ok(trace && trace.cmd === "stroke", "a stroke went to the overlay");
     assert.equal(trace.label, "Save");
-    assert.equal(trace.reason, "reflex circle");
     assert.ok(trace.points.length > 8);
   } finally {
     await engine.stop();
@@ -360,12 +359,12 @@ test("Hormes's own words back through the microphone press nothing: while the vo
     engine.ear("now press enter", true, 3, clock.t);
     await settle();
     assert.equal(hands.named("key").length, 0, "Return was not pressed on the voice's own words");
-    // Kevin talks over it: "stop" goes through.
+    // User talks over it: "stop" goes through.
     engine.ear("now press enter stop", false, 3, clock.t);
-    await until(() => engine.outputGated && live.instructions.some((i) => /Kevin said stop/.test(i)));
-    assert.ok(live.instructions.some((i) => /Kevin said stop/.test(i)), "stop reached the engine while speaking");
+    await until(() => engine.outputGated && live.instructions.some((i) => /User said stop/.test(i)));
+    assert.ok(live.instructions.some((i) => /User said stop/.test(i)), "stop reached the engine while speaking");
     assert.equal(engine.outputGated, true);
-    // The words heard while speaking stay consumed: the segment's later final fires nothing for them, Kevin's next words do.
+    // The words heard while speaking stay consumed: the segment's later final fires nothing for them, User's next words do.
     engine.ear("now press enter stop press escape", true, 3, clock.t);
     await until(() => hands.named("key").length === 1);
     assert.deepEqual(hands.named("key").map((k) => k.params["combo"]), ["Escape"]);
@@ -387,7 +386,7 @@ test("Hormes's own words back through the microphone press nothing: while the vo
     await until(() => hands.named("scroll").length === 1);
     assert.equal(hands.named("scroll").length, 1, "after the task is gone the ear acts again");
 
-    // Muted: the mic button is Kevin's word that he is not talking to Hormes.
+    // Muted: the mic button is User's word that he is not talking to Hormes.
     engine.setMuted(true);
     engine.ear("scroll up", true, 5, clock.t);
     await settle(60);
@@ -449,7 +448,7 @@ test("a typed mismatch where ⌘Z cannot reach (the focus is not a text field): 
     engine.updateSettings({ idleSleepMinutes: 0 });
     await engine.wake("test");
     await settle();
-    hands.frontApp = "Terminal";
+    hands.frontApp = "TextEdit";
     hands.focusedRole = "AXGroup";
     hands.ops.length = 0;
     const fired: unknown[] = [];
@@ -489,11 +488,11 @@ test("search through the ear: \"search the wiki for design\" with the wiki up in
     // The looks (frontmost, find_element) go to the READING helper (SplitHands); the click, the keys and the typing to the acting one.
     const original = handsBg.request.bind(handsBg);
     handsBg.request = async <T>(op: string, params: Record<string, unknown> = {}): Promise<T> => {
-      if (op === "frontmost") return { app: hands.frontApp, pid: 1, window: { title: "Design system — Kevin's Wiki", x: 0, y: 0, w: 1200, h: 800, windowId: 1 } } as T;
+      if (op === "frontmost") return { app: hands.frontApp, pid: 1, window: { title: "Design system — User's Wiki", x: 0, y: 0, w: 1200, h: 800, windowId: 1 } } as T;
       if (op === "find_element" && String(params["name"]) === "search") {
         handsBg.ops.push({ op, params, at: clock.t });
         const el = { i: 4, depth: 3, role: "AXTextField", title: "Search the wiki", app: hands.frontApp, score: 0.4, label: "Search the wiki", x: 500, y: 400, w: 60, h: 24, center: { x: 530, y: 412 }, pressable: false };
-        return { app: hands.frontApp, window: "Design system — Kevin's Wiki", found: true, unique: true, candidates: 1, tier: "contains", element: el, cached: true, treeMs: 3, nodes: 120, truncated: false, ms: 1 } as T;
+        return { app: hands.frontApp, window: "Design system — User's Wiki", found: true, unique: true, candidates: 1, tier: "contains", element: el, cached: true, treeMs: 3, nodes: 120, truncated: false, ms: 1 } as T;
       }
       return original<T>(op, params);
     };
@@ -625,9 +624,9 @@ test("ear hints: the AX warm tick turns the front window into `ear.hints` — ap
 
 test("ear hints: earHintsFrom keeps controls only, three words at most, trims ellipses and edge punctuation, dedupes, caps 80 controls and 100 strings, app first, window second, agents last", () => {
   const many = Array.from({ length: 120 }, (_, i) => ({ i, depth: 1, role: "AXButton", title: `Button ${i}` }));
-  const hints = earHintsFrom(many, "Google Chrome", "Kevin Wiki — Design notes and more", ["Codex · hormes", "Claude Code · Kevin-Wiki-v3"]);
+  const hints = earHintsFrom(many, "Google Chrome", "User Wiki — Design notes and more", ["Codex · hormes", "Claude Code · User-Wiki-v3"]);
   assert.equal(hints[0], "Google Chrome");
-  assert.equal(hints[1], "Kevin Wiki", "the window's first three words, the dangling dash trimmed");
+  assert.equal(hints[1], "User Wiki", "the window's first three words, the dangling dash trimmed");
   assert.equal(hints.filter((h) => h.startsWith("Button")).length, 80, "controls capped at 80");
   assert.deepEqual(hints.slice(-2), ["Codex · hormes", "Claude Code"], "agents last, each cut to three words, a dangling separator trimmed");
   assert.ok(hints.length <= 100);

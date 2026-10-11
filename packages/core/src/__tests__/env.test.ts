@@ -31,17 +31,20 @@ test("writeEnvSecrets keeps other lines, removes on null, and sets mode 0600", a
   process.env["HORMES_STATE_DIR"] = dir;
   writeFileSync(join(dir, "env"), "# keys\nOPENAI_API_KEY=old\nHORMES_VOICE=marin\n");
   const { writeEnvSecrets, envFilePath, secretsPresent } = await import("../env.ts");
-  writeEnvSecrets({ OPENAI_API_KEY: "sk-new", ANTHROPIC_API_KEY: "sk-ant" });
+  writeEnvSecrets({ OPENAI_API_KEY: "sk-new", ANTHROPIC_API_KEY: "sk-ant", GEMINI_API_KEY: "gemini-canary" });
   const text = readFileSync(envFilePath(), "utf8");
   assert.match(text, /^# keys$/m);
   assert.match(text, /^OPENAI_API_KEY=sk-new$/m);
   assert.match(text, /^HORMES_VOICE=marin$/m);
   assert.match(text, /^ANTHROPIC_API_KEY=sk-ant$/m);
+  assert.match(text, /^GEMINI_API_KEY=gemini-canary$/m);
+  assert.equal(secretsPresent().gemini, true);
   assert.equal(statSync(envFilePath()).mode & 0o777, 0o600);
   assert.equal(process.env["OPENAI_API_KEY"], "sk-new");
-  writeEnvSecrets({ ANTHROPIC_API_KEY: null });
+  writeEnvSecrets({ ANTHROPIC_API_KEY: null, GEMINI_API_KEY: null });
   assert.doesNotMatch(readFileSync(envFilePath(), "utf8"), /ANTHROPIC/);
   assert.equal(secretsPresent().anthropic, false);
+  assert.equal(secretsPresent().gemini, false);
   assert.throws(() => writeEnvSecrets({ HORMES_BRAIN: "x" } as never), /not a secret/);
 });
 
@@ -49,7 +52,7 @@ test("only <stateDir>/env is read: a .env or .env.local at the repo root is not 
   const dir = mkdtempSync(join(tmpdir(), "jh-env-"));
   writeFileSync(join(dir, "env"), "OPENAI_API_KEY=from-state-dir\n");
   const repoFiles = [join(REPO_ROOT, ".env"), join(REPO_ROOT, ".env.local")];
-  if (repoFiles.some((f) => existsSync(f))) return; // never overwrite a file Kevin keeps there
+  if (repoFiles.some((f) => existsSync(f))) return; // never overwrite a file User keeps there
   for (const f of repoFiles) writeFileSync(f, "OPENAI_API_KEY=from-repo\nREPO_ONLY_VAR=from-repo\n");
   try {
     const script = `import { readConfig, keySource } from "@hormes/core"; const c = readConfig(); console.log(JSON.stringify({ key: c.openaiApiKey, src: keySource("OPENAI_API_KEY"), repoOnly: process.env.REPO_ONLY_VAR ?? null }));`;

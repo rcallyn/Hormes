@@ -98,8 +98,8 @@ test("pause during a running task: the session closes (the meter stops), the tas
     assert.equal(next.currentState, "started");
     const instructions = next.config?.instructions ?? "";
     assert.match(instructions, /# Continuity/);
-    assert.match(instructions, /Kevin paused you 3 minutes ago and just resumed/);
-    assert.match(instructions, /Kevin: hormes find the save button/, "the last heard line is in the continuity");
+    assert.match(instructions, /User paused you 3 minutes ago and just resumed/);
+    assert.match(instructions, /User: hormes find the save button/, "the last heard line is in the continuity");
     assert.match(instructions, /Last task: "hormes find the save button" — cancelled: paused/);
     assert.match(instructions, /Carry on as before; do not recap unless asked\./);
     assert.ok(instructions.indexOf("# Personality") < instructions.indexOf("# Continuity"), "the continuity follows the standing instructions");
@@ -134,7 +134,7 @@ test("pause during a running task: the session closes (the meter stops), the tas
   }
 });
 
-test("pause keeps Kevin's own mute; pause while asleep only says so; a pause nobody resumes decays to sleep after idleSleepMinutes (at least a minute) and the next wake has no continuity", async () => {
+test("pause keeps User's own mute; pause while asleep only says so; a pause nobody resumes decays to sleep after idleSleepMinutes (at least a minute) and the next wake has no continuity", async () => {
   const w = world();
   const { engine, lives, events, clock } = w;
   try {
@@ -154,7 +154,7 @@ test("pause keeps Kevin's own mute; pause while asleep only says so; a pause nob
     await engine.command({ type: "pause" });
     assert.equal(engine.currentPhase, "paused");
     await engine.command({ type: "resume" });
-    assert.equal(engine.currentPhase, "muted", "Kevin's mute survives the pause");
+    assert.equal(engine.currentPhase, "muted", "User's mute survives the pause");
     assert.deepEqual(lives[1]!.mutes, ["mute"], "the new session starts muted");
     engine.setMuted(false);
     assert.equal(engine.currentPhase, "listening");

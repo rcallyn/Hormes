@@ -5,7 +5,7 @@ import { cutLine, overviewLine, threadLine, unknownNameLine } from "./lines.ts";
 /**
  * The task table: one writer, O(1) reads, bounded memory.
  *
- * Kevin: "keep track of those using extremely performant data structure
+ * User: "keep track of those using extremely performant data structure
  * representations". Every question the voice, the Console or the blobs ask —
  * what is Spotify doing, is anything waiting on me, which threads are live, what
  * happened since event 412 — is answered from Maps and a ring here, never by a
@@ -174,13 +174,13 @@ export class ThreadTable {
    * the task it was given, so a thread started on an earlier request is one the brain can read, wait for or stop by
    * name. Undefined with none live.
    */
-  liveNote(userName = "Kevin"): string | undefined {
+  liveNote(userName = "User"): string | undefined {
     const parts: string[] = [];
     for (const id of this.live) {
       if (id === MAIN_THREAD_ID) continue;
       const t = this.byId.get(id)?.thread;
       if (!t) continue;
-      const doing = t.status === "waiting-kevin" ? `waiting for ${userName}` : t.status === "waiting-screen" ? "waiting for the screen" : t.status;
+      const doing = t.status === "waiting-user" ? `waiting for ${userName}` : t.status === "waiting-screen" ? "waiting for the screen" : t.status;
       const task = t.task.replace(/\s+/g, " ").trim();
       parts.push(`${t.name} (${doing}${task ? `: ${task.length > 80 ? `${task.slice(0, 79)}…` : task}` : ""})`);
     }
@@ -287,8 +287,8 @@ export class ThreadTable {
     if (!rec || THREAD_TERMINAL.has(status) || THREAD_TERMINAL.has(rec.thread.status)) return undefined;
     const before = rec.thread;
     if (before.status === status && (detail === undefined || detail === before.detail)) return undefined;
-    // A question is the thread's while it waits on Kevin or is paused over it; any other move clears it.
-    this.move(rec, status, { ...(detail !== undefined ? { detail: cutLine(detail, 200) } : {}) }, status !== "waiting-kevin" && status !== "paused" && before.question !== undefined ? ["question"] : []);
+    // A question is the thread's while it waits on User or is paused over it; any other move clears it.
+    this.move(rec, status, { ...(detail !== undefined ? { detail: cutLine(detail, 200) } : {}) }, status !== "waiting-user" && status !== "paused" && before.question !== undefined ? ["question"] : []);
     return this.push({ threadId: id, kind: "status", status, ...(rec.thread.detail !== undefined ? { detail: cutLine(rec.thread.detail, EVENT_DETAIL_CHARS) } : {}) });
   }
 
@@ -322,7 +322,7 @@ export class ThreadTable {
   }
 
   /**
-   * The thread asks Kevin: status `waiting-kevin` (one event) and the question (a
+   * The thread asks User: status `waiting-user` (one event) and the question (a
    * second). Two writes, two events — every consumer that keys a face by status sees
    * the status; the pane sees the words.
    */
@@ -331,10 +331,10 @@ export class ThreadTable {
     if (!rec || THREAD_TERMINAL.has(rec.thread.status)) return [];
     const q = cutLine(question, 160);
     // The same question again (a promotion re-asking what the record already says): nothing changed, nothing appended.
-    if (rec.thread.status === "waiting-kevin" && rec.thread.question === q) return [];
+    if (rec.thread.status === "waiting-user" && rec.thread.question === q) return [];
     const out: ThreadEvent[] = [];
-    this.move(rec, "waiting-kevin", { question: q, detail: q });
-    out.push(this.push({ threadId: id, kind: "status", status: "waiting-kevin", detail: cutLine(q, EVENT_DETAIL_CHARS) }));
+    this.move(rec, "waiting-user", { question: q, detail: q });
+    out.push(this.push({ threadId: id, kind: "status", status: "waiting-user", detail: cutLine(q, EVENT_DETAIL_CHARS) }));
     out.push(this.push({ threadId: id, kind: "question", question: q }));
     return out;
   }
@@ -361,7 +361,7 @@ export class ThreadTable {
     if (rec) rec.phrase = phrase;
   }
 
-  /** The thread acted at this point (a tagged orb.fly); the blob follows. */
+  /** The thread clicked at this global screen point. */
   at(id: string, p: Point, app?: string): ThreadEvent | undefined {
     const rec = this.byId.get(id);
     if (!rec || THREAD_TERMINAL.has(rec.thread.status)) return undefined;

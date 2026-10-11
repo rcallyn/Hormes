@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { HormesConfig } from "@hormes/core";
 import type { LiveSession, SessionConfig } from "@hormes/live";
 import type { Brain, BrainResult, BrainSink, BrainTask, ToolRunner } from "@hormes/brain";
-import { FAKE_ACTING_OPS, fakeHeldNow, HANDS_BUSY_PREFIX, KEVIN_QUIET_MS, NativeRequestError, USER_IDLE_NONE_MS, type NativeHands, type UserIdle } from "@hormes/hands";
+import { FAKE_ACTING_OPS, fakeHeldNow, HANDS_BUSY_PREFIX, USER_QUIET_MS, NativeRequestError, USER_IDLE_NONE_MS, type NativeHands, type UserIdle } from "@hormes/hands";
 import type { AgentConnector, SendResult, TranscriptDelta, TranscriptOptions, TranscriptPage } from "@hormes/agents";
 import type { AgentInfo, AgentMessage, ConnectorHealth, EngineEvent, LedgerRow, LocalModel, LocalServerStatus, MemoryItem, MemoryKind, MemoryOrigin, MemoryState, MemorySummary, OverlayCommand } from "@hormes/protocol";
 import type { Exec } from "@hormes/install";
@@ -21,7 +21,7 @@ import type { ThreadBrainFactory } from "../threads/index.ts";
  * config it was opened with, instructions, mutes; emits what a real one would;
  * closes once, or hangs on close when told to), two sets of hands — the acting
  * helper and the reading one — that answer every op with a canned result and
- * record the ops (a held op can be released later; Kevin's own key or click makes
+ * record the ops (a held op can be released later; User's own key or click makes
  * an acting op answer `busy`, as the helper does), a main brain that attaches the
  * runner and holds its task until the abort signal or the test resolves it, a
  * thread-brain factory (`makeThreadBrain`) whose brains a test scripts — one per
@@ -150,8 +150,8 @@ export class FakeLive extends EventEmitter {
 
 /**
  * Hands with canned answers; `hold` names an op to keep in flight until `release()`.
- * Kevin's hands win here as in the helper: after `kevinActed()` every acting op within
- * KEVIN_QUIET_MS answers `busy` (nothing posted) unless the op says `ownDriver`, and so
+ * User's hands win here as in the helper: after `userActed()` every acting op within
+ * USER_QUIET_MS answers `busy` (nothing posted) unless the op says `ownDriver`, and so
  * do `move`, `focus_app`, an `open_app` that activates, `browser_navigate` and a
  * `browser_js` in the front browser that is not `readOnly` (fakeHeldNow, the predicate
  * the hands' own fake calls); `user_idle` reports the same clock. `focus_app` /
@@ -210,19 +210,19 @@ export class RecordingHands implements NativeHands {
     this.screen = other.screen;
   }
   now: () => number = Date.now;
-  /** When Kevin last pressed a key, clicked or scrolled (never Hormes's own posts); undefined = never. */
-  kevinAt: number | undefined;
+  /** When User last pressed a key, clicked or scrolled (never Hormes's own posts); undefined = never. */
+  userAt: number | undefined;
   /** The helper's busy check on acting ops (off to play a helper built before it). */
   busyCheck = true;
 
-  /** Kevin used the keyboard or mouse (now, or at `at`). */
-  kevinActed(at?: number): void {
-    this.kevinAt = at ?? this.now();
+  /** User used the keyboard or mouse (now, or at `at`). */
+  userActed(at?: number): void {
+    this.userAt = at ?? this.now();
   }
 
   /** What `user_idle` answers right now. */
   get userIdle(): UserIdle {
-    const foreignMs = this.kevinAt === undefined ? USER_IDLE_NONE_MS : Math.max(0, this.now() - this.kevinAt);
+    const foreignMs = this.userAt === undefined ? USER_IDLE_NONE_MS : Math.max(0, this.now() - this.userAt);
     return { keyMs: foreignMs, clickMs: foreignMs, scrollMs: USER_IDLE_NONE_MS, moveMs: foreignMs, foreignMs };
   }
 
@@ -231,7 +231,7 @@ export class RecordingHands implements NativeHands {
     this.ops.push({ op, params, at });
     if (this.hold === op && this.release_ === undefined) await new Promise<void>((r) => (this.release_ = r));
     if (FAKE_ACTING_OPS.has(op)) {
-      // As the helper does, before its first CGEvent.post: Kevin's hands on the machine → nothing is posted.
+      // As the helper does, before its first CGEvent.post: User's hands on the machine → nothing is posted.
       this.guardBusy(params);
       this.posted.push({ op, params, at });
     } else if (fakeHeldNow(op, params, this.frontApp)) {
@@ -284,11 +284,11 @@ export class RecordingHands implements NativeHands {
   named(op: string): { op: string; params: Record<string, unknown>; at: number }[] {
     return this.ops.filter((o) => o.op === op);
   }
-  /** The helper's busy check: Kevin's key, click or scroll within KEVIN_QUIET_MS → `busy`, unless the op says `ownDriver`. */
+  /** The helper's busy check: User's key, click or scroll within USER_QUIET_MS → `busy`, unless the op says `ownDriver`. */
   private guardBusy(params: Record<string, unknown>): void {
-    if (!this.busyCheck || params["ownDriver"] === true || this.kevinAt === undefined) return;
-    const ms = this.now() - this.kevinAt;
-    if (ms < KEVIN_QUIET_MS) throw new NativeRequestError({ code: "busy", message: `${HANDS_BUSY_PREFIX} ${Math.max(0, Math.round(ms))} ms ago; nothing was posted` });
+    if (!this.busyCheck || params["ownDriver"] === true || this.userAt === undefined) return;
+    const ms = this.now() - this.userAt;
+    if (ms < USER_QUIET_MS) throw new NativeRequestError({ code: "busy", message: `${HANDS_BUSY_PREFIX} ${Math.max(0, Math.round(ms))} ms ago; nothing was posted` });
   }
 }
 
@@ -397,17 +397,17 @@ export function fakeMessage(id: string, role: AgentMessage["role"], text: string
  * The memory module as the engine's bridge sees it (`MemoryServiceLike` in
  * memory-bridge.ts — the public surface of packages/memory's MemoryService), in memory
  * and scripted: what the blocks say, whether retrieval hangs, how often a run defers; and
- * every call recorded — `ingested` (with the rows it was handed, how many were Kevin's
+ * every call recorded — `ingested` (with the rows it was handed, how many were User's
  * lines, and whether it was forced), `retrievals`, `primed`, `embeds` (a retrieval, a run
  * or a remember each count as one embedding call, so "memory off → 0 embedding calls" is
  * a number). `onRow` lands the audit rows in the world's ledger, as the real service's
  * does through the bridge. No world test ever builds the real service: with the package
- * linked it would embed and extract over Kevin's key.
+ * linked it would embed and extract over User's key.
  */
 export class FakeMemoryService implements MemoryServiceLike {
   items: MemoryItem[] = [];
   ingested: string[] = [];
-  ingestCalls: { sessionId: string; rows: number; kevinLines: number; opts: IngestOptions }[] = [];
+  ingestCalls: { sessionId: string; rows: number; userLines: number; opts: IngestOptions }[] = [];
   retrievals: string[] = [];
   voiceRetrievals = 0;
   primed: string[] = [];
@@ -443,7 +443,7 @@ export class FakeMemoryService implements MemoryServiceLike {
 
   async ingestSession(sessionId: string, rows: readonly LedgerRow[], opts: IngestOptions = {}): Promise<IngestResult> {
     this.ingested.push(sessionId);
-    this.ingestCalls.push({ sessionId, rows: rows.length, kevinLines: rows.filter((r) => r.type === "heard").length, opts });
+    this.ingestCalls.push({ sessionId, rows: rows.length, userLines: rows.filter((r) => r.type === "heard").length, opts });
     this.embeds++;
     const tries = (this.deferred.get(sessionId) ?? 0) + 1;
     if (tries <= this.deferTries) {
@@ -459,20 +459,20 @@ export class FakeMemoryService implements MemoryServiceLike {
   async prime(text: string): Promise<void> {
     this.primed.push(text);
   }
-  async remember(text: string, kind: MemoryKind = "preference", origin: MemoryOrigin = "kevin"): Promise<RememberResult | undefined> {
+  async remember(text: string, kind: MemoryKind = "preference", origin: MemoryOrigin = "user"): Promise<RememberResult | undefined> {
     this.embeds++;
     // The refusal shapes the real store applies: a secret shape, a password, the redactor's mark.
     if (/\[redacted secret\]|password|\b\d{3}-\d{2}-\d{4}\b/i.test(text) || text.trim().length < 3) return undefined;
     const at = this.now();
     const sentence = text
       .trim()
-      .replace(/^i prefer\b/i, "Kevin prefers")
-      .replace(/^i like\b/i, "Kevin likes")
-      .replace(/^my\b/i, "Kevin's")
+      .replace(/^i prefer\b/i, "User prefers")
+      .replace(/^i like\b/i, "User likes")
+      .replace(/^my\b/i, "User's")
       .replace(/[.!?]+$/, "");
     const twin = this.live().find((i) => i.text === sentence);
     if (twin) return { item: twin, op: "noop" };
-    const item: MemoryItem = { id: `m_${++this.seq}`, kind, text: sentence, subjects: [], confidence: 0.9, importance: 0.9, createdAt: at, lastSeenAt: at, seenCount: 1, sources: [{ at, type: origin === "kevin" ? "kevin" : "heard" }], state: "live", origin };
+    const item: MemoryItem = { id: `m_${++this.seq}`, kind, text: sentence, subjects: [], confidence: 0.9, importance: 0.9, createdAt: at, lastSeenAt: at, seenCount: 1, sources: [{ at, type: origin === "user" ? "user" : "heard" }], state: "live", origin };
     this.items.push(item);
     this.row({ at, type: "memory.added", id: item.id, kind, origin });
     return { item, op: "added" };
@@ -489,7 +489,7 @@ export class FakeMemoryService implements MemoryServiceLike {
     });
     return n;
   }
-  forget(id: string, by: "kevin" | "reflex" | "cli"): boolean {
+  forget(id: string, by: "user" | "reflex" | "cli"): boolean {
     const i = this.items.findIndex((x) => x.id === id && x.state === "live");
     if (i < 0) return false;
     this.items[i] = { ...this.items[i]!, state: "forgotten" };
@@ -521,7 +521,7 @@ export class FakeMemoryService implements MemoryServiceLike {
   retrieveForVoice(): Rendered {
     this.voiceRetrievals++;
     const picked = this.live();
-    const text = this.voiceText ?? (picked.length ? `# Kevin, in brief\n${picked.map((i) => `${i.text}.`).join(" ")}\nUse this quietly; never announce that you remember it.` : undefined);
+    const text = this.voiceText ?? (picked.length ? `# User, in brief\n${picked.map((i) => `${i.text}.`).join(" ")}\nUse this quietly; never announce that you remember it.` : undefined);
     return { ...(text ? { text } : {}), tokens: text ? FakeMemoryService.tokens(text) : 0, ids: picked.map((i) => i.id) };
   }
   list(state: MemoryState | "all" = "live", limit = 50): MemoryItem[] {
@@ -752,7 +752,7 @@ export interface World {
   dir: string;
 }
 
-/** No shell: the engine's own shell-outs (the Dock read) answer "not found" unless a test scripts `exec`, so no test ever reads Kevin's Dock. Every `new Engine` in a test passes it. */
+/** No shell: the engine's own shell-outs (the Dock read) answer "not found" unless a test scripts `exec`, so no test ever reads User's Dock. Every `new Engine` in a test passes it. */
 export const noShell: Exec = () => ({ code: 127, stdout: "", stderr: "no shell in tests" });
 
 const tempDirs = new Set<string>();
@@ -792,6 +792,7 @@ export function tempDir(prefix: string): string {
 export function testConfig(dir: string, over: Partial<HormesConfig> = {}): HormesConfig {
   return {
     openaiApiKey: undefined,
+    geminiApiKey: undefined,
     anthropicApiKey: undefined,
     liveModel: "gpt-live-1",
     liveVoice: "ballad",
@@ -828,11 +829,13 @@ export const refusingFetch: typeof fetch = async (input, init) => {
  * `where.dir` reuses another world's state dir (its ledger, its settings) — a second engine
  * over the same day. `where.firstSessionId` names that engine's first FakeLive (default
  * `sess_1`), so two engines over one ledger do not write the same session id twice.
+ * `where.voiceProvider` explicitly selects this FakeLive fixture's transport;
+ * its default is OpenAI independently of the product default. Gemini tests opt in.
  * `where.oneHands` gives both helpers the same RecordingHands (a test that patches
  * `hands.request` and does not care which helper answered). `where.select`: no injected
  * brain, so the engine walks its real selection (over `extra.brainOf`'s fakes).
  */
-export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?: string; readonly firstSessionId?: string; readonly noHands?: boolean; readonly oneHands?: boolean; readonly select?: boolean } = {}): World {
+export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?: string; readonly firstSessionId?: string; readonly noHands?: boolean; readonly oneHands?: boolean; readonly select?: boolean; readonly ownerApprovals?: boolean; readonly voiceProvider?: "openai" | "gemini" } = {}): World {
   const dir = where.dir ?? tempDir("jh-engine-");
   const config = testConfig(dir, { openaiApiKey: "sk-test-not-used" });
   let engine!: Engine;
@@ -939,7 +942,15 @@ export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?
   // loopback ports (V14 / BL-12), so a world passes under HORMES_TEST_NET=strict. A test that wants any passes its own.
   // `ownsStateDir`: a world is the daemon's engine (it holds the dir, so its start closes what a dead one left open);
   // a test of `hormes live` beside it passes `{ ownsStateDir: false }`.
-  engine = new Engine({ config, connectors: [], ownsStateDir: true, ...(where.select ? {} : { brain }), fallbackUserName: "Kevin", ...(where.noHands ? {} : { hands, backgroundHands: handsBg }), makeLive, now: () => clock.t, earStableMs: 40, earCarefulMs: 70, observeSettleMs: 0, makeThreadBrain, exec: noShell, probe: false, fetch: refusingFetch, discoverLocal: async () => localNone(), ...(fakeMemory ? { memory: { service: fakeMemory } } : {}), ...extra });
+  engine = new Engine({ config, connectors: [], ownsStateDir: true, ...(where.select ? {} : { brain }), fallbackUserName: "User", ...(where.noHands ? {} : { hands, backgroundHands: handsBg }), makeLive, now: () => clock.t, earStableMs: 40, earCarefulMs: 70, observeSettleMs: 0, makeThreadBrain, exec: noShell, probe: false, fetch: refusingFetch, discoverLocal: async () => localNone(), ...(fakeMemory ? { memory: { service: fakeMemory } } : {}), ...extra });
+  // FakeLive models the OpenAI transport unless a test explicitly chooses Gemini.
+  // Pin only this fake engine's in-memory setting: updateSettings would write a
+  // file and invalidate the tests for unreadable/preserved settings. Bare Engine
+  // tests still exercise the real DEFAULT_SETTINGS and settings migration.
+  (engine as unknown as { settings: { voiceProvider: "openai" | "gemini" } }).settings.voiceProvider = where.voiceProvider ?? "openai";
+  // Existing voice/permission tests exercise the optional speech-only mode with fake hands.
+  // Owner-authentication tests explicitly enable the production default and script its response.
+  if (!where.ownerApprovals) engine.confirmations.requireOwner = () => false;
   // The real service's audit rows reach the ledger through the bridge's onRow; the fake's do the same here.
   if (fakeMemory) fakeMemory.onRow = (row) => engine.ledger.append(row);
   const events: EngineEvent[] = [];
@@ -959,7 +970,7 @@ export function current(w: World): FakeLive {
   return w.lives[w.lives.length - 1] ?? w.live;
 }
 
-/** Live heard Kevin and delegated: one fragment, then the delegation for it — on the current session. */
+/** Live heard User and delegated: one fragment, then the delegation for it — on the current session. */
 export function delegate(w: World, text: string, liveId: string): void {
   const live = current(w);
   const s = live.nowMs;

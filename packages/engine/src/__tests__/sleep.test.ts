@@ -56,7 +56,7 @@ test("ear: a final 'goodnight hormes.' sleeps it — FAREWELL_LINE appended once
     assert.equal(sleep.length, 1);
     assert.deepEqual(sleep[0], { at: clock.t, type: "sleep", cause: "said", phrase: "goodnight", sessionId: "sess_1", farewell: true });
     assert.equal(rows<StopRow>(w, "stop").length, 0, "a dismissal is not a stop");
-    // A delegation landing mid-farewell (Kevin's next words, or Live's own for the cue) is recorded, refused, never a brain task.
+    // A delegation landing mid-farewell (User's next words, or Live's own for the cue) is recorded, refused, never a brain task.
     delegate(w, "hormes open safari", "item_late");
     await settle();
     const late = engine.snapshot().delegations.find((d) => d.liveId === "item_late")!;
@@ -384,7 +384,7 @@ test("Pause mid-farewell: a dismissal already in flight wins — the farewell en
   }
 });
 
-test("negative: Hormes's own line back through the microphone is not a dismissal — 'that's all for now' heard within 1.5 s of Hormes saying it does nothing; the same words from Kevin 3 s later, mid-exchange, sleep it", async () => {
+test("negative: Hormes's own line back through the microphone is not a dismissal — 'that's all for now' heard within 1.5 s of Hormes saying it does nothing; the same words from User 3 s later, mid-exchange, sleep it", async () => {
   const w = world();
   const { engine, live, clock } = w;
   try {
@@ -401,7 +401,7 @@ test("negative: Hormes's own line back through the microphone is not a dismissal
     assert.equal(rows<SleepRow>(w, "sleep").length, 0, "its own words never dismiss it");
     assert.equal(live.currentState, "started");
     assert.deepEqual(live.instructions, []);
-    // Kevin, 3 s later, still mid-exchange: the same words are his.
+    // User, 3 s later, still mid-exchange: the same words are his.
     clock.t += 3000;
     engine.ear("that's all for now", true, 2, clock.t);
     await settle();
@@ -497,7 +497,7 @@ test("LC-4: a typed dismissal sleeps it although Live raises no delegation: Live
     assert.ok(await until(() => live.closes === 1, 1000), "closed after the word");
     assert.equal(engine.currentPhase, "asleep");
     assert.equal(brain.tasks.length, 0, "no brain task");
-    assert.ok(engine.snapshot().transcript.some((i) => i.speaker === "kevin" && /that's all for now/i.test(i.text)), "the typed line is on the transcript");
+    assert.ok(engine.snapshot().transcript.some((i) => i.speaker === "user" && /that's all for now/i.test(i.text)), "the typed line is on the transcript");
     assert.ok(rows<HeardRow>(w, "heard").some((r) => /that's all for now/i.test(r.item.text)), "and on the ledger");
   } finally {
     await engine.stop();

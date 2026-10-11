@@ -141,7 +141,7 @@ test("problems clear and a toast fires when a grant appears; a revocation is a p
 });
 
 test("poll cadence: 3 s while a kind with a prompt is missing, 30 s when only Full Disk Access is (or nothing is), 1.5 s inside the fast window", async () => {
-  // Kevin's likely steady state: the three prompt kinds granted, FDA never dragged in. That must not cost a process every 3 s for the daemon's life.
+  // User's likely steady state: the three prompt kinds granted, FDA never dragged in. That must not cost a process every 3 s for the daemon's life.
   const { w, hands, poll } = permissionWorld({ accessibility: true, screenRecording: true, inputMonitoring: true, fullDiskAccess: false });
   try {
     await started(w);

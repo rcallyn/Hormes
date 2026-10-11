@@ -5,7 +5,7 @@ import type { TranscriptPage } from "@hormes/agents";
 import { FakeConnector, fakeAgent, fakeMessage, settle, until, world } from "./world.ts";
 
 /**
- * Agent conversations over the long horizon (Kevin: "threads don't break after a
+ * Agent conversations over the long horizon (User: "threads don't break after a
  * while … some remain open with a flashing indicator"). Opens are per viewer, so a
  * re-open after a reconnect never double-counts and a client that dies takes its
  * tails with it; a tail that ends says so — `gone` → live:false plus the calls left

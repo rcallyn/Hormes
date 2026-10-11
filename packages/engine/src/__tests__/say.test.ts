@@ -42,20 +42,20 @@ test("typed while ASLEEP is refused by default: no Live session is opened (the F
     assert.equal(live.instructions.length, 0);
     assert.equal(rows<HeardRow>(w, "heard").length, 0, "nothing on the record");
     assert.equal(hands.named("open_app").length, 0, "no reflex ran asleep");
-    // Kevin's word (Settings.typedWakes, default false): the line opens the session and rides in as the typed instruction.
+    // User's word (Settings.typedWakes, default false): the line opens the session and rides in as the typed instruction.
     engine.updateSettings({ typedWakes: true });
     events.length = 0;
     await engine.command({ type: "say-text", text: "open safari" });
     assert.equal(engine.transportState, "awake");
     assert.equal(live.currentState, "started");
-    assert.ok(live.instructions.some((i) => /Kevin just typed \(treat it exactly like speech\): "open safari"/.test(i)), live.instructions.join(" | "));
+    assert.ok(live.instructions.some((i) => /User just typed \(treat it exactly like speech\): "open safari"/.test(i)), live.instructions.join(" | "));
     assert.equal(rows<HeardRow>(w, "heard").filter((r) => r.item.source === "typed").length, 1);
   } finally {
     await engine.stop();
   }
 });
 
-test("a typed line is on the record FIRST: a TranscriptItem {speaker kevin, source typed, final true} and its `heard` row exist before the instruction is appended; Live's delegation for it carries the typed words as its request; typed while paused resumes first and reaches the new session", async () => {
+test("a typed line is on the record FIRST: a TranscriptItem {speaker user, source typed, final true} and its `heard` row exist before the instruction is appended; Live's delegation for it carries the typed words as its request; typed while paused resumes first and reaches the new session", async () => {
   const w = world();
   const { engine, live, lives, brain } = w;
   try {
@@ -67,13 +67,13 @@ test("a typed line is on the record FIRST: a TranscriptItem {speaker kevin, sour
     let atAppend: { heard: number; last: TranscriptItem | undefined } | undefined;
     const original = live.appendInstructions.bind(live);
     live.appendInstructions = (id: string | null, content: string): string => {
-      if (/Kevin just typed/.test(content)) atAppend = { heard: rows<HeardRow>(w, "heard").length, last: engine.snapshot().transcript.at(-1) };
+      if (/User just typed/.test(content)) atAppend = { heard: rows<HeardRow>(w, "heard").length, last: engine.snapshot().transcript.at(-1) };
       return original(id, content);
     };
     await engine.command({ type: "say-text", text: "what is in my notes" });
     assert.ok(atAppend, "the instruction went out");
     assert.equal(atAppend!.heard, 1, "the heard row was on the ledger before the instruction");
-    assert.equal(atAppend!.last?.speaker, "kevin");
+    assert.equal(atAppend!.last?.speaker, "user");
     assert.equal(atAppend!.last?.source, "typed");
     assert.equal(atAppend!.last?.final, true);
     assert.equal(atAppend!.last?.text, "what is in my notes");
@@ -91,7 +91,7 @@ test("a typed line is on the record FIRST: a TranscriptItem {speaker kevin, sour
     await engine.command({ type: "say-text", text: "what is in my calendar" });
     assert.equal(lives.length, 2, "the resume opened a new session");
     assert.equal(engine.isPaused, false);
-    assert.ok(lives[1]!.instructions.some((i) => /Kevin just typed .*what is in my calendar/.test(i)));
+    assert.ok(lives[1]!.instructions.some((i) => /User just typed .*what is in my calendar/.test(i)));
     assert.equal(live.instructions.filter((i) => /calendar/.test(i)).length, 0, "nothing went to the closed session");
   } finally {
     await engine.stop();
@@ -113,7 +113,7 @@ test("typed 'open safari' runs the reflex first (a hands op within 300 ms; the i
     const took = Date.now() - t0;
     assert.ok(took < 300 * RUNNER_SLACK, `the typed command acted in ${took} ms (under ${300 * RUNNER_SLACK})`);
     assert.equal(hands.named("open_app").length, 1, "the reflex opened Safari on the acting helper");
-    assert.match(live.instructions.at(-1) ?? "", /^Kevin just typed \(treat it exactly like speech\): "open safari"\. Hormes already did it: opened Safari\./);
+    assert.match(live.instructions.at(-1) ?? "", /^User just typed \(treat it exactly like speech\): "open safari"\. Hormes already did it: opened Safari\./);
     // Live's delegation for the typed words: already done, not redone.
     live.emit("delegation", "item_1", "client", live.nowMs);
     await settle();
@@ -146,11 +146,11 @@ test("a typed yes arms the main lane's pending question and Live's next delegati
     engine.desk.lane("hormes", "Hormes").ask("click Send in Mail", "left_click", { coordinate: [1, 2] });
     assert.ok(engine.confirmations.pending);
     await engine.command({ type: "say-text", text: "yes" });
-    assert.match(live.instructions.at(-1) ?? "", /Kevin just typed \(treat it exactly like speech\): "yes"/);
+    assert.match(live.instructions.at(-1) ?? "", /User just typed \(treat it exactly like speech\): "yes"/);
     live.emit("delegation", "item_yes", "client", live.nowMs);
     await settle();
     assert.equal(brain.tasks.length, 1);
-    assert.equal(brain.tasks[0]!.confirmation, true, "the typed yes is transcript.last('kevin'): the delegator's isYes saw it");
+    assert.equal(brain.tasks[0]!.confirmation, true, "the typed yes is transcript.last('user'): the delegator's isYes saw it");
     brain.resolve!({ status: "done", summary: "sent." });
     await settle();
     engine.confirmations.clear();
@@ -205,7 +205,7 @@ test("say-text logs one info line with ms per call; an empty or blank line does 
     await engine.command({ type: "say-text", text: "   " });
     await engine.command({ type: "say-text", text: "" });
     assert.equal(lines.length, 1, "a blank line is nothing said");
-    assert.equal(live.instructions.filter((i) => /Kevin just typed/.test(i)).length, 1);
+    assert.equal(live.instructions.filter((i) => /User just typed/.test(i)).length, 1);
     // A typed thread verb: the line names the reflex it answered from.
     w.threads.script = async () => undefined;
     delegate(w, "hormes play focus on spotify and tell ben", "item_1");
@@ -217,7 +217,7 @@ test("say-text logs one info line with ms per call; an empty or blank line does 
     assert.equal(lines.length, 2);
     assert.match(lines[1]!, /^info say-text: 21 chars → sess_1 in \d+ ms \(reflex: Spotify is /);
     // ONE channel: the typed instruction carries the table's line; the ear's path spoke no aside for a typed line.
-    assert.match(live.instructions.at(-1) ?? "", /^Kevin just typed \(treat it exactly like speech\): "what is spotify doing"\. Hormes already answered it: "Spotify is (thinking|working) — \d+ seconds in" Say that to Kevin, in these words, and wait\.$/);
+    assert.match(live.instructions.at(-1) ?? "", /^User just typed \(treat it exactly like speech\): "what is spotify doing"\. Hormes already answered it: "Spotify is (thinking|working) — \d+ seconds in" Say that to User, in these words, and wait\.$/);
     await settle(50);
     assert.equal(live.commentary.length, asides, "no commentary for the typed verb: the instruction alone carries the line");
     assert.equal(live.commentary.filter((c) => /^Spotify is /.test(c)).length, 0);
@@ -225,7 +225,7 @@ test("say-text logs one info line with ms per call; an empty or blank line does 
     await engine.command({ type: "say-text", text: "stop the spotify one" });
     assert.equal(lines.length, 3);
     assert.match(lines[2]!, /\(reflex: handled\)$/);
-    assert.match(live.instructions.at(-1) ?? "", /^Kevin just typed \(treat it exactly like speech\): "stop the spotify one"\. Hormes already handled it\. Say one word and wait\.$/);
+    assert.match(live.instructions.at(-1) ?? "", /^User just typed \(treat it exactly like speech\): "stop the spotify one"\. Hormes already handled it\. Say one word and wait\.$/);
     await until(() => engine.threads.threads().find((t) => t.name === "Spotify")?.status === "stopped");
   } finally {
     off();

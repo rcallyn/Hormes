@@ -2,7 +2,7 @@ import { logger, newId } from "@hormes/core";
 import { addressesHormes, endsTerminally, normalizeUtterance, parseReflex, type FiredReflexes, type Reflex, type ReflexOutcome, FILLER_HEAD } from "@hormes/brain";
 
 /**
- * The ear: Kevin's words as the app's on-device recogniser hears them, ~100–200 ms
+ * The ear: User's words as the app's on-device recogniser hears them, ~100–200 ms
  * behind his speech, matched against the reflex grammar and acted on at once.
  *
  * Why a second source. Speech → GPT-Live-1 → delegation → brain → first tool call
@@ -30,7 +30,7 @@ import { addressesHormes, endsTerminally, normalizeUtterance, parseReflex, type 
  * it is mid-exchange (`addressed`). A video's "hit the like button" or a colleague's
  * "press enter" is room talk; Live, which hears the room too, decides whether those
  * words were for Hormes and delegates them if so. Hormes's own look (a screenshot, a
- * circle) acts on nothing of Kevin's and needs no address; "stop" is the engine's to
+ * circle) acts on nothing of User's and needs no address; "stop" is the engine's to
  * judge, as before. A partial that is not addressed is not consumed: it may still grow
  * into "press enter, hormes". Those words are Live's from then on: the same words again,
  * or a revision of them, fire only when they name Hormes, never because the exchange
@@ -54,7 +54,7 @@ import { addressesHormes, endsTerminally, normalizeUtterance, parseReflex, type 
  * that" is ⌥⌫; "stop dictating" ends it.
  *
  * A dismissal ("go to sleep", "goodnight hormes", "that's all for now" — the
- * `sleep` row of the grammar) is judged after "stop" and before the hold: Kevin
+ * `sleep` row of the grammar) is judged after "stop" and before the hold: User
  * dismisses Hormes over its own voice or over a running task, and Hormes's own
  * words never contain a cue (its idle clause is "going to sleep", its farewell
  * "night."). Unlike "stop" it is careful — at once on a final or a terminal tail,
@@ -116,7 +116,7 @@ export interface EarOptions {
    * the Console (`typed`, whose answer the typed instruction carries — the engine speaks it once).
    */
   readonly run: (reflex: Reflex, phrase: string, via?: "ear" | "typed") => Promise<ReflexOutcome & { readonly dropped?: string }>;
-  /** Kevin said "stop" (only forwarded while something is running or speaking; the engine decides). */
+  /** User said "stop" (only forwarded while something is running or speaking; the engine decides). */
   readonly onStop: () => void;
   /**
    * Live spawned threads right now (the table's count). With two or more, a bare stop
@@ -130,15 +130,15 @@ export interface EarOptions {
    * Live's fragment path stopped a thread by name a moment ago (the engine's word): a stop
    * word heard now is the recogniser's rendering of the SAME utterance, not a second command.
    * It opens the name window whatever the live count, and when no name follows it is consumed
-   * rather than cutting everything Kevin did not name. The ear's own named stop is never an
-   * echo here — a "stop" after it is Kevin's next word.
+   * rather than cutting everything User did not name. The ear's own named stop is never an
+   * echo here — a "stop" after it is User's next word.
    */
   readonly recentNamedStop?: (() => boolean) | undefined;
   /** The speech gate alone (the engine's `gateSpeech`), fired the moment a stop word lands with ≥ 2 threads live. */
   readonly onGateSpeech?: (() => void) | undefined;
   /** How long the work cut waits for a name after a stop word with ≥ 2 threads live (default STOP_NAME_WAIT_MS). */
   readonly stopNameWaitMs?: number | undefined;
-  /** Kevin dismissed Hormes ("go to sleep", "goodnight hormes"): the phrase, normalised. Absent, dismissals are ordinary words. */
+  /** User dismissed Hormes ("go to sleep", "goodnight hormes"): the phrase, normalised. Absent, dismissals are ordinary words. */
   readonly onSleep?: ((phrase: string) => void) | undefined;
   /**
    * Mid-exchange right now (Hormes spoke or was spoken to a moment ago): a dismissal
@@ -192,7 +192,7 @@ interface Segment {
 }
 
 const STOP_WORDS = /^(?:stop|stop it|stop that|cancel|cancel that|never ?mind|hold on|abort|that's enough|quiet|shush|shut up)$/;
-/** Hormes's own look: it acts on nothing of Kevin's, so room talk may trigger it. Every other kind needs the words addressed. */
+/** Hormes's own look: it acts on nothing of User's, so room talk may trigger it. Every other kind needs the words addressed. */
 const UNADDRESSED_KINDS: ReadonlySet<Reflex["kind"]> = new Set<Reflex["kind"]>(["screenshot", "circle"]);
 /** With two or more spawned threads live, the WORK cut after a stop word waits this long for a name (the Delegator's fragment path keeps the same figure). */
 export const STOP_NAME_WAIT_MS = 350;
@@ -305,7 +305,7 @@ export class EarReflexes {
       this.opts.onStop();
       return;
     }
-    // A dismissal, before the hold (Kevin says it over the voice or a task), only to Hormes.
+    // A dismissal, before the hold (User says it over the voice or a task), only to Hormes.
     if (this.opts.onSleep && parseReflex(cleaned)?.kind === "sleep") {
       if (this.sleepCue(seg, candidate, phrase, words.length, isFinal)) return;
     }
@@ -421,7 +421,7 @@ export class EarReflexes {
   }
 
   /**
-   * A line Kevin typed in the Console: a final, addressed utterance with no stability
+   * A line User typed in the Console: a final, addressed utterance with no stability
    * wait, run through the same gated hands and remembered in `fired` so Live's delegation
    * for the same words is finished as "already did it". Held as the spoken path is held
    * (a task running, the voice speaking) — a meta kind passes. Resolves with the outcome
@@ -432,7 +432,7 @@ export class EarReflexes {
    * record before the resume or wake that speaks it; any other kind is still refused.
    */
   async typed(text: string, at: number, o: { readonly free?: boolean } = {}): Promise<(ReflexOutcome & { readonly dropped?: string }) | undefined> {
-    // Dictating: Kevin's words are text for the focused field, never commands — a typed line meanwhile is the voice's.
+    // Dictating: User's words are text for the focused field, never commands — a typed line meanwhile is the voice's.
     if ((!o.free && !this.opts.enabled()) || this.opts.dictation.active()) return undefined;
     const cleaned = text.replace(/\s+/g, " ").trim().replace(FILLER_HEAD, "");
     if (!cleaned) return undefined;
@@ -536,7 +536,7 @@ export class EarReflexes {
     log.info(`ear: "${phrase}" → ${reflex.label} (${how}, ${dispatchedAt - earAt} ms after the app heard it)`);
     if (reflex.kind === "dictate_start") this.opts.dictation.start();
     if (reflex.kind === "dictate_stop") this.opts.dictation.stop("said");
-    // "stop the slack one" whole: Kevin said stop — whatever the voice was saying hushes now (unless the name window
+    // "stop the slack one" whole: User said stop — whatever the voice was saying hushes now (unless the name window
     // already gated it on the stop word); the thread is the meta hook's.
     if (reflex.kind === "thread_stop" && !gated) this.opts.onGateSpeech?.();
     void this.opts
@@ -642,7 +642,7 @@ export class EarReflexes {
    * Stop or pause: nothing heard so far may fire later — and nothing heard so far
    * may fire *again*. The segments stay, with every word consumed: the recogniser
    * still delivers partials and the final for the current segment, and a segment
-   * forgotten here would come back whole, with the command Kevin just stopped at
+   * forgotten here would come back whole, with the command User just stopped at
    * the front of it.
    */
   quiesce(): void {

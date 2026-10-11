@@ -9,7 +9,7 @@ import { delegate, frame, nextUtterance, rows, settle, world, type World } from 
 
 /**
  * Conversation cleanup, the engine side (K1): the `conversation.*` commands append
- * tombstone rows (by kevin, against the chain root); `now.clear` hides the Now stream
+ * tombstone rows (by user, against the chain root); `now.clear` hides the Now stream
  * at snapshot output only; `conversation.new` is a stop plus an empty Now, and the
  * next Go starts a chain of its own; `ledger.trash-day` / `restore-day` / `sweep` move
  * whole day files through the Trash; `agent.hide` is a row and a snapshot list. Every
@@ -24,7 +24,7 @@ type Started = Extract<LedgerRow, { type: "session.started" }>;
 function oldDay(w: World, id: string, daysAgo = 2): string {
   const at = w.clock.t - daysAgo * DAY_MS;
   w.engine.ledger.append({ at, type: "session.started", sessionId: id, voice: "cedar" });
-  w.engine.ledger.append({ at: at + 1000, type: "heard", item: { id: `h_${id}`, speaker: "kevin", text: `words of ${id}`, startMs: 0, endMs: 900, at: at + 1000, final: true } });
+  w.engine.ledger.append({ at: at + 1000, type: "heard", item: { id: `h_${id}`, speaker: "user", text: `words of ${id}`, startMs: 0, endMs: 900, at: at + 1000, final: true } });
   w.engine.ledger.append({ at: at + 5000, type: "session.closed", sessionId: id, reason: "idle", usageSeconds: 30 });
   return Ledger.dayFor(at);
 }
@@ -38,7 +38,7 @@ function shotsFor(w: World, day: string): string {
 
 const toasts = (w: World): string[] => w.events.filter((e) => e.type === "toast").map((e) => (e as { text: string }).text);
 
-test("conversation.*: tombstone rows by kevin against the chain root, stamped on every session of the chain; an unknown id is a word, not a row", async () => {
+test("conversation.*: tombstone rows by user against the chain root, stamped on every session of the chain; an unknown id is a word, not a row", async () => {
   const w = world();
   const { engine, live, lives, clock } = w;
   try {
@@ -65,7 +65,7 @@ test("conversation.*: tombstone rows by kevin against the chain root, stamped on
     clock.t += 1000;
     await engine.command({ type: "conversation.trash", chainId: "sess_2" });
     const trashed = rows<Extract<LedgerRow, { type: "conversation.trashed" }>>(w, "conversation.trashed");
-    assert.deepEqual(trashed, [{ at: clock.t, type: "conversation.trashed", chainId: "sess_1", by: "kevin" }]);
+    assert.deepEqual(trashed, [{ at: clock.t, type: "conversation.trashed", chainId: "sess_1", by: "user" }]);
     assert.deepEqual(
       engine.ledger.sessions().map((s) => [s.id, s.state, s.trashedAt]),
       [
@@ -240,8 +240,8 @@ test("ledger.trash-day / restore-day: whole day files move by rename, the snapsh
     assert.ok(existsSync(join(engine.config.stateDir, "trash", "shots", day, "shot_a.png")));
     const moved = rows<Extract<LedgerRow, { type: "ledger.moved" }>>(w, "ledger.moved");
     assert.deepEqual(moved.map((m) => [m.day, m.what, m.to, m.by]), [
-      [day, "ledger", "trash", "kevin"],
-      [day, "shots", "trash", "kevin"],
+      [day, "ledger", "trash", "user"],
+      [day, "shots", "trash", "user"],
     ]);
     assert.deepEqual(toasts(w), [`${day} ledger and shots moved to the Trash`]);
     const info = engine.snapshot().trash!;
@@ -447,7 +447,7 @@ test("a crashed process's session: trashing it, or conversation.new, means the n
     c = world();
     const t0 = c.clock.t - 10_000;
     c.engine.ledger.append({ at: t0, type: "session.started", sessionId: "lost_1", voice: "cedar" });
-    c.engine.ledger.append({ at: t0 + 1000, type: "heard", item: { id: "h_lost", speaker: "kevin", text: "hormes the words before the crash", startMs: 0, endMs: 900, at: t0 + 1000, final: true } });
+    c.engine.ledger.append({ at: t0 + 1000, type: "heard", item: { id: "h_lost", speaker: "user", text: "hormes the words before the crash", startMs: 0, endMs: 900, at: t0 + 1000, final: true } });
     await c.engine.start();
     await c.engine.ready();
     assert.equal(c.engine.transportState, "asleep");

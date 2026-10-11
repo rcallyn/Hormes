@@ -45,7 +45,7 @@ test("1000 random transitions over 40 threads keep the count vector equal to a r
   const table = new ThreadTable({ now: () => clock.t });
   const random = rng(42);
   const ids: string[] = [];
-  const live: ThreadStatus[] = ["starting", "thinking", "acting", "waiting-screen", "waiting-kevin", "paused", "queued"];
+  const live: ThreadStatus[] = ["starting", "thinking", "acting", "waiting-screen", "waiting-user", "paused", "queued"];
   for (let i = 0; i < 1000; i++) {
     clock.t += 100;
     const roll = random();
@@ -222,7 +222,7 @@ test("statusLine: one deterministic line per status, the phrase quoted when the 
   assert.equal(table.statusLine("spotify"), "Spotify finished 12 seconds ago — playing Focus");
   table.ended("t_3", "failed", "Mail is not running");
   assert.equal(table.statusLine("mail"), "Mail failed: Mail is not running");
-  table.ended("t_2", "stopped", "Kevin stopped it");
+  table.ended("t_2", "stopped", "User stopped it");
   assert.equal(table.statusLine("slack"), "Slack was stopped");
   assert.equal(table.statusLine(), "nothing is running");
   table.status(MAIN_THREAD_ID, "acting");
@@ -252,27 +252,27 @@ test("statusLine: one deterministic line per status, the phrase quoted when the 
   const m = main(clock.t);
   assert.equal(mainLine({ ...m, status: "acting" }, clock.t + 24_000), "I am working on it — 24 seconds in");
   assert.equal(mainLine({ ...m, status: "thinking" }, clock.t + 3_000), "I am working on it — 3 seconds in");
-  assert.equal(mainLine({ ...m, status: "waiting-kevin", question: "Send it to Ben?" }, clock.t), "I am waiting on your yes: send it to Ben?");
-  assert.equal(mainLine({ ...m, status: "waiting-kevin" }, clock.t), "I am waiting on your yes");
+  assert.equal(mainLine({ ...m, status: "waiting-user", question: "Send it to Ben?" }, clock.t), "I am waiting on your yes: send it to Ben?");
+  assert.equal(mainLine({ ...m, status: "waiting-user" }, clock.t), "I am waiting on your yes");
   assert.equal(mainLine({ ...m, status: "waiting-screen" }, clock.t + 2_000), "I am waiting for the screen — 2 seconds in");
   assert.equal(mainLine({ ...m, status: "paused" }, clock.t), "I am paused");
   assert.equal(mainLine({ ...m, status: "idle" }, clock.t), "nothing is running");
   table.ended("t_4", "stopped");
-  table.status(MAIN_THREAD_ID, "waiting-kevin");
+  table.status(MAIN_THREAD_ID, "waiting-user");
   assert.equal(table.statusLine(), "I am waiting on your yes", "never 'I am waiting on you on it'");
   assert.equal(joinNames(["Slack", "Spotify", "Mail"]), "Slack, Spotify and Mail");
 });
 
-test("question(): two events — status waiting-kevin then the question — the record carries it; a later status clears it; ended clears it and cuts the summary to 200", () => {
+test("question(): two events — status waiting-user then the question — the record carries it; a later status clears it; ended clears it and cuts the summary to 200", () => {
   const clock = { t: T0 };
   const table = new ThreadTable({ now: () => clock.t });
   table.started(mk("t_1", "Slack", clock.t));
   const events = table.question("t_1", "send it to Ben?");
   assert.deepEqual(events.map((e) => e.kind), ["status", "question"]);
-  assert.equal((events[0] as { status: string }).status, "waiting-kevin");
+  assert.equal((events[0] as { status: string }).status, "waiting-user");
   assert.equal((events[1] as { question: string }).question, "send it to Ben?");
   assert.equal(table.get("t_1")!.question, "send it to Ben?");
-  assert.equal(table.count("waiting-kevin"), 1);
+  assert.equal(table.count("waiting-user"), 1);
   table.status("t_1", "paused");
   assert.equal(table.get("t_1")!.question, "send it to Ben?", "a pause keeps the question");
   table.status("t_1", "thinking");
@@ -354,7 +354,7 @@ test("the coalescer: a burst of ten steps in one window costs the wire two event
   assert.deepEqual(out.slice(n).map((e) => e.kind), ["step", "status", "question"]);
   push(table.said("t_1", "Slack asks: send it?"));
   assert.equal(out[out.length - 1]!.kind, "said");
-  push(table.ended("t_1", "stopped", "Kevin stopped it"));
+  push(table.ended("t_1", "stopped", "User stopped it"));
   assert.equal(out[out.length - 1]!.kind, "ended");
   // A long detail is cut on the wire so a status event stays under 200 B.
   push(table.started(mk("t_2", "Slack", clock.t)));
@@ -448,8 +448,8 @@ test("rebuild(rows) across a midnight boundary equals the table the live writes 
   row({ at: clock.t, type: "thread.started", thread: c });
   // Today: C ends; the daemon dies with A still live.
   clock.t = T0 + 60_000;
-  live.ended("t_c", "stopped", "Kevin stopped it");
-  row({ at: clock.t, type: "thread.ended", threadId: "t_c", status: "stopped", summary: "Kevin stopped it", steps: 0, seconds: 3 });
+  live.ended("t_c", "stopped", "User stopped it");
+  row({ at: clock.t, type: "thread.ended", threadId: "t_c", status: "stopped", summary: "User stopped it", steps: 0, seconds: 3 });
 
   clock.t = T0 + 120_000;
   const { table, orphans, rows: appended } = ThreadTable.rebuild(rows, { now: () => clock.t });
@@ -486,16 +486,16 @@ test("rebuild(rows) across a midnight boundary equals the table the live writes 
   assert.equal(again.table.get("t_a")!.status, "failed");
 });
 
-test("rebuild edge cases: a thread found paused or waiting on Kevin longer than THREAD_IDLE_END_MS ends failed 'the daemon restarted' (never 'idle' — nothing acts, nothing decides for it); two live records by one name leave the name free and both failed", () => {
+test("rebuild edge cases: a thread found paused or waiting on User longer than THREAD_IDLE_END_MS ends failed 'the daemon restarted' (never 'idle' — nothing acts, nothing decides for it); two live records by one name leave the name free and both failed", () => {
   const clock = { t: T0 };
   const rows: LedgerRow[] = [];
   // Paused an hour ago, never resumed; waiting on a yes for as long.
   const p = mk("t_p", "Spotify", T0 - 3 * THREAD_IDLE_END_MS, { status: "thinking" });
   rows.push({ at: p.startedAt, type: "thread.started", thread: p });
-  rows.push({ at: p.startedAt + 1000, type: "thread.status", threadId: "t_p", status: "paused", detail: "Kevin paused it" });
+  rows.push({ at: p.startedAt + 1000, type: "thread.status", threadId: "t_p", status: "paused", detail: "User paused it" });
   const w = mk("t_w", "Slack", T0 - 2 * THREAD_IDLE_END_MS, { lane: "screen", status: "thinking" });
   rows.push({ at: w.startedAt, type: "thread.started", thread: w });
-  rows.push({ at: w.startedAt + 1000, type: "thread.status", threadId: "t_w", status: "waiting-kevin", detail: "send it to Ben?" });
+  rows.push({ at: w.startedAt + 1000, type: "thread.status", threadId: "t_w", status: "waiting-user", detail: "send it to Ben?" });
   // Two started rows for one name with no end between them (a process that died between them, or a file the daemon
   // never got to close): the rebuild must not leave a live name pointing at a failed record.
   const a = mk("t_a1", "Mail", T0 - 20_000);

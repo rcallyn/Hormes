@@ -35,8 +35,8 @@ export const THREAD_IDLE_END_MS = 10 * 60_000;
 export const THREAD_QUESTION_REASK_MS = 3 * 60_000 - 10_000;
 /** A thread's lost or lapsed question is asked again at most this many times; the next loss ends the thread `stopped` with a line. */
 export const THREAD_REASKS_MAX = 2;
-/** Kevin's latest requests kept for `keepAsking` (what he said since a question was put to him). */
-const KEVIN_LINES_KEPT = 16;
+/** User's latest requests kept for `keepAsking` (what he said since a question was put to him). */
+const USER_LINES_KEPT = 16;
 /** A next turn whose brain refused it because the last turn's `handle` is still in flight waits this long for the brain to let go. */
 export const LET_GO_WAIT_MS = 5_000;
 /** speak_progress on a thread speaks this many times per turn, with its name. */
@@ -55,24 +55,24 @@ const AGAINST_YES = /\b(?:no|nope|nah|not|don['’]?t|do\s+not|never|cancel|stop
 /** An answer that opens with a no ("no", "nope", "no, don't send it", "don't", "not now", "cancel that", "never mind", "yeah, no"). "No problem" and "no worries" are not one. */
 const DECLINE = /^[\s,.!?;:…-]*(?:(?:hey\s+)?hormes[\s,.!?;:…-]+)?(?:(?:yeah|yes|oh|um|uh|well)[\s,.!?;:…-]+)?(?:no(?![\s,.!?;:…-]+(?:problem|problems|worries|doubt)\b)|nope|nah|negative|not\s+(?:now|yet|that|this|it|today)|don['’]?t|do\s+not|never|cancel|stop|hold\s+off|leave\s+it|skip\s+it|forget\s+it|never\s*mind|scratch\s+that|i\s+changed\s+my\s+mind)\b/i;
 
-/** Kevin's words are a yes and nothing against it (the Delegator's YES_PATTERN, with no word against it anywhere). */
+/** User's words are a yes and nothing against it (the Delegator's YES_PATTERN, with no word against it anywhere). */
 function plainYes(words: string): boolean {
   return YES_PATTERN.test(words) && !AGAINST_YES.test(words);
 }
 
-/** Kevin's words open with a no. */
+/** User's words open with a no. */
 function declines(words: string): boolean {
   return DECLINE.test(words);
 }
 
 // -------------------------------------------------------------- contracts
 
-/** The delegation a thread belongs to: its record ids and Kevin's words (the gates read `request`, never the brief). */
+/** The delegation a thread belongs to: its record ids and User's words (the gates read `request`, never the brief). */
 export interface ThreadParent {
   readonly id: string;
   readonly liveId: string;
   readonly request: string;
-  readonly kevinDialogue?: string | undefined;
+  readonly userDialogue?: string | undefined;
   readonly offsetMs: number;
   /** The thread that runs the parent turn (absent = main). */
   readonly threadId?: string | undefined;
@@ -109,7 +109,7 @@ export interface SpawnSpec {
   readonly budget?: { readonly steps?: unknown; readonly seconds?: unknown } | undefined;
 }
 
-export type StopBy = "kevin" | "brain" | "cut" | "budget";
+export type StopBy = "user" | "brain" | "cut" | "budget";
 
 export interface ThreadSchedulerOptions {
   readonly now?: (() => number) | undefined;
@@ -149,7 +149,7 @@ export interface ThreadSchedulerOptions {
   readonly serializer?: ActingSerializerLike | undefined;
   /** How long a superseded turn's brain may take to let go (default SUPERSEDE_WAIT_MS; tests shorten it). */
   readonly supersedeWaitMs?: number | undefined;
-  /** The user's name as the lines say it (the engine's effective name; "Kevin" when none is wired). */
+  /** The user's name as the lines say it (the engine's effective name; "User" when none is wired). */
   readonly userName?: (() => string) | undefined;
 }
 
@@ -196,6 +196,10 @@ export class LaneHands implements NativeHands {
  */
 export class LaneConfirmations extends ConfirmationState {
   private target: LaneConfirmationState | undefined;
+
+  override get requiresOwner(): boolean {
+    return this.target ? this.target.requiresOwner : super.requiresOwner;
+  }
 
   bind(lane: LaneConfirmationState): void {
     this.target = lane;
@@ -256,7 +260,7 @@ export interface Lane extends PoolLane {
 interface TurnSpec {
   readonly request: string;
   readonly dialogue: string;
-  readonly kevinDialogue?: string | undefined;
+  readonly userDialogue?: string | undefined;
   readonly confirmation: boolean;
   readonly marks?: readonly BrainAttachment[] | undefined;
 }
@@ -287,7 +291,7 @@ interface Job {
   booted: boolean;
   /** The turn to run when the boot answers (a follow-up that arrived while the brain booted replaces the first task — its dialogue carries the brief); undefined = the first task. */
   pendingTurn: TurnSpec | undefined;
-  /** The line Kevin was told, for thread_wait's "(Kevin was told: …)". */
+  /** The line User was told, for thread_wait's "(User was told: …)". */
   spoken: string | undefined;
   /** The question the last turn ended on (a `confirm` step), while it awaits a yes. */
   question: string | undefined;
@@ -295,9 +299,9 @@ interface Job {
   ask: ThreadAsk | undefined;
   /** When the question last reached the floor or the queue (the scheduler's clock). */
   askedAt: number;
-  /** Kevin's line count (`kevinLine`) when it did: his requests after it are his words since. */
+  /** User's line count (`userLine`) when it did: his requests after it are his words since. */
   askedLine: number;
-  /** The question reached the floor since it was last asked: it was spoken, so Kevin heard it. */
+  /** The question reached the floor since it was last asked: it was spoken, so User heard it. */
   heard: boolean;
   /** Times the question was asked again since its turn ended (THREAD_REASKS_MAX). */
   reasks: number;
@@ -328,21 +332,21 @@ export class ThreadScheduler {
   private readonly split = new Set<string>();
   private readonly listeners = new Set<() => void>();
   private readonly events: ThreadEventCoalescer;
-  /** Admission order: the lease's rank (Kevin's hands > main > threads by age). */
+  /** Admission order: the lease's rank (User's hands > main > threads by age). */
   private admitted = 0;
   /** Process releases in flight (a real `brain.stop()` takes time): `stopAll` awaits them so a sleep leaves nothing behind. */
   private readonly releasing = new Set<Promise<void>>();
   /** How often the LIST of threads changed (a start, an end) — the only times the snapshot is asked for; a step never moves it (tests pin that). */
   listChanges = 0;
   private readonly supersedeWaitMs: number;
-  /** Kevin's latest requests to Hormes, numbered (the newest KEVIN_LINES_KEPT), and how many he has made. */
-  private readonly kevinLines: { readonly n: number; readonly words: string }[] = [];
-  private kevinLine = 0;
+  /** User's latest requests to Hormes, numbered (the newest USER_LINES_KEPT), and how many he has made. */
+  private readonly userLines: { readonly n: number; readonly words: string }[] = [];
+  private userLine = 0;
   private readonly unhear: (() => void) | undefined;
 
   /** The user's name as every line here says it. */
   private get userName(): string {
-    return this.opts.userName?.() || "Kevin";
+    return this.opts.userName?.() || "User";
   }
 
   constructor(private readonly opts: ThreadSchedulerOptions) {
@@ -359,26 +363,26 @@ export class ThreadScheduler {
         return factory ? this.makeLane(newId("t"), factory) : undefined;
       },
     });
-    // Kevin's words as each of his requests reaches Hormes: the Delegator writes a main
+    // User's words as each of his requests reaches Hormes: the Delegator writes a main
     // `delegation.created` row (spoken or typed, an aside included) before anything else
     // happens to it. `keepAsking` reads them: a question he heard and then talked past is
     // never asked again behind his back.
     this.unhear = opts.ledger?.onRow((row) => this.onLedgerRow(row));
   }
 
-  /** A main request (not a thread's turn, not an automation's) is Kevin's words. */
+  /** A main request (not a thread's turn, not an automation's) is User's words. */
   private onLedgerRow(row: LedgerRow): void {
     if (row.type !== "delegation.created") return;
     const d = row.delegation;
     if ((d.threadId !== undefined && d.threadId !== MAIN_THREAD_ID) || d.origin) return;
-    this.kevinLines.push({ n: ++this.kevinLine, words: d.request.replace(/\s+/g, " ").trim() });
-    if (this.kevinLines.length > KEVIN_LINES_KEPT) this.kevinLines.splice(0, this.kevinLines.length - KEVIN_LINES_KEPT);
+    this.userLines.push({ n: ++this.userLine, words: d.request.replace(/\s+/g, " ").trim() });
+    if (this.userLines.length > USER_LINES_KEPT) this.userLines.splice(0, this.userLines.length - USER_LINES_KEPT);
   }
 
   // --------------------------------------------------------- the tools
 
   /**
-   * `thread_*` from the main lane's runner. Every request Kevin makes is a delegation of its own, so a
+   * `thread_*` from the main lane's runner. Every request User makes is a delegation of its own, so a
    * name reaches every live thread of the conversation, whichever request started it ("actually, don't
    * message Ben" stops the Slack thread an earlier request split off); a finished one is read by name
    * within the conversation.
@@ -436,7 +440,7 @@ export class ThreadScheduler {
     lane.runner.setRank(rank);
     lane.runner.setStepBudget(steps);
     lane.hands.target = spec.lane === "screen" ? this.opts.hands.focus : this.opts.hands.background;
-    // Named now: the desk's lane carries the name Kevin hears ("Spotify asks: …", "Queued behind Slack's question").
+    // Named now: the desk's lane carries the name User hears ("Spotify asks: …", "Queued behind Slack's question").
     lane.confirmations.bind(this.opts.desk.lane(lane.id, name));
 
     const at = this.now();
@@ -524,7 +528,7 @@ export class ThreadScheduler {
     }
     const settledOrWaiting = (j: Job): boolean => {
       const s = this.table.get(j.id)?.status;
-      return j.settled || s === "waiting-kevin" || s === "paused";
+      return j.settled || s === "waiting-user" || s === "paused";
     };
     const done = (): boolean => targets.every(settledOrWaiting);
     if (!done()) {
@@ -569,7 +573,7 @@ export class ThreadScheduler {
         return `${name}: failed — ${t.detail ?? "unknown reason"}${told}`;
       case "stopped":
         return `${name}: stopped — ${t.detail ?? "stopped"}${told}`;
-      case "waiting-kevin":
+      case "waiting-user":
         return `${name}: awaiting ${this.userName}'s yes — ${job.question ?? t.question ?? t.detail ?? "a confirmation"} (${t.steps} steps, ${elapsed} s)`;
       case "waiting-screen":
         return `${name}: waiting for the screen (${t.steps} steps, ${elapsed} s)${t.detail ? ` — ${t.detail}` : ""}`;
@@ -597,7 +601,7 @@ export class ThreadScheduler {
       return;
     }
     job.booted = true;
-    // Kevin paused it while its brain booted: it stays paused, no turn; `resume` runs one.
+    // User paused it while its brain booted: it stays paused, no turn; `resume` runs one.
     if (this.table.get(job.id)?.status === "paused") return;
     // A follow-up that arrived while the brain booted is the first turn (one turn on one brain, never two):
     // its dialogue carries the brief, so the job is not lost with the first task's words.
@@ -608,7 +612,7 @@ export class ThreadScheduler {
   }
 
   private firstTurn(job: Job): TurnSpec {
-    return { request: job.parent.request, dialogue: job.brief, kevinDialogue: job.parent.kevinDialogue, confirmation: false };
+    return { request: job.parent.request, dialogue: job.brief, userDialogue: job.parent.userDialogue, confirmation: false };
   }
 
   private outOfTime(job: Job): string {
@@ -618,7 +622,7 @@ export class ThreadScheduler {
   /**
    * One turn on the thread's own brain: a Delegation of its own, the eyes' quick shot
    * (through its runner, on the reading helper) raced with the memory block, the
-   * brief in `dialogue`, Kevin's words in `request` (the gates), the identity and the
+   * brief in `dialogue`, User's words in `request` (the gates), the identity and the
    * composite look in `notes`. A follow-up or a pause supersedes the turn: its record
    * closes `cancelled` and the job lives on; a stop ends both.
    */
@@ -652,13 +656,13 @@ export class ThreadScheduler {
       thread: { id: job.id, name: job.name, lane: job.lane },
       request: spec.request,
       dialogue: spec.dialogue,
-      ...(spec.kevinDialogue !== undefined ? { kevinDialogue: spec.kevinDialogue } : {}),
+      ...(spec.userDialogue !== undefined ? { userDialogue: spec.userDialogue } : {}),
       confirmation: spec.confirmation,
       offsetMs: job.parent.offsetMs,
       signal: turn.abort.signal,
       ...(attachments.length ? { attachments } : {}),
       notes: [...(look ? [look] : []), identity],
-      // Never inside kevinDialogue: the gates must not read a remembered line as his words today.
+      // Never inside userDialogue: the gates must not read a remembered line as his words today.
       ...(memory ? { memory } : {}),
     };
     // …and again here: the step budget counts this turn's own calls (the eyes' shot above is not one).
@@ -685,7 +689,7 @@ export class ThreadScheduler {
       return;
     }
     if (job.hold) {
-      // A presence hold is not a question: Kevin is away, the thread says so and ends.
+      // A presence hold is not a question: User is away, the thread says so and ends.
       const line = job.question ?? result.summary ?? `${this.userName} is away; not now`;
       this.endJob(job, "failed", line, `${name}: ${cutLine(line)}`);
       return;
@@ -693,7 +697,7 @@ export class ThreadScheduler {
     if (job.question !== undefined) {
       // The turn ended on a question. On the floor it is spoken with the thread's name; queued, the desk speaks it
       // when promoted — and the record carries the question's own words either way, not the "Queued behind …"
-      // text its brain read, so the pane, the status line and the one `waiting-kevin` row say what it wants to ask.
+      // text its brain read, so the pane, the status line and the one `waiting-user` row say what it wants to ask.
       const queued = this.opts.desk.queued.find((x) => x.laneId === job.id);
       const q = queued ? spokenQuestion(queued.description) : job.question;
       job.question = q;
@@ -702,7 +706,7 @@ export class ThreadScheduler {
       job.turns.close(turn, { status: "awaiting-confirmation", summary: q });
       job.turn = undefined;
       this.publish(this.table.question(job.id, q));
-      this.row({ at: this.now(), type: "thread.status", threadId: job.id, status: "waiting-kevin", threadStatus: "waiting-kevin", detail: cutLine(q, 200) });
+      this.row({ at: this.now(), type: "thread.status", threadId: job.id, status: "waiting-user", threadStatus: "waiting-user", detail: cutLine(q, 200) });
       if (this.opts.desk.floor?.laneId === job.id) this.say(job, `${name} asks: ${cutLine(result.summary ?? q, 160)}`);
       lane.runner.attach(undefined);
       this.notify();
@@ -941,7 +945,7 @@ export class ThreadScheduler {
 
   /**
    * A status change on the table (one event) and, for the statuses the rebuild
-   * needs — waiting-screen, waiting-kevin, paused — one ledger row. thinking↔acting
+   * needs — waiting-screen, waiting-user, paused — one ledger row. thinking↔acting
    * never writes a row (they would flood the day file); `waits` is counted here too.
    */
   private setStatus(job: Job, status: ThreadStatus, detail?: string): void {
@@ -949,7 +953,7 @@ export class ThreadScheduler {
     const clean = detail !== undefined ? job.laneRef.runner.redactor.redact(detail) : undefined;
     const ev = this.table.status(job.id, status, clean);
     this.publish(ev);
-    if (ev && before !== status && (status === "waiting-screen" || status === "paused" || status === "waiting-kevin")) {
+    if (ev && before !== status && (status === "waiting-screen" || status === "paused" || status === "waiting-user")) {
       this.row({ at: this.now(), type: "thread.status", threadId: job.id, status, threadStatus: status, ...(clean !== undefined ? { detail: cutLine(clean, 200) } : {}) });
       job.turns.system(status === "paused" ? "pause.fill" : "hourglass", clean ?? status);
     }
@@ -959,7 +963,7 @@ export class ThreadScheduler {
   // ------------------------------------------------------------- ending
 
   /**
-   * Cut one thread. `by`: "kevin" (the Console's Stop, a spoken "stop the Slack one")
+   * Cut one thread. `by`: "user" (the Console's Stop, a spoken "stop the Slack one")
    * and "brain" (thread_stop) speak "<Name> stopped."; "cut" (interrupt, Stop, Pause,
    * sleep) is silent — the verb already spoke or closed the session; "budget" is a
    * failure with its reason.
@@ -1037,7 +1041,7 @@ export class ThreadScheduler {
     while (this.releasing.size > 0) await Promise.all([...this.releasing]);
   }
 
-  /** One line for Kevin, in Hormes's voice — struck of secrets first, like every text a model or Kevin gets. Returns what was said. */
+  /** One line for User, in Hormes's voice — struck of secrets first, like every text a model or User gets. Returns what was said. */
   private say(job: Job, line: string): string {
     const clean = job.laneRef.runner.redactor.redact(line);
     this.opts.voice()?.threadSay(job.parent.id, job.name, clean);
@@ -1051,15 +1055,15 @@ export class ThreadScheduler {
   // -------------------------------------------------------------- verbs
 
   /** The Console's Stop on a row, a spoken stop by name, or the main brain's thread_stop. True when a live thread was cut. */
-  async stop(threadId: string, by: "kevin" | "brain" | "cut" = "kevin"): Promise<boolean> {
+  async stop(threadId: string, by: "user" | "brain" | "cut" = "user"): Promise<boolean> {
     const job = this.jobs.get(threadId);
     if (!job) return false;
-    await this.stopJob(job, by, by === "kevin" ? `${this.userName} stopped it` : by === "brain" ? "stopped by the main brain" : "cut");
+    await this.stopJob(job, by, by === "user" ? `${this.userName} stopped it` : by === "brain" ? "stopped by the main brain" : "cut");
     return true;
   }
 
   /** "stop the Slack one": the live thread by that name, case-insensitive. */
-  async stopNamed(name: string, by: "kevin" | "cut" = "kevin"): Promise<boolean> {
+  async stopNamed(name: string, by: "user" | "cut" = "user"): Promise<boolean> {
     const t = this.table.byNameLive(name);
     return t ? this.stop(t.id, by) : false;
   }
@@ -1067,7 +1071,7 @@ export class ThreadScheduler {
   /**
    * A follow-up turn on a live thread ("spotify, skip this song"): the running turn is
    * superseded — its signal aborted, `brain.cancel()` awaited, its record closed
-   * `cancelled` — and the next turn runs on the same brain with Kevin's words and his
+   * `cancelled` — and the next turn runs on the same brain with User's words and his
    * circled marks. A paused thread resumes with the words. False for a thread that is
    * not live. A second follow-up a beat later waits for this one (`serially`): one turn
    * at a time on one brain.
@@ -1085,8 +1089,8 @@ export class ThreadScheduler {
     if (!words) return false;
     for (const item of opts.items ?? []) job.turns.utterance(item);
     if (!opts.items?.length) job.turns.system("keyboard", words);
-    const kevinDialogue = [job.parent.kevinDialogue, words].filter((s): s is string => Boolean(s)).join("\n");
-    const spec: TurnSpec = { request: words, dialogue: `${job.brief}\n\n${this.userName} (to ${job.name}): ${words}`, kevinDialogue, confirmation: false, marks: opts.marks };
+    const userDialogue = [job.parent.userDialogue, words].filter((s): s is string => Boolean(s)).join("\n");
+    const spec: TurnSpec = { request: words, dialogue: `${job.brief}\n\n${this.userName} (to ${job.name}): ${words}`, userDialogue, confirmation: false, marks: opts.marks };
     if (!job.booted) {
       // Its brain is still booting (0.5–7 s on this Mac): the words wait for it and become its first
       // turn — one `handle` on one brain, never two. A pause meanwhile is undone by the words.
@@ -1097,9 +1101,9 @@ export class ThreadScheduler {
     await this.supersede(job, `superseded by ${this.userName}'s follow-up`);
     if (job.settled) return false;
     // A question the thread was waiting on goes with the turn that asked it — off the floor (or out of the
-    // queue) BEFORE the next turn, or Kevin's later yes would arm an action nobody asked about any more
+    // queue) BEFORE the next turn, or User's later yes would arm an action nobody asked about any more
     // (the handshake's rule: a yes lands only on the question he heard). The next queued question comes up.
-    if (job.question !== undefined || this.table.get(threadId)?.status === "waiting-kevin") {
+    if (job.question !== undefined || this.table.get(threadId)?.status === "waiting-user") {
       this.opts.desk.drop(threadId);
       job.question = undefined;
     }
@@ -1143,10 +1147,10 @@ export class ThreadScheduler {
   }
 
   /**
-   * Kevin's yes reached the thread's question: its brain re-calls the same tool on a
+   * User's yes reached the thread's question: its brain re-calls the same tool on a
    * new turn of its own thread (`confirmation: true`). `words` is his answer as he said
-   * or typed it: the turn quotes it, never "Kevin said yes", and his words join
-   * `kevinDialogue` for the gates. A paused thread resumes with a continuation turn
+   * or typed it: the turn quotes it, never "User said yes", and his words join
+   * `userDialogue` for the gates. A paused thread resumes with a continuation turn
    * instead. The Delegator calls this after arming the root; the Console's Allow goes
    * through `answerYes`, which checks the floor first.
    */
@@ -1161,12 +1165,12 @@ export class ThreadScheduler {
     const threadId = job.id;
     const t = this.table.get(threadId);
     if (!t) return;
-    if (t.status === "waiting-kevin") {
+    if (t.status === "waiting-user") {
       this.setStatus(job, "thinking");
       job.question = undefined;
       const words = answer?.replace(/\s+/g, " ").trim();
-      const kevinDialogue = words ? [job.parent.kevinDialogue, words].filter((s): s is string => Boolean(s)).join("\n") : job.parent.kevinDialogue;
-      void this.runTurn(job, { request: job.parent.request, dialogue: `${job.brief}${confirmationResume(this.userName, words)}`, kevinDialogue, confirmation: true });
+      const userDialogue = words ? [job.parent.userDialogue, words].filter((s): s is string => Boolean(s)).join("\n") : job.parent.userDialogue;
+      void this.runTurn(job, { request: job.parent.request, dialogue: `${job.brief}${confirmationResume(this.userName, words)}`, userDialogue, confirmation: true });
       return;
     }
     if (t.status === "paused") {
@@ -1177,7 +1181,7 @@ export class ThreadScheduler {
         return;
       }
       this.setStatus(job, "thinking");
-      const spec = job.pendingTurn ?? { request: job.parent.request, dialogue: `${job.brief}${resumeText(t.steps, this.userName)}`, kevinDialogue: job.parent.kevinDialogue, confirmation: false };
+      const spec = job.pendingTurn ?? { request: job.parent.request, dialogue: `${job.brief}${resumeText(t.steps, this.userName)}`, userDialogue: job.parent.userDialogue, confirmation: false };
       job.pendingTurn = undefined;
       void this.runTurn(job, spec);
     }
@@ -1197,6 +1201,7 @@ export class ThreadScheduler {
     if (threadId === MAIN_THREAD_ID) return { ok: false, reason: "the main thread's yes is the engine's to arm" };
     const job = this.jobs.get(threadId);
     if (!job || job.settled) return { ok: false, reason: "that thread is gone" };
+    if (this.opts.desk.root.requiresOwner) return { ok: false, reason: "press Allow in the Console and authenticate" };
     const armed = this.opts.desk.root.arm(this.grantRecord());
     // Past the root's TTL a yes arms nothing (`arm` answers undefined, or `expired` once the desk keeps
     // an expired question on the floor): the question is asked again, and his next yes lands it.
@@ -1220,8 +1225,8 @@ export class ThreadScheduler {
       this.opts.desk.forget(threadId);
       return false;
     }
-    if (this.table.get(threadId)?.status === "waiting-kevin") {
-      await this.stopJob(job, "kevin", `${this.userName} said no`);
+    if (this.table.get(threadId)?.status === "waiting-user") {
+      await this.stopJob(job, "user", `${this.userName} said no`);
       return true;
     }
     this.opts.desk.drop(threadId);
@@ -1241,18 +1246,18 @@ export class ThreadScheduler {
    * its question dropped; the record stays `paused`, the process stays warm. `resume`
    * runs a continuation turn.
    */
-  async pause(threadId: string, by: "kevin" | "cut" = "kevin"): Promise<boolean> {
+  async pause(threadId: string, by: "user" | "cut" = "user"): Promise<boolean> {
     const job = this.jobs.get(threadId);
     if (!job || job.settled) return false;
     return this.serially(job, () => this.pauseNow(job, by));
   }
 
-  private async pauseNow(job: Job, by: "kevin" | "cut"): Promise<boolean> {
+  private async pauseNow(job: Job, by: "user" | "cut"): Promise<boolean> {
     if (job.settled) return false;
     const threadId = job.id;
     const t = this.table.get(threadId);
     if (!t || t.status === "paused") return false;
-    const reason = by === "kevin" ? `${this.userName} paused it` : "paused";
+    const reason = by === "user" ? `${this.userName} paused it` : "paused";
     if (!job.booted) {
       // Its brain is still booting: nothing to supersede; the boot's end finds it paused and runs no turn.
       this.setStatus(job, "paused", reason);
@@ -1269,7 +1274,7 @@ export class ThreadScheduler {
   }
 
   /** Global Pause: every live thread paused, brains interrupted, processes kept. */
-  async pauseAll(by: "kevin" | "cut" = "kevin"): Promise<void> {
+  async pauseAll(by: "user" | "cut" = "user"): Promise<void> {
     await Promise.all([...this.jobs.values()].map((j) => this.pause(j.id, by)));
   }
 
@@ -1347,14 +1352,14 @@ export class ThreadScheduler {
   speakQuestion(laneName: string, question: string): boolean {
     const job = [...this.jobs.values()].find((j) => j.name === laneName || j.id === laneName);
     if (!job) return false;
-    // A promoted question was recorded `waiting-kevin` (with its own words) when its turn ended: one row per
+    // A promoted question was recorded `waiting-user` (with its own words) when its turn ended: one row per
     // status change, so a promotion writes none; the table appends events only when the words changed.
-    const already = this.table.get(job.id)?.status === "waiting-kevin";
+    const already = this.table.get(job.id)?.status === "waiting-user";
     job.question = question;
     job.ask = this.deskQuestion(job.id) ?? job.ask;
     this.markAsked(job);
     this.publish(this.table.question(job.id, question));
-    if (!already) this.row({ at: this.now(), type: "thread.status", threadId: job.id, status: "waiting-kevin", threadStatus: "waiting-kevin", detail: cutLine(question, 200) });
+    if (!already) this.row({ at: this.now(), type: "thread.status", threadId: job.id, status: "waiting-user", threadStatus: "waiting-user", detail: cutLine(question, 200) });
     this.say(job, `${job.name} asks: ${cutLine(question, 160)}`);
     this.notify();
     return true;
@@ -1414,7 +1419,7 @@ export class ThreadScheduler {
    * a spare top-up when a retry window passed (never while the pool is closed for a
    * sleep), the idle end — a paused thread or one waiting on a yes for
    * THREAD_IDLE_END_MS ends `stopped "idle"` and its lane returns — and a waiting
-   * thread's question kept in front of Kevin (`keepAsking`).
+   * thread's question kept in front of User (`keepAsking`).
    */
   tick(now = this.now()): void {
     for (const e of this.table.tick(now)) this.publish(e);
@@ -1422,17 +1427,17 @@ export class ThreadScheduler {
     for (const job of [...this.jobs.values()]) {
       const t = this.table.get(job.id);
       if (!t) continue;
-      if ((t.status === "paused" || t.status === "waiting-kevin") && now - t.updatedAt >= THREAD_IDLE_END_MS) {
+      if ((t.status === "paused" || t.status === "waiting-user") && now - t.updatedAt >= THREAD_IDLE_END_MS) {
         this.opts.desk.forget(job.id);
         this.endJob(job, "stopped", "idle", undefined);
         continue;
       }
-      if (t.status === "waiting-kevin" && job.booted && job.turn === undefined) this.keepAsking(job, now);
+      if (t.status === "waiting-user" && job.booted && job.turn === undefined) this.keepAsking(job, now);
     }
   }
 
   /**
-   * A thread waiting on Kevin's yes keeps its question where he can answer it.
+   * A thread waiting on User's yes keeps its question where he can answer it.
    *
    * - On the desk, it is asked again (its own tool call) once he can no longer answer it
    *   there: on the floor just before the root's TTL lapses, or past its TTL (`holds`).
@@ -1463,7 +1468,7 @@ export class ThreadScheduler {
     }
     if (declines(said)) {
       log.info(`thread ${job.name}: ${this.userName} said no to its question; stopping it`);
-      void this.stopJob(job, "kevin", `${this.userName} said no`);
+      void this.stopJob(job, "user", `${this.userName} said no`);
       return;
     }
     log.info(`thread ${job.name}: ${this.userName} moved on from its question; stopping it, not asking again`);
@@ -1492,28 +1497,28 @@ export class ThreadScheduler {
     job.question = q;
     this.publish(this.table.question(job.id, q));
     log.info(`thread ${job.name}: its question was ${why}; asked again (${job.reasks}/${THREAD_REASKS_MAX})`);
-    // On the floor it is spoken: "still asks" when Kevin heard it before, else for the first time (it waited in the queue).
+    // On the floor it is spoken: "still asks" when User heard it before, else for the first time (it waited in the queue).
     if (job.heard) this.say(job, heardBefore ? stillAsksLine(job.name, q) : `${job.name} asks: ${cutLine(q, 160)}`);
     this.notify();
     return true;
   }
 
-  /** The question was just put on the desk: Kevin's requests from here are his words since; on the floor it is spoken, so he hears it. */
+  /** The question was just put on the desk: User's requests from here are his words since; on the floor it is spoken, so he hears it. */
   private markAsked(job: Job, now = this.now()): void {
     job.askedAt = now;
-    job.askedLine = this.kevinLine;
+    job.askedLine = this.userLine;
     job.heard = this.opts.desk.floor?.laneId === job.id;
   }
 
   /**
-   * What Kevin said since the question was put to him that is not a plain yes: a no first,
+   * What User said since the question was put to him that is not a plain yes: a no first,
    * else the first other request; "" when one fell off the kept lines (fails closed); undefined
    * when he said nothing since, or only yes.
    */
   private saidSince(job: Job): string | undefined {
-    const count = this.kevinLine - job.askedLine;
+    const count = this.userLine - job.askedLine;
     if (count <= 0) return undefined;
-    const since = this.kevinLines.filter((l) => l.n > job.askedLine);
+    const since = this.userLines.filter((l) => l.n > job.askedLine);
     const no = since.find((l) => declines(l.words));
     if (no) return no.words;
     const other = since.find((l) => !plainYes(l.words));
@@ -1521,7 +1526,7 @@ export class ThreadScheduler {
     return since.length < count ? "" : undefined;
   }
 
-  /** Can Kevin still answer this lane's question where it is? A question past its TTL holds nothing. */
+  /** Can User still answer this lane's question where it is? A question past its TTL holds nothing. */
   private holds(laneId: string): boolean {
     return this.opts.desk.holds(laneId);
   }
@@ -1586,17 +1591,9 @@ export class ThreadScheduler {
     return { id, hands, confirmations, toolset, runner, brain, started: undefined };
   }
 
-  /** The lane's overlay commands, tagged with the thread: its blob flies where it acts; the table learns the point. */
+  /** Record click locations while forwarding ordinary screen annotations. */
   private annotate(id: string, base: ((cmd: OverlayCommand) => void) | undefined, cmd: OverlayCommand): void {
-    if (cmd.cmd === "orb.fly") {
-      base?.({ ...cmd, thread: id });
-      this.publish(this.table.at(id, { x: cmd.x, y: cmd.y }));
-      return;
-    }
-    if (cmd.cmd === "orb.trace") {
-      base?.({ ...cmd, thread: id });
-      return;
-    }
+    if (cmd.cmd === "click-pulse") this.publish(this.table.at(id, { x: cmd.x, y: cmd.y }));
     base?.(cmd);
   }
 

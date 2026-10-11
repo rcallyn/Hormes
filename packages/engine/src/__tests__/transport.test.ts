@@ -57,8 +57,8 @@ test("pause closes the session, holds the conversation and drops the mic; resume
     const next = lives[1]!;
     assert.equal(next.currentState, "started");
     assert.match(next.config?.instructions ?? "", /# Continuity/);
-    assert.match(next.config?.instructions ?? "", /Kevin: hormes open the budget spreadsheet/);
-    assert.match(next.config?.instructions ?? "", /Kevin paused you (a minute|2 minutes) ago/);
+    assert.match(next.config?.instructions ?? "", /User: hormes open the budget spreadsheet/);
+    assert.match(next.config?.instructions ?? "", /User paused you (a minute|2 minutes) ago/);
     const started = rows<Started>(w, "session.started");
     assert.equal(started[1]?.resumedFrom, "sess_1");
     assert.deepEqual(rows<Resume>(w, "resume"), [{ at: clock.t, type: "resume", sessionId: "sess_2", resumedFrom: "sess_1", pausedMs: 90_000 }]);
@@ -458,7 +458,7 @@ test("interrupt keeps the session open; the ear's spoken stop is an interrupt; t
     assert.equal(live.currentState, "started", "the session stays");
     assert.equal(engine.snapshot().session?.id, "sess_1");
     assert.equal(engine.transportState, "awake");
-    assert.deepEqual(live.instructions, ["Kevin said stop. Stop speaking now and wait."]);
+    assert.deepEqual(live.instructions, ["User said stop. Stop speaking now and wait."]);
     assert.equal(rows<Stop>(w, "stop")[0]?.how, "said");
 
     // The ear: "stop" while a task runs.
@@ -470,7 +470,7 @@ test("interrupt keeps the session open; the ear's spoken stop is an interrupt; t
     engine.ear("stop", false, 1, clock.t);
     await settle();
     assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_2")?.status, "cancelled");
-    assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_2")?.summary, "Kevin said stop");
+    assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_2")?.summary, "User said stop");
     assert.equal(live.currentState, "started", "a spoken stop never closes the session");
     assert.equal(lives.length, 1);
     assert.equal(rows<Stop>(w, "stop").length, 2);
@@ -481,8 +481,8 @@ test("interrupt keeps the session open; the ear's spoken stop is an interrupt; t
     await engine.command({ type: "say-text", text: "open safari" });
     assert.equal(engine.transportState, "awake");
     assert.equal(lives.length, 2);
-    assert.ok(lives[1]!.instructions.some((i) => /Kevin just typed .*open safari/.test(i)));
-    assert.equal(live.instructions.filter((i) => /Kevin just typed/.test(i)).length, 0, "nothing went to the closed session");
+    assert.ok(lives[1]!.instructions.some((i) => /User just typed .*open safari/.test(i)));
+    assert.equal(live.instructions.filter((i) => /User just typed/.test(i)).length, 0, "nothing went to the closed session");
   } finally {
     await engine.stop();
   }
@@ -557,7 +557,7 @@ test("a resume's handshake is left alone: ticks mid-handshake close nothing and 
     assert.ok(engine.snapshot().pause, "still paused: the resume has not started");
     assert.equal(engine.currentPhase, "connecting");
     assert.ok(!events.some((e) => e.type === "toast" && /paused too long/.test(e.text)), "a resume in flight is never decayed");
-    // Kevin's first words after pressing Go are queued to the opening session, as a wake does.
+    // User's first words after pressing Go are queued to the opening session, as a wake does.
     engine.feedMic(frame());
     assert.equal(second.audioIn, 1, "mic queued to the opening session during a resume's handshake");
     release();
@@ -569,7 +569,7 @@ test("a resume's handshake is left alone: ticks mid-handshake close nothing and 
     assert.equal(engine.snapshot().problems.length, 0, "a healthy resume has no problem line");
     assert.equal(second.currentState, "started");
     assert.equal(rows<Resume>(w, "resume").length, 1);
-    assert.match(second.config?.instructions ?? "", /Kevin: hormes open the calendar/);
+    assert.match(second.config?.instructions ?? "", /User: hormes open the calendar/);
   } finally {
     await engine.stop();
   }
@@ -671,7 +671,7 @@ test("stop then go within one handshake: go re-arms the connect a stop had disar
     await engine.command({ type: "stop" });
     assert.equal(engine.currentPhase, "asleep");
     events.length = 0;
-    await engine.command({ type: "go" }); // Kevin changes his mind before session.started
+    await engine.command({ type: "go" }); // User changes his mind before session.started
     assert.equal(engine.currentPhase, "connecting", "the connect is wanted again");
     assert.equal(events.filter((e) => e.type === "toast").length, 0);
     release();
@@ -736,7 +736,7 @@ test("a socket that closes before session.started is one failed start, not a rec
     assert.equal(rows<Started>(w, "session.started").length, 0);
     assert.equal(rows<Closed>(w, "session.closed").length, 0, "never started: no closed row either");
     assert.deepEqual(engine.snapshot().usageToday, { seconds: 0, sessions: 0 });
-    // Kevin presses Go: a fresh attempt.
+    // User presses Go: a fresh attempt.
     await engine.command({ type: "go" });
     assert.equal(lives.length, 2);
     assert.equal(engine.currentPhase, "listening");
@@ -769,7 +769,7 @@ test("a wake during a brain restart waits for the brain instead of wedging the t
   }
 });
 
-// ------------------------------------------------ auto-resume after a restart (REDESIGN §16)
+// ------------------------------------------------ auto-resume after a restart (typed liveness and problems)
 // The engine process dies mid-conversation (a crash, a kill, a self-update); the app
 // respawns it and, seeing it come back asleep after a session was open, sends `go` once.
 // The new process has no transcript: the ledger says what was said, and the voice says
@@ -807,9 +807,9 @@ test("auto-resume: a Go soon after start resumes the session the previous engine
     const config = b.live.config;
     assert.match(config?.instructions ?? "", /# Continuity/);
     assert.match(config?.instructions ?? "", /Hormes's engine restarted \d+ seconds ago in the middle of this conversation/);
-    assert.match(config?.instructions ?? "", /Kevin: hormes open the budget spreadsheet/);
+    assert.match(config?.instructions ?? "", /User: hormes open the budget spreadsheet/);
     assert.match(config?.instructions ?? "", /Hormes: Opening it now\./);
-    assert.match(config?.instructions ?? "", /Kevin: hormes scroll to the totals/);
+    assert.match(config?.instructions ?? "", /User: hormes scroll to the totals/);
     assert.match(config?.instructions ?? "", /Say exactly one word now — "back"/);
     const started = rows<Started>(b, "session.started");
     assert.equal(started.at(-1)?.sessionId, "sess_b");
@@ -828,7 +828,7 @@ test("auto-resume: a Go soon after start resumes the session the previous engine
   }
 });
 
-test("auto-resume never happens after Kevin's Stop: a pressed stop before the cut leaves nothing to resume, and a Stop in the new process before its Go does too; outside the window a Go is a plain wake", async () => {
+test("auto-resume never happens after User's Stop: a pressed stop before the cut leaves nothing to resume, and a Stop in the new process before its Go does too; outside the window a Go is a plain wake", async () => {
   // Stopped before the cut.
   const a = world();
   let b: ReturnType<typeof world> | undefined;
@@ -848,9 +848,9 @@ test("auto-resume never happens after Kevin's Stop: a pressed stop before the cu
     await b.engine.start();
     await b.engine.ready();
     await b.engine.command({ type: "go" });
-    assert.doesNotMatch(b.live.config?.instructions ?? "", /Continuity/, "Kevin stopped it: nothing to pick up");
+    assert.doesNotMatch(b.live.config?.instructions ?? "", /Continuity/, "User stopped it: nothing to pick up");
     assert.equal(rows<Started>(b, "session.started").at(-1)?.resumedFrom, undefined);
-    // Cut mid-conversation, but Kevin presses Stop in the new process before pressing Go.
+    // Cut mid-conversation, but User presses Stop in the new process before pressing Go.
     b.clock.t += 5000;
     c = world({}, { dir: a.dir, firstSessionId: "sess_c" });
     c.clock.t = b.clock.t;
@@ -905,8 +905,8 @@ test("a pause survives the engine's death: the new process holds it again (pause
     await b.engine.command({ type: "go" });
     assert.equal(b.engine.transportState, "awake");
     assert.match(b.live.config?.instructions ?? "", /# Continuity/);
-    assert.match(b.live.config?.instructions ?? "", /Kevin paused you/);
-    assert.match(b.live.config?.instructions ?? "", /Kevin: hormes find the invoice/, "the lines come from the ledger");
+    assert.match(b.live.config?.instructions ?? "", /User paused you/);
+    assert.match(b.live.config?.instructions ?? "", /User: hormes find the invoice/, "the lines come from the ledger");
     assert.equal(rows<Started>(b, "session.started").at(-1)?.resumedFrom, "sess_1");
     await b.engine.command({ type: "stop" });
     // A pause whose decay has passed by the time the new process starts is not held: asleep.
@@ -966,7 +966,7 @@ test("the resume loop guard: a session that was itself a ledger resume and lived
     await c.engine.ready();
     await c.engine.command({ type: "go" });
     assert.match(c.live.config?.instructions ?? "", /# Continuity/, "a resume that lived is a conversation");
-    assert.match(c.live.config?.instructions ?? "", /Kevin: hormes scroll to the totals/);
+    assert.match(c.live.config?.instructions ?? "", /User: hormes scroll to the totals/);
     assert.equal(rows<Started>(c, "session.started").at(-1)?.resumedFrom, "sess_b");
     // c dies 20 s in: a resume that died young. d must not resume it — that is the loop.
     c.clock.t += 20_000;
@@ -981,7 +981,7 @@ test("the resume loop guard: a session that was itself a ledger resume and lived
     assert.doesNotMatch(d.live.config?.instructions ?? "", /Continuity/, "a resume that died young is a loop, not a conversation");
     assert.equal(rows<Started>(d, "session.started").at(-1)?.resumedFrom, undefined);
     assert.equal(rows<Resume>(d, "resume").filter((r) => r.resumedFrom === "sess_c").length, 0);
-    // The exemption: d pauses and resumes (Kevin's own chain, resumedFrom set), then dies 10 s in — e resumes it.
+    // The exemption: d pauses and resumes (User's own chain, resumedFrom set), then dies 10 s in — e resumes it.
     delegate(d, "hormes find the invoice", "item_3");
     await settle();
     await d.engine.command({ type: "pause" });
@@ -994,7 +994,7 @@ test("the resume loop guard: a session that was itself a ledger resume and lived
     await e.engine.start();
     await e.engine.ready();
     await e.engine.command({ type: "go" });
-    assert.match(e.live.config?.instructions ?? "", /# Continuity/, "a pause's resume that died young is still Kevin's conversation");
+    assert.match(e.live.config?.instructions ?? "", /# Continuity/, "a pause's resume that died young is still User's conversation");
     assert.equal(rows<Started>(e, "session.started").at(-1)?.resumedFrom, "sess_d_2");
   } finally {
     await e?.engine.stop();
@@ -1018,14 +1018,14 @@ test("Stop inside the reconnect window after connection_lost writes the stop row
     a.live.nowMs += 5000;
     a.clock.t += 2000;
     tick(a.engine);
-    // The server drops the session; the engine will reconnect in 500 ms. Kevin presses Stop first.
+    // The server drops the session; the engine will reconnect in 500 ms. User presses Stop first.
     a.live.serverClosed("connection_lost", 5);
     assert.equal(a.engine.snapshot().session, undefined, "detached");
     assert.equal(a.engine.snapshot().problems.some((p) => /reconnecting/.test(p.text)), true);
     a.clock.t += 100;
     await a.engine.command({ type: "stop" });
     const stops = rows<Stop>(a, "stop").filter((r) => r.how === "pressed");
-    assert.equal(stops.length, 1, "Kevin's word is on the ledger even though nothing was connecting yet");
+    assert.equal(stops.length, 1, "User's word is on the ledger even though nothing was connecting yet");
     assert.ok(stops[0]!.at >= rows<Closed>(a, "session.closed").at(-1)!.at, "after the closed row");
     assert.equal(a.engine.snapshot().problems.some((p) => /reconnecting/.test(p.text)), false, "the reconnect row left with the stop");
     await settle(600); // the reconnect timer fires into a stopped engine

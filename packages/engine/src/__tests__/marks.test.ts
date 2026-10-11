@@ -96,7 +96,9 @@ function world(): World {
   };
   const clock = { t: 1_757_500_000_000 };
   // Every engine in a test runs over the memory stand-in: the real service would build an OpenAI embedder over the fake key.
-  const engine = new Engine({ config, connectors: [], brain, fallbackUserName: "Kevin", makeLive: () => live as unknown as LiveSession, now: () => clock.t, exec: noShell, memory: { service: new FakeMemoryService() } });
+  const engine = new Engine({ config, connectors: [], brain, fallbackUserName: "User", makeLive: () => live as unknown as LiveSession, now: () => clock.t, exec: noShell, memory: { service: new FakeMemoryService() } });
+  // This stand-in speaks the OpenAI Live protocol; keep product defaults independent.
+  (engine as unknown as { settings: { voiceProvider: "openai" | "gemini" } }).settings.voiceProvider = "openai";
   const overlays: OverlayCommand[] = [];
   engine.on("overlay", (c) => {
     overlays.push(c);
@@ -147,11 +149,10 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
     assert.deepEqual(zooms, [{ x: 10, y: 20, w: 100, h: 50, maxLongEdge: 2000, excludePids: [process.pid] }], "the hands' zoom op captures exactly the circled rect, with Hormes's own windows left out like every capture");
     // The stand-in has no element_at / windows, so nothing to snap to: the stroke's own box stands. The
     // sender drew the stroke itself (no echo); the blob then outlines the box by hand.
-    assert.deepEqual(overlays.map((o) => o.cmd), ["orb.trace"], "a stroke that came with the command was drawn by its sender; the only overlay is the blob's outline");
-    const outline = overlays[0] as Extract<OverlayCommand, { cmd: "orb.trace" }>;
-    assert.equal(outline.closed, true);
+    assert.deepEqual(overlays.map((o) => o.cmd), ["stroke"], "a stroke that came with the command was drawn by its sender; the only overlay is the snapped outline");
+    const outline = overlays[0] as Extract<OverlayCommand, { cmd: "stroke" }>;
+    assert.deepEqual(outline.points[0], outline.points.at(-1), "the outline closes");
     assert.equal(outline.tone, "mark");
-    assert.equal(outline.reason, "mark");
     assert.equal(outline.label, undefined, "nothing known about what was circled: no label");
     assert.ok(outline.points.length >= 16 && outline.points.every((pt) => pt.x >= 10 - 1e-6 && pt.x <= 110 + 1e-6 && pt.y >= 20 - 1e-6 && pt.y <= 70 + 1e-6), "a rounded frame within the box");
     assert.deepEqual(timeline.filter((t) => t.startsWith("hands:")), ["hands:element_at", "hands:windows", "hands:zoom"], "the snap probes run before the capture");
@@ -166,10 +167,10 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
     assert.equal(marks.length, 2);
     assert.deepEqual(marks[1]!.rect, { x: 150, y: 80, w: 50, h: 20 });
     assert.equal(marks[1]!.path, undefined);
-    assert.deepEqual(overlays.map((o) => o.cmd), ["stroke", "orb.trace"], "a bare box: its outline echoed once the capture is done, then the blob's trace");
+    assert.deepEqual(overlays.map((o) => o.cmd), ["stroke", "stroke"], "a bare box: its outline echoed once the capture is done, then the snapped outline");
     assert.equal((overlays[0] as { points: readonly unknown[]; tone: string; ttlMs: number }).points.length, 5);
     assert.equal((overlays[0] as { tone: string }).tone, "mark");
-    assert.deepEqual(timeline, ["hands:element_at", "hands:windows", "hands:zoom", "overlay:stroke", "overlay:orb.trace"]);
+    assert.deepEqual(timeline, ["hands:element_at", "hands:windows", "hands:zoom", "overlay:stroke", "overlay:stroke"]);
 
     // When the hands cannot capture (no helper, no Screen Recording) the mark still counts, without pixels.
     w.hands.failZoom = true;
@@ -186,8 +187,8 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
     assert.equal(engine.currentPhase, "listening");
     timeline.length = 0;
     await engine.command({ type: "mark.add", rect: { x: 300.4, y: 400.6, w: 80, h: 40 }, path: [{ x: 300, y: 400 }, { x: 380, y: 440 }] });
-    assert.deepEqual(live.instructions, ["Kevin just circled a region of the screen (80×40 at 300,401). The brain will see the image with the next task; acknowledge briefly if Kevin is asking about it."]);
-    assert.deepEqual(timeline, ["live-note", "hands:element_at", "hands:windows", "hands:zoom", "overlay:orb.trace"]);
+    assert.deepEqual(live.instructions, ["User just circled a region of the screen (80×40 at 300,401). The brain will see the image with the next task; acknowledge briefly if User is asking about it."]);
+    assert.deepEqual(timeline, ["live-note", "hands:element_at", "hands:windows", "hands:zoom", "overlay:stroke"]);
     marks = engine.snapshot().marks;
     assert.equal(marks.length, 4);
     assert.ok(marks.every((m) => !m.consumed));
@@ -202,8 +203,8 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
       [marks[0]!, marks[1]!, marks[3]!].map((m) => join(engine.config.stateDir, m.screenshotPath!)),
     );
     assert.ok(attachments.every((a) => existsSync(a.path) && a.mediaType === "image/png"));
-    assert.equal(attachments[0]!.note, "Kevin circled this region of the screen: 10,20 100×50 (global points)");
-    assert.equal(attachments[2]!.note, "Kevin circled this region of the screen: 300,401 80×40 (global points)");
+    assert.equal(attachments[0]!.note, "User circled this region of the screen: 10,20 100×50 (global points)");
+    assert.equal(attachments[2]!.note, "User circled this region of the screen: 300,401 80×40 (global points)");
     marks = engine.snapshot().marks;
     assert.equal(marks.length, 4, "consumed marks stay for the Console");
     assert.ok(marks.every((m) => m.consumed));
@@ -223,13 +224,13 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
     w.clock.t += 10 * 60_000; // circled ten minutes ago, still pending
     (engine as unknown as { tick(): void }).tick();
     assert.equal(engine.snapshot().marks.length, 1);
-    // Ten minutes on, the circle no longer opens an exchange by itself (the room-talk gate, LC-7): Kevin asks.
+    // Ten minutes on, the circle no longer opens an exchange by itself (the room-talk gate, LC-7): User asks.
     live.emit("inputTranscript", " hormes what's this", live.nowMs, live.nowMs + 900);
     live.emit("delegation", "item_3", "client", 3000);
     await settle();
     assert.equal(tasks.length, 3);
     assert.equal(tasks[2]!.attachments?.length, 1);
-    assert.equal(tasks[2]!.attachments![0]!.note, "Kevin circled this region of the screen: 1,1 2×2 (global points), circled 10 min ago", "the brain hears how old the circle is");
+    assert.equal(tasks[2]!.attachments![0]!.note, "User circled this region of the screen: 1,1 2×2 (global points), circled 10 min ago", "the brain hears how old the circle is");
     (engine as unknown as { tick(): void }).tick();
     assert.equal(engine.snapshot().marks.length, 1, "consumed just now: kept for the Console although drawn ten minutes ago");
     assert.equal(engine.snapshot().marks[0]!.consumed, true);
@@ -294,7 +295,7 @@ test("marks: a delegation that fires while the region is still being captured wa
     assert.equal(marks[0]!.screenshotPath, undefined, "registered before the capture lands");
     assert.equal(live.instructions.length, 1);
 
-    // Kevin asks while the hands are still working: the task waits for the capture.
+    // User asks while the hands are still working: the task waits for the capture.
     live.emit("delegation", "item_1", "client", 1000);
     await settle();
     assert.equal(tasks.length, 0, "the brain is not started until the region has its pixels");
@@ -365,7 +366,9 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
   const config = testConfig(dir, { openaiApiKey: "sk-test-not-used" });
   const brain: Brain = { kind: "fake", start: async () => ({ ready: true, detail: "fake" }), handle: async () => ({ status: "done", summary: "done." }), cancel: async () => undefined, stop: async () => undefined };
   const hands = new SnapHands();
-  const engine = new Engine({ config, connectors: [], brain, hands, fallbackUserName: "Kevin", makeLive: () => new FakeLive() as unknown as LiveSession, exec: noShell, memory: { service: new FakeMemoryService() } });
+  const engine = new Engine({ config, connectors: [], brain, hands, fallbackUserName: "User", makeLive: () => new FakeLive() as unknown as LiveSession, exec: noShell, memory: { service: new FakeMemoryService() } });
+  // This stand-in speaks the OpenAI Live protocol; keep product defaults independent.
+  (engine as unknown as { settings: { voiceProvider: "openai" | "gemini" } }).settings.voiceProvider = "openai";
   const overlays: OverlayCommand[] = [];
   engine.on("overlay", (c) => overlays.push(c));
   const near = (a: number, b: number, tol = 1): boolean => Math.abs(a - b) <= tol;
@@ -373,7 +376,7 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     await engine.start();
     await engine.ready();
 
-    // A circled dialog: element_at at the centroid is a label inside it; the dialog window is what Kevin surrounded.
+    // A circled dialog: element_at at the centroid is a label inside it; the dialog window is what User surrounded.
     const dialog = { windowId: 2, pid: 2, app: "Finder", title: "Move to Trash?", x: 320, y: 320, w: 560, h: 360, layer: 0 };
     hands.element = { role: "AXStaticText", title: "Are you sure?", frame: { x: 500, y: 480, w: 200, h: 40 }, app: "Finder" };
     // Front to back, as CGWindowList gives them: the dialog sits in front of the Finder window it belongs to.
@@ -384,10 +387,10 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     assert.deepEqual(m.rect, { x: 320, y: 320, w: 560, h: 360 }, "the dialog, not the label");
     assert.deepEqual(m.element, { role: "AXWindow", title: "Move to Trash?", app: "Finder" });
     assert.equal(hands.zooms[0]!["w"], 560, "the screenshot is of the dialog");
-    let trace = overlays.find((o) => o.cmd === "orb.trace") as Extract<OverlayCommand, { cmd: "orb.trace" }>;
+    let trace = overlays.findLast((o) => o.cmd === "stroke") as Extract<OverlayCommand, { cmd: "stroke" }>;
     assert.equal(trace.label, "Move to Trash?");
     let b = bboxOf(trace.points);
-    assert.ok(near(b.x, 320) && near(b.y, 320) && near(b.w, 560) && near(b.h, 360), `the blob outlines the dialog: ${JSON.stringify(b)}`);
+    assert.ok(near(b.x, 320) && near(b.y, 320) && near(b.w, 560) && near(b.h, 360), `the screen annotation outlines the dialog: ${JSON.stringify(b)}`);
     await engine.command({ type: "mark.clear" });
     overlays.length = 0;
 
@@ -400,10 +403,10 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     m = engine.snapshot().marks[0]!;
     assert.deepEqual(m.rect, button);
     assert.deepEqual(m.element, { role: "AXButton", title: "Save", app: "Notes" });
-    trace = overlays.find((o) => o.cmd === "orb.trace") as Extract<OverlayCommand, { cmd: "orb.trace" }>;
+    trace = overlays.findLast((o) => o.cmd === "stroke") as Extract<OverlayCommand, { cmd: "stroke" }>;
     assert.equal(trace.label, "Save");
     b = bboxOf(trace.points);
-    assert.ok(near(b.x, 100) && near(b.w, 80) && near(b.h, 30), `the blob outlines the button: ${JSON.stringify(b)}`);
+    assert.ok(near(b.x, 100) && near(b.w, 80) && near(b.h, 30), `the screen annotation outlines the button: ${JSON.stringify(b)}`);
     await engine.command({ type: "mark.clear" });
     overlays.length = 0;
 
@@ -415,7 +418,7 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     m = engine.snapshot().marks[0]!;
     assert.ok(near(m.rect.x, bbox.x) && near(m.rect.w, bbox.w), `the box stands: ${JSON.stringify(m.rect)}`);
     assert.deepEqual(m.element, { app: "Notes" });
-    trace = overlays.find((o) => o.cmd === "orb.trace") as Extract<OverlayCommand, { cmd: "orb.trace" }>;
+    trace = overlays.findLast((o) => o.cmd === "stroke") as Extract<OverlayCommand, { cmd: "stroke" }>;
     assert.equal(trace.label, "Notes");
     await engine.command({ type: "mark.clear" });
     overlays.length = 0;
@@ -430,7 +433,7 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     m = engine.snapshot().marks[0]!;
     assert.deepEqual(m.rect, above);
     assert.equal(hands.zooms[0]!["y"], -500);
-    trace = overlays.find((o) => o.cmd === "orb.trace") as Extract<OverlayCommand, { cmd: "orb.trace" }>;
+    trace = overlays.findLast((o) => o.cmd === "stroke") as Extract<OverlayCommand, { cmd: "stroke" }>;
     b = bboxOf(trace.points);
     assert.ok(near(b.y, -500) && near(b.h, 30), `trace in global points: ${JSON.stringify(b)}`);
   } finally {
@@ -570,7 +573,7 @@ test("mark.window captures the front window whole: one mark with source window, 
     live.instructions.length = 0;
     await engine.command({ type: "mark.window" });
     assert.ok(await until(() => engine.snapshot().marks.length === 1, 2000));
-    assert.deepEqual(live.instructions, ["Kevin just captured a window of the screen (Safari, 800×600). The brain will see the image with the next task; acknowledge briefly if Kevin is asking about it."]);
+    assert.deepEqual(live.instructions, ["User just captured a window of the screen (Safari, 800×600). The brain will see the image with the next task; acknowledge briefly if User is asking about it."]);
     m = engine.snapshot().marks[0]!;
     assert.equal(m.source, "window");
     // No front window: a warn toast, no mark. Hands failing: a toast, no throw, no mark.

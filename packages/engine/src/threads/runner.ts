@@ -1,4 +1,4 @@
-import { appleScriptShellLines, logger, shellFocus } from "@hormes/core";
+import { appleScriptShellLines, classifyToolScope, logger, shellFocus } from "@hormes/core";
 import { ACTING_MEMBERS, USER_IDLE_POLL_MS, WAIT_MAX_MS, isBusyResult, type AcquireOptions, type ConfirmationDesk, type FocusLease, type LeaseOutcome, type ToolResult } from "@hormes/hands";
 import { ToolRunner, type BrainSink, type BrainTask, type RunOutcome, type RunnerOptions } from "@hormes/brain";
 import { ACTING_TOOLS, FOCUS_APPLESCRIPT } from "@hormes/brain";
@@ -16,7 +16,7 @@ import { ACTING_TOOLS, FOCUS_APPLESCRIPT } from "@hormes/brain";
  * pointer and keys, open_url, browser_navigate/click/type, the clipboard), a focusing
  * applescript and a shell line that fronts an app or types (`needsFocus`). `screen`
  * waits its turn for the one FocusLease, ranked by admission
- * (Kevin's hands > the main lane > threads by age; the lease's `rank` is the lease's
+ * (User's hands > the main lane > threads by age; the lease's `rank` is the lease's
  * business — taken here as an option and handed through). Two hooks for the speed
  * pass ride as options: an `observer` that annotates every ACTING tool's result with
  * what is now in front (after the base ran and recorded the call, never inside the
@@ -36,10 +36,10 @@ export const THREAD_TOOLS: ReadonlySet<string> = new Set(["thread_start", "threa
 
 /**
  * Tools that need the pointer, keyboard, front app, the front browser tab or the system clipboard: the
- * lease's business. `browser_navigate` sets the URL of the active tab of the front window — what Kevin is
+ * lease's business. `browser_navigate` sets the URL of the active tab of the front window — what User is
  * looking at — so it is screen work too (a background thread reads a page with web_fetch instead).
  */
-export const FOCUS_TOOLS: ReadonlySet<string> = new Set([...ACTING_MEMBERS, "open_url", "browser_click", "browser_type", "browser_navigate", "clipboard_read", "clipboard_write"]);
+export const FOCUS_TOOLS: ReadonlySet<string> = new Set([...ACTING_MEMBERS, "meeting_gmail", "open_url", "browser_click", "browser_type", "browser_navigate", "clipboard_read", "clipboard_write"]);
 
 /**
  * A shell head that brings something to the front (`open` without a background flag,
@@ -67,7 +67,7 @@ export const MAIN_LEASE_WAIT_MS = 30_000;
  * A shell line by core's `shellFocus` (an `open` or osascript in any segment, inner shell, group or substitution, in
  * any case; an osascript keystroke however it is wrapped; a shell fed on stdin; a line past SHELL_SCAN_CHARS, unread).
  * An AppleScript that drives the front surface (FOCUS_APPLESCRIPT), or whose `do shell script` line would be screen
- * work as run_shell. The tool runner's hold for Kevin's hands reads the same judgment (brain/runner.ts).
+ * work as run_shell. The tool runner's hold for User's hands reads the same judgment (brain/runner.ts).
  */
 export function needsFocus(name: string, args: Record<string, unknown>): boolean {
   if (FOCUS_TOOLS.has(name)) return true;
@@ -123,7 +123,7 @@ export function recordStep(sink: BrainSink | undefined, name: string, args: Reco
   });
 }
 
-/** The helper's `busy` refusal as the base runner records it (`busy: Kevin used the keyboard/mouse …`): not a step while the lease retries it. */
+/** The helper's `busy` refusal as the base runner records it (`busy: User used the keyboard/mouse …`): not a step while the lease retries it. */
 const BUSY_STEP = /^busy: /i;
 
 /** The sink the base records through: a `busy` refusal mid-retry is dropped (the retry is silent); everything else passes. */
@@ -168,11 +168,11 @@ export interface LeasedRunnerOptions extends RunnerOptions {
  * What the two lane runners share: the sink and task the base holds (kept here too,
  * for the records a subclass answers itself), the lease released when the turn ends
  * (`attach(undefined)`), and one screen tool run under the lease. The op counts as in
- * flight — a priority taker waits for it, never mid-op — and a `busy` answer (Kevin's
+ * flight — a priority taker waits for it, never mid-op — and a `busy` answer (User's
  * hands on the machine) is retried silently until it lands or WAIT_MAX_MS pass: the
  * refusals are not steps (the base records one per attempt; those are dropped while
  * the retry runs — the Console would otherwise show a burst of red rows every time
- * Kevin's keystroke met Hormes's), and one note says how long the hands waited. When
+ * User's keystroke met Hormes's), and one note says how long the hands waited. When
  * the wait runs out the last refusal is the answer and is recorded once. Nothing is
  * posted meanwhile.
  */
@@ -251,7 +251,7 @@ export abstract class LeasedRunner extends ToolRunner {
         this.lease.retryBusy(
           run,
           (o) => {
-            const b = isBusyResult(o.result);
+            const b = name !== "meeting_gmail" && isBusyResult(o.result); // Multi-step compose/send must never replay after a partial action.
             if (b) busy++;
             return b;
           },
@@ -267,7 +267,7 @@ export abstract class LeasedRunner extends ToolRunner {
     return out;
   }
 
-  /** What the lease did before the tool runs, as notes: how long its re-front waited for Kevin's hands, and the app it brought back. */
+  /** What the lease did before the tool runs, as notes: how long its re-front waited for User's hands, and the app it brought back. */
   protected noteSettle(got: { readonly refocused?: string; readonly waitedMs?: number }): void {
     if (got.waitedMs) this.sinkRef?.step({ kind: "note", text: `waited ${got.waitedMs} ms for ${this.userName}'s hands` });
     if (got.refocused) this.sinkRef?.step({ kind: "note", text: `brought ${got.refocused} back to the front` });
@@ -350,6 +350,7 @@ export class LaneRunner extends LeasedRunner {
   override async run(name: string, input: unknown): Promise<RunOutcome> {
     const started = this.clock();
     const args = argsOf(input);
+    if (classifyToolScope(name, args, this.taskRef?.reviewAgent, this.taskRef?.work).verdict === "refuse") return super.run(name, input);
     // Counted on entry, before any await: calls a brain issues together are judged in the order they arrived.
     if (this.stepBudget !== undefined && this.calls >= this.stepBudget) return this.answer(name, args, { kind: "error", message: `refused: this turn's ${this.stepBudget} tool calls are spent; end your turn with one sentence of what you did` }, started);
     this.calls++;
@@ -372,7 +373,7 @@ export class LaneRunner extends LeasedRunner {
   /**
    * The lease, or the reason it is not to be had. The scheduler hears about the wait
    * (the rail's hourglass): at once when another lane holds the screen, else once a
-   * poll has passed without it — Kevin's hands on the machine, an app he switched to.
+   * poll has passed without it — User's hands on the machine, an app he switched to.
    */
   private async acquireOrWait(): Promise<LeaseOutcome> {
     const holder = this.lease.holder;
@@ -407,7 +408,7 @@ export class LaneRunner extends LeasedRunner {
   /**
    * A question queued behind the floor reads as "Queued behind <Name>'s question …" (the
    * desk renders it) — and tells a thread to end its turn rather than wait on a tool that
-   * is not a thread's; Hormes resumes it when Kevin answers. Every outcome reaches the scheduler.
+   * is not a thread's; Hormes resumes it when User answers. Every outcome reaches the scheduler.
    */
   private finish(name: string, out: RunOutcome): RunOutcome {
     let result = this.laneOpts.desk.render(out.result);
@@ -436,7 +437,7 @@ export interface ThreadAwareRunnerOptions extends LeasedRunnerOptions {
  * eyes' shot go through it. It answers `thread_*` from
  * the scheduler and records the step as the base would; for screen tools it takes
  * the lease with priority (Hormes's own hands never wait on a thread's idle — only
- * on its op in flight and MIN_HOLD, and on Kevin's own hands through the helper's
+ * on its op in flight and MIN_HOLD, and on User's own hands through the helper's
  * busy answer) and releases it when the turn ends or a question is asked.
  */
 export class ThreadAwareRunner extends LeasedRunner {
@@ -464,6 +465,7 @@ export class ThreadAwareRunner extends LeasedRunner {
   override async run(name: string, input: unknown): Promise<RunOutcome> {
     const started = this.clock();
     const args = argsOf(input);
+    if (classifyToolScope(name, args, this.taskRef?.reviewAgent, this.taskRef?.work).verdict === "refuse") return super.run(name, input);
     if (THREAD_TOOLS.has(name)) {
       let result: ToolResult;
       const waits = name === "thread_wait";
@@ -493,7 +495,7 @@ export class ThreadAwareRunner extends LeasedRunner {
       return { result, ms };
     }
     if (!got.ok && got.busy) {
-      // Kevin kept typing through the re-front's whole wait: his app is still in front, so nothing acts in it.
+      // User kept typing through the re-front's whole wait: his app is still in front, so nothing acts in it.
       const result: ToolResult = { kind: "error", message: `waiting for the screen: ${got.reason}; do the rest first, or call it again` };
       const ms = this.clock() - started;
       recordStep(this.sinkRef, name, args, result, ms);
@@ -509,7 +511,7 @@ export class ThreadAwareRunner extends LeasedRunner {
 
   /**
    * The main lane's question, queued behind a thread's, reads as "Queued behind <Name>'s
-   * question … stop and wait (thread_wait)" — not as a question to relay: Kevin hears one
+   * question … stop and wait (thread_wait)" — not as a question to relay: User hears one
    * question at a time, and this one is asked (by Hormes itself) when the floor clears.
    */
   private rendered(out: RunOutcome): RunOutcome {
@@ -533,7 +535,7 @@ export class ThreadAwareRunner extends LeasedRunner {
       return !got.ok && got.reason === "cut" && signal?.aborted ? { ok: false, reason: "cancelled" } : got;
     };
     const got = await take(MAIN_LEASE_WAIT_MS);
-    // Kevin's hands are not a holder to take the screen from: the lease is not held, and `run` acts on nothing.
+    // User's hands are not a holder to take the screen from: the lease is not held, and `run` acts on nothing.
     if (got.ok || got.reason === "cancelled" || got.busy) return got;
     if (got.reason === "cut") return take(WAIT_MAX_MS);
     const holder = this.lease.holder;

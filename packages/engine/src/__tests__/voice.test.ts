@@ -6,10 +6,10 @@ import { FakeLive, delegate, nextUtterance, rows, settle, world } from "./world.
 /**
  * English by default, and a voice that stays in the conversation. The session's
  * instructions are assembled in the engine in a fixed order — the standing orders,
- * `# Language` (English, the accent one fragment), `# Kevin, in brief`, `# Continuity`;
+ * `# Language` (English, the accent one fragment), `# User, in brief`, `# Continuity`;
  * the started row and the snapshot say what a session speaks with; a pick while awake
  * is heard at the next wake (session.update cannot change a voice) — the toast names
- * the pick and the verb, `Marin 🇬🇧 at the next wake · Switch now` — unless Kevin presses
+ * the pick and the verb, `Marin 🇬🇧 at the next wake · Switch now` — unless User presses
  * Switch now (`voice.reopen`: pause, then a resume with the new voice and the "voice
  * change" continuity, whose last line has the new voice say "<Name> here." — never while
  * work runs) or asks aloud ("switch voice to marin": the `set_voice` reflex, the only
@@ -25,12 +25,12 @@ type Started = Extract<LedgerRow, { type: "session.started" }>;
 type Pause = Extract<LedgerRow, { type: "pause" }>;
 type Resume = Extract<LedgerRow, { type: "resume" }>;
 
-const LANGUAGE = "# Language\nSpeak English, British accent — calm, dry, precise, a touch wry, the manner of a well-read English butler-engineer — whatever language you hear; if Kevin speaks another language, answer in English unless asked to switch.";
+const LANGUAGE = "# Language\nSpeak English, British accent — calm, dry, precise, a touch wry, the manner of a well-read English butler-engineer — whatever language you hear; if User speaks another language, answer in English unless asked to switch.";
 
-test("wake: ballad, English with a British accent; # Personality before # Language before # Kevin, in brief (before # Continuity on a resume); the started row and the snapshot say voice, language and accent", async () => {
+test("wake: ballad, English with a British accent; # Personality before # Language before # User, in brief (before # Continuity on a resume); the started row and the snapshot say voice, language and accent", async () => {
   const w = world();
   const { engine, live, lives, clock } = w;
-  w.memory!.voiceText = "# Kevin, in brief\nKevin prefers short answers.\nUse this quietly; never announce that you remember it.";
+  w.memory!.voiceText = "# User, in brief\nUser prefers short answers.\nUse this quietly; never announce that you remember it.";
   try {
     await engine.start();
     await engine.ready();
@@ -39,7 +39,7 @@ test("wake: ballad, English with a British accent; # Personality before # Langua
     const text = live.config?.instructions ?? "";
     assert.equal(live.config?.audio?.output?.voice, "ballad");
     assert.ok(text.includes(LANGUAGE), "the exact language section");
-    const at = ["# Personality and tone", "# Language", "# Kevin, in brief"].map((h) => text.indexOf(h));
+    const at = ["# Personality and tone", "# Language", "# User, in brief"].map((h) => text.indexOf(h));
     assert.ok(at.every((i) => i >= 0), `every section present: ${JSON.stringify(at)}`);
     assert.deepEqual([...at].sort((a, b) => a - b), at, "in order");
     assert.doesNotMatch(text, /# Continuity/, "a fresh wake carries no continuity");
@@ -56,9 +56,9 @@ test("wake: ballad, English with a British accent; # Personality before # Langua
     clock.t += 60_000;
     await engine.command({ type: "resume" });
     const resumed = lives[1]!.config?.instructions ?? "";
-    const order = ["# Personality and tone", "# Language", "# Kevin, in brief", "# Continuity"].map((h) => resumed.indexOf(h));
+    const order = ["# Personality and tone", "# Language", "# User, in brief", "# Continuity"].map((h) => resumed.indexOf(h));
     assert.ok(order.every((i) => i >= 0), `every section present on the resume: ${JSON.stringify(order)}`);
-    assert.deepEqual([...order].sort((a, b) => a - b), order, "Personality < Language < Kevin, in brief < Continuity");
+    assert.deepEqual([...order].sort((a, b) => a - b), order, "Personality < Language < User, in brief < Continuity");
   } finally {
     await engine.stop();
   }
@@ -124,9 +124,9 @@ test("voice.reopen: exactly one pause row and one resume row, a new session with
     const text = next.config?.instructions ?? "";
     assert.match(text, /# Language\nSpeak English, British accent — calm, dry, precise/);
     assert.match(text, /# Continuity/);
-    assert.match(text, /Kevin switched your voice \d+ seconds? ago: you now speak as Verse\. This is the same conversation, picked up where it was cut\./);
-    assert.match(text, /Kevin: hormes what time is it/);
-    assert.ok(text.endsWith('Say exactly one line now — "Verse here." — and then wait for Kevin. Do not recap, do not apologise, do not redo the last task unless asked.'), `the continuity ends with the echo line: ${text.slice(-160)}`);
+    assert.match(text, /User switched your voice \d+ seconds? ago: you now speak as Verse\. This is the same conversation, picked up where it was cut\./);
+    assert.match(text, /User: hormes what time is it/);
+    assert.ok(text.endsWith('Say exactly one line now — "Verse here." — and then wait for User. Do not recap, do not apologise, do not redo the last task unless asked.'), `the continuity ends with the echo line: ${text.slice(-160)}`);
     assert.doesNotMatch(text, /paused you|engine restarted|voice connection dropped/);
     assert.equal(rows<Pause>(w, "pause").length, 1);
     assert.equal(rows<Resume>(w, "resume").length, 1);
@@ -211,9 +211,9 @@ test("set_voice reflex, idle: 'switch voice to marin' typed patches the setting 
     assert.equal(next.currentState, "started");
     assert.equal(next.config?.audio?.output?.voice, "marin");
     const text = next.config?.instructions ?? "";
-    assert.match(text, /# Continuity\nKevin switched your voice \d+ seconds? ago: you now speak as Marin\./);
-    assert.match(text, /Kevin: hormes what time is it/);
-    assert.ok(text.endsWith('Say exactly one line now — "Marin here." — and then wait for Kevin. Do not recap, do not apologise, do not redo the last task unless asked.'), text.slice(-160));
+    assert.match(text, /# Continuity\nUser switched your voice \d+ seconds? ago: you now speak as Marin\./);
+    assert.match(text, /User: hormes what time is it/);
+    assert.ok(text.endsWith('Say exactly one line now — "Marin here." — and then wait for User. Do not recap, do not apologise, do not redo the last task unless asked.'), text.slice(-160));
     assert.equal(rows<Pause>(w, "pause").length, 1);
     assert.equal(rows<Resume>(w, "resume").length, 1);
     assert.equal(rows<Started>(w, "session.started")[1]!.resumedFrom, "sess_1");
@@ -224,8 +224,8 @@ test("set_voice reflex, idle: 'switch voice to marin' typed patches the setting 
     const toasts = events.filter((e) => e.type === "toast").map((e) => e.text);
     assert.ok(!toasts.some((t) => /at the next wake/.test(t)), `the pick toast is suppressed on the reopen path: ${JSON.stringify(toasts)}`);
     assert.ok(toasts.includes("Marin 🇬🇧 · one restart"), JSON.stringify(toasts));
-    assert.ok(!live.instructions.some((i) => /Kevin just typed/.test(i)), "the closed session was not told about the typed line");
-    assert.ok(!next.instructions.some((i) => /Kevin just typed/.test(i)), "the new session's first line is its continuity's, nothing else");
+    assert.ok(!live.instructions.some((i) => /User just typed/.test(i)), "the closed session was not told about the typed line");
+    assert.ok(!next.instructions.some((i) => /User just typed/.test(i)), "the new session's first line is its continuity's, nothing else");
     const reflexRow = rows<{ type: "reflex"; action: string; ok: boolean; source: string }>(w, "reflex").find((r) => r.action === "switch voice to marin");
     assert.equal(reflexRow?.ok, true, "the reflex is on the ledger as ok");
     assert.equal(reflexRow?.source, "typed");
@@ -255,7 +255,7 @@ test("set_voice reflex, an accent: 'speak with a british accent' typed while the
     assert.equal(lives.length, 2, "one reopen");
     const text = lives[1]!.config?.instructions ?? "";
     assert.match(text, /# Language\nSpeak English, British accent/);
-    assert.ok(text.endsWith('Say exactly one line now — "Ballad here." — and then wait for Kevin. Do not recap, do not apologise, do not redo the last task unless asked.'), text.slice(-160));
+    assert.ok(text.endsWith('Say exactly one line now — "Ballad here." — and then wait for User. Do not recap, do not apologise, do not redo the last task unless asked.'), text.slice(-160));
     assert.equal(engine.snapshot().session?.accent, "british");
     assert.ok(events.some((e) => e.type === "toast" && e.text === "Ballad 🇬🇧 · one restart"));
     assert.ok(!events.some((e) => e.type === "toast" && /at the next wake/.test(e.text)));
@@ -284,9 +284,9 @@ test("set_voice reflex, busy: while a delegation runs the setting is written, no
     assert.equal(engine.snapshot().delegations[0]!.status, "running");
     assert.equal(rows<Pause>(w, "pause").length, 0);
     assert.equal(engine.snapshot().session?.voice, "ballad", "the open session still speaks with what it started with");
-    assert.ok(live.instructions.some((i) => /Hormes already answered it: "Marin at the next wake\." Say that to Kevin, in these words, and wait\./.test(i)), `the current voice says when: ${JSON.stringify(live.instructions.slice(-2))}`);
+    assert.ok(live.instructions.some((i) => /Hormes already answered it: "Marin at the next wake\." Say that to User, in these words, and wait\./.test(i)), `the current voice says when: ${JSON.stringify(live.instructions.slice(-2))}`);
     assert.ok(events.some((e) => e.type === "toast" && e.text === "Marin 🇬🇧 at the next wake · Switch now"), "busy: the pick toast stands, Switch now is the verb once the work ends");
-    // The work ends; the pick still waits — Kevin's Switch now (voice.reopen) hears it.
+    // The work ends; the pick still waits — User's Switch now (voice.reopen) hears it.
     brain.resolve?.({ status: "done", summary: "found it" });
     await settle();
     assert.equal(lives.length, 1, "the end of the work reopens nothing by itself");
@@ -369,19 +369,19 @@ test("set_voice typed while PAUSED costs no start: 'switch voice to marin' in th
     assert.equal(reflexRows.length, 1, "on the ledger once");
     assert.equal(reflexRows[0]!.ok, true);
     assert.equal(reflexRows[0]!.source, "typed");
-    assert.ok(!live.instructions.some((i) => /Kevin just typed/.test(i)), "the held session hears nothing");
+    assert.ok(!live.instructions.some((i) => /User just typed/.test(i)), "the held session hears nothing");
     // The resume: one new session, on Marin, the conversation carried — and nothing reopens it again.
     await engine.command({ type: "resume" });
     await settle(60);
     assert.equal(lives.length, 2, "exactly one start");
     assert.equal(lives[1]!.config?.audio?.output?.voice, "marin");
     assert.match(lives[1]!.config?.instructions ?? "", /# Continuity/);
-    assert.equal(rows<Pause>(w, "pause").length, 1, "only the pause Kevin pressed");
+    assert.equal(rows<Pause>(w, "pause").length, 1, "only the pause User pressed");
     assert.equal(rows<Resume>(w, "resume").length, 1);
     assert.equal(rows<Started>(w, "session.started").length, 2);
     assert.equal(engine.snapshot().session?.voice, "marin");
     assert.equal(engine.transportState, "awake");
-    assert.ok(!lives[1]!.instructions.some((i) => /Kevin just typed/.test(i)), "the words were done with while paused; the new session is not told");
+    assert.ok(!lives[1]!.instructions.some((i) => /User just typed/.test(i)), "the words were done with while paused; the new session is not told");
     assert.equal(rows<{ type: "reflex"; action: string }>(w, "reflex").filter((r) => r.action === "switch voice to marin").length, 1, "the reflex did not run again after the resume");
   } finally {
     await engine.stop();
@@ -435,7 +435,7 @@ test("set_voice typed while ASLEEP: with typedWakes off the pick is saved and to
     assert.equal(rows<Started>(w, "session.started").length, 1, "one started row");
     assert.equal(rows<Pause>(w, "pause").length, 0, "nothing was paused and reopened");
     assert.equal(rows<{ type: "reflex"; action: string }>(w, "reflex").filter((r) => r.action === "switch voice to marin").length, 1, "the reflex ran once, before the wake");
-    assert.ok(live.instructions.some((i) => /Kevin just typed \(treat it exactly like speech\): "switch voice to marin"\. Hormes already handled it\. Say one word and wait\./.test(i)), live.instructions.join(" | "));
+    assert.ok(live.instructions.some((i) => /User just typed \(treat it exactly like speech\): "switch voice to marin"\. Hormes already handled it\. Say one word and wait\./.test(i)), live.instructions.join(" | "));
     toasts = events.filter((e) => e.type === "toast").map((e) => e.text);
     assert.ok(!toasts.some((t) => /heard at the next|at the next wake/.test(t)), `the wake is the answer, no pick toast: ${JSON.stringify(toasts)}`);
     assert.equal(engine.snapshot().session?.voice, "marin");
@@ -457,8 +457,8 @@ test("set_voice reflex from the ear: 'hormes switch voice to marin' heard while 
     await settle(60);
     assert.equal(lives.length, 2, "one reopen");
     assert.equal(lives[1]!.config?.audio?.output?.voice, "marin");
-    assert.ok(!live.instructions.some((i) => /Say this to Kevin now/.test(i)), "no aside on the closed session");
-    assert.ok(!lives[1]!.instructions.some((i) => /Say this to Kevin now/.test(i)), "no aside on the new one either");
+    assert.ok(!live.instructions.some((i) => /Say this to User now/.test(i)), "no aside on the closed session");
+    assert.ok(!lives[1]!.instructions.some((i) => /Say this to User now/.test(i)), "no aside on the new one either");
     assert.match(lives[1]!.config?.instructions ?? "", /"Marin here\."/);
   } finally {
     await engine.stop();
@@ -495,10 +495,10 @@ for (const reason of ["connection_lost", "expired"] as const) {
       const text = next.config?.instructions ?? "";
       assert.match(text, /# Continuity/);
       assert.match(text, /The voice connection dropped 4 seconds ago and just came back\. This is the same conversation, picked up where it was cut\. What was said before, most recent last:/);
-      assert.match(text, /Kevin: hormes read the headline/);
-      assert.match(text, /Kevin: and the weather/);
+      assert.match(text, /User: hormes read the headline/);
+      assert.match(text, /User: and the weather/);
       assert.match(text, /Last task: "hormes read the headline" — done: the market is up/);
-      assert.match(text, /Carry on as before; do not recap or apologise\. Say nothing now unless Kevin was mid-request — then answer it\./);
+      assert.match(text, /Carry on as before; do not recap or apologise\. Say nothing now unless User was mid-request — then answer it\./);
       assert.doesNotMatch(text, /paused you|engine restarted/);
       assert.ok(text.indexOf("# Language") < text.indexOf("# Continuity"));
       const started = rows<Started>(w, "session.started");
@@ -546,7 +546,7 @@ test("a reconnect whose start fails (the network still down) keeps the conversat
     assert.equal(lives.length, 2, "the reconnect was attempted once");
     assert.equal(engine.currentPhase, "error");
     assert.equal(rows<Started>(w, "session.started").length, 1, "a socket that never started has no row");
-    // Kevin presses Go twenty seconds later: the same conversation, the gap it names the real one.
+    // User presses Go twenty seconds later: the same conversation, the gap it names the real one.
     clock.t += 20_000;
     events.length = 0;
     await engine.command({ type: "go" });
@@ -556,7 +556,7 @@ test("a reconnect whose start fails (the network still down) keeps the conversat
     const text = next.config?.instructions ?? "";
     assert.match(text, /# Continuity/);
     assert.match(text, /The voice connection dropped 20 seconds ago and just came back\. This is the same conversation, picked up where it was cut\./);
-    assert.match(text, /Kevin: hormes read the headline/);
+    assert.match(text, /User: hormes read the headline/);
     assert.match(text, /Last task: "hormes read the headline" — done: the market is up/);
     const started = rows<Started>(w, "session.started");
     assert.equal(started.length, 2);
@@ -599,7 +599,7 @@ test("voice.reopen keeps utterance ids unique across the switch: the held sessio
     nextUtterance(w);
     delegate(w, "hello", "item_a2");
     await settle();
-    // The switch waits for a running task: finish it first, as Kevin's Switch now finds it.
+    // The switch waits for a running task: finish it first, as User's Switch now finds it.
     brain.resolve?.({ status: "done", summary: "not much" });
     await settle();
     engine.updateSettings({ voice: "marin", accent: "british" });
