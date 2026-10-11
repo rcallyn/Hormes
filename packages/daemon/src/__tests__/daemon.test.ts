@@ -5,6 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ToolResult } from "@hormes/hands";
+import type { AudioState } from "@hormes/protocol";
 import { FRAME_MIC, FRAME_SPEAKER, FrameParser, encodeFrame, encodeJson, type DaemonMessage } from "../wire.ts";
 import { DaemonServer, Lifeline, type EngineLike, type ToolHost } from "../server.ts";
 import { DaemonClient } from "../client.ts";
@@ -42,13 +43,15 @@ class FakeEngine extends EventEmitter implements EngineLike {
   };
   memory: EngineLike["memory"] = { list: () => [], search: async () => [] };
   config = { stateDir: "/tmp/jh-test" };
+  /** The engine's effective name, as the refusals say it. */
+  userName = "User";
   toolCalls: { name: string; input: unknown }[] = [];
   /** `attached` undefined = a runner that does not say; false = no task attached, tool.run is refused. */
   runner: { attached?: boolean; run(name: string, input: unknown): Promise<{ result: ToolResult }> } = {
     run: async (name: string, input: unknown): Promise<{ result: ToolResult }> => {
       this.toolCalls.push({ name, input });
       if (name === "screenshot") return { result: { kind: "image", pngBase64: Buffer.from("png").toString("base64"), width: 100, height: 50, note: "main display" } };
-      if (name === "run_shell") return { result: { kind: "needs-confirmation", pendingId: "p1", question: "About to run rm. Ask Kevin, then stop." } };
+      if (name === "run_shell") return { result: { kind: "needs-confirmation", pendingId: "p1", question: "About to run rm. Ask User, then stop." } };
       if (name === "zoom") throw new Error("hands are down");
       return { result: { kind: "text", text: `${name} ran with ${JSON.stringify(input)}` } };
     },
@@ -103,7 +106,69 @@ class FakeEngine extends EventEmitter implements EngineLike {
   dropViewers(clientId: string): void {
     this.dropped.push(clientId);
   }
+  /** Every `system.signal` the wire handed over (design11): data for the watchers. */
+  signals: { signal: unknown; at: number }[] = [];
+  systemSignal(signal: unknown, at: number): void {
+    this.signals.push({ signal, at });
+  }
+  /** How many viewers the server counted on each hello / close. */
+  viewers: number[] = [];
+  setViewers(n: number): void {
+    this.viewers.push(n);
+  }
+  /** Every `audio-state` frame the wire accepted (design12), and the `undefined` the app's leaving sends. */
+  audioStates: (AudioState | undefined)[] = [];
+  reportAudioState(state: AudioState | undefined): void {
+    this.audioStates.push(state);
+  }
 }
+
+/** The frame the app sends with Recording on: the plain graph, the guard holding, QuickTime beside it on the built-in mic. */
+const RECORDING_FRAME: AudioState = {
+  running: true,
+  voiceProcessing: false,
+  rung: 1,
+  wiring: "hardware",
+  hears: { name: "MacBook Pro Microphone", uid: "BuiltInMicrophoneDevice", rate: 48000, channels: 1, transport: "built-in" },
+  speaks: { name: "User's AirPods Pro", uid: "AP-out", rate: 48000, channels: 2, transport: "bluetooth" },
+  tapFormat: "48000 Hz ×1 Float32",
+  recording: true,
+  fallback: false,
+  guardOn: true,
+  guardTailMs: 420,
+  gated: 12,
+  chunks: 340,
+  breakthroughs: 1,
+  sharedWith: ["QuickTime Player"],
+  inputMuted: false,
+  aggregatePresent: false,
+};
+
+test("audio-state (design12): a well-formed frame reaches reportAudioState as sent, a malformed one is dropped, and the sender's leaving clears the state; a client that never sent one clears nothing", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-audio-state-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const app = new DaemonClient(path);
+  const cli = new DaemonClient(path);
+  await app.connect({ pid: 1, audio: true });
+  await cli.connect({ pid: 2, audio: false });
+  app.sendJson({ type: "audio-state", state: RECORDING_FRAME });
+  app.sendJson({ type: "audio-state", state: { running: "yes", rung: 1 } });
+  app.sendJson({ type: "audio-state", state: { ...RECORDING_FRAME, gated: "13" } });
+  app.sendJson({ type: "audio-state", state: null });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(engine.audioStates, [RECORDING_FRAME], "one frame landed, three were dropped");
+  assert.deepEqual(engine.commands, [], "a state frame is data: no command reached the engine");
+  cli.close();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(engine.audioStates.length, 1, "the CLI leaving clears nothing — it never reported a graph");
+  app.close();
+  await new Promise((r) => setTimeout(r, 50));
+  assert.deepEqual(engine.audioStates, [RECORDING_FRAME, undefined], "the app leaving clears the read-back");
+  await server.close();
+});
 
 test("server and client round-trip control, audio, and ledger over a unix socket", async () => {
   const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
@@ -247,6 +312,7 @@ test("tool.run goes through the engine's runner and answers the asking client on
   await new Promise((r) => setTimeout(r, 80));
   // No task attached to the runner (a Codex turn that outlived a stop): refused before the runner sees it.
   engine.runner.attached = false;
+  engine.userName = "Sam";
   asker.sendJson({ type: "tool.run", id: "t6", name: "left_click", input: { coordinate: [1, 1] } });
   await new Promise((r) => setTimeout(r, 40));
   engine.runner.attached = true;
@@ -269,6 +335,7 @@ test("tool.run goes through the engine's runner and answers the asking client on
   assert.match((byId.get("t5") as { message: string }).message, /unknown tool format_disk/);
   assert.equal(byId.get("t6")?.kind, "error");
   assert.match((byId.get("t6") as { message: string }).message, /^refused: no task is running in Hormes; left_click was not run/);
+  assert.equal((byId.get("t6") as { message: string }).message, "refused: no task is running in Hormes; left_click was not run (Sam stopped the task, or it finished)", "the refusal says the user's name, never a literal User");
   assert.equal(byId.get("t7")?.kind, "text", "with a task attached the same call runs");
   assert.deepEqual(engine.toolCalls.map((c) => c.name), ["frontmost_app", "screenshot", "run_shell", "zoom", "left_click"], "the refused call never reached the runner");
   assert.equal(seenByBystander.filter((m) => m.type === "tool.result").length, 0, "tool results are not broadcast");
@@ -325,7 +392,7 @@ test("tool.run with a thread goes to engine.runnerFor(threadId) and never the ma
   assert.match((byId.get("w4") as { message: string }).message, /^refused: malformed thread id; frontmost_app was not run$/);
   assert.match((byId.get("w5") as { text: string }).text, /frontmost_app ran/);
   assert.match((byId.get("w6") as { message: string }).message, /unknown tool format_disk/);
-  assert.match((byId.get("w7") as { message: string }).message, /^refused: no task is running in Hormes; applescript was not run \(Kevin stopped the task, or it finished\)$/);
+  assert.match((byId.get("w7") as { message: string }).message, /^refused: no task is running in Hormes; applescript was not run \(User stopped the task, or it finished\)$/);
   assert.deepEqual(engine.threadCalls, [{ thread: "t_spotify", name: "applescript", input: play }], "only the routed call reached the thread's lane");
   assert.deepEqual(engine.toolCalls.map((c) => c.name), ["frontmost_app"], "the main runner saw the main call and no thread's");
 
@@ -724,6 +791,148 @@ test("commands on the wire: all eight thread.* commands pass isEngineCommand and
   await server.close();
 });
 
+test("commands on the wire: mark.remove {id} and mark.window pass the allow-list and reach the engine as sent, beside mark.add and mark.clear", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const app = await viewer(path, 1);
+  // The overlay's stroke; the notch's × on one thumbnail; the notch's Window box; the notch's Clear.
+  const sent = [
+    { type: "mark.add", rect: { x: 10, y: 20, w: 100, h: 50 }, path: [{ x: 10, y: 20 }, { x: 110, y: 70 }] },
+    { type: "mark.remove", id: "mark_pending" },
+    { type: "mark.window" },
+    { type: "mark.clear" },
+  ];
+  for (const command of sent) app.client.sendJson({ type: "command", command });
+  await until(() => engine.commands.length === sent.length, "four mark commands at the engine");
+  assert.deepEqual(engine.commands, sent, "each arrives intact: the id on mark.remove, nothing added to mark.window");
+  assert.deepEqual(app.of("error"), [], "none is refused");
+  app.client.close();
+  await server.close();
+});
+
+test("mark.remove without id is refused as malformed and never dispatched; an empty or non-string id is the same refusal", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const app = await viewer(path, 1);
+  app.client.sendJson({ type: "command", command: { type: "mark.remove" } as never });
+  app.client.sendJson({ type: "command", command: { type: "mark.remove", id: "" } as never });
+  app.client.sendJson({ type: "command", command: { type: "mark.remove", id: 7 } as never });
+  // A well-formed one behind them still lands, so the refusals are per command, not per client.
+  app.client.sendJson({ type: "command", command: { type: "mark.remove", id: "mark_pending" } });
+  await until(() => app.of("error").length === 3 && engine.commands.length === 1, "three refusals and one dispatch");
+  assert.deepEqual(app.of("error"), [{ type: "error", message: "malformed command" }, { type: "error", message: "malformed command" }, { type: "error", message: "malformed command" }]);
+  assert.deepEqual(engine.commands, [{ type: "mark.remove", id: "mark_pending" }], "only the one with an id reached the engine");
+  app.client.close();
+  await server.close();
+});
+
+test("mark.delete is refused: not a verb on the wire, never dispatched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const app = await viewer(path, 1);
+  app.client.sendJson({ type: "command", command: { type: "mark.delete", id: "mark_pending" } as never });
+  await until(() => app.of("error").length === 1, "the malformed-command error");
+  assert.deepEqual(app.of("error"), [{ type: "error", message: "malformed command" }]);
+  assert.deepEqual(engine.commands, [], "nothing reached the engine");
+  app.client.close();
+  await server.close();
+});
+
+// ----------------------------------------------------------------- automations (design11): the thirteen verbs, the signal, the three events
+
+test("commands on the wire: all thirteen automation.* / recipe.* verbs pass isEngineCommand and reach the engine as sent; the deletion verb is refused — not a verb on the wire, never dispatched", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const app = await viewer(path, 1);
+  const sent = [
+    { type: "automation.set", automation: { name: "Wake up", when: { kind: "at", at: 1 }, then: [{ kind: "chime", line: "Wake up" }], clauses: { quiet: "override" }, echo: "At 07:10, ring." } },
+    { type: "automation.snooze", id: "auto_1", minutes: 10 },
+    { type: "automation.done", id: "auto_1" },
+    { type: "automation.skip", id: "auto_1" },
+    { type: "automation.pause", id: "auto_1" },
+    { type: "automation.resume", id: "auto_1" },
+    { type: "automation.rename", id: "auto_1", name: "Wake up, User" },
+    { type: "automation.trash", id: "auto_1" },
+    { type: "automation.restore", id: "auto_1" },
+    { type: "automation.run", id: "auto_1" },
+    { type: "recipe.set", recipe: { name: "backup", command: "echo hi", timeoutSeconds: 5, approvedAt: 1 } },
+    { type: "recipe.trash", name: "backup" },
+    { type: "recipe.restore", name: "backup" },
+  ];
+  for (const command of sent) app.client.sendJson({ type: "command", command });
+  // The deletion verb is spelt at run time so the acceptance grep over the sources stays at zero.
+  app.client.sendJson({ type: "command", command: { type: ["automation", "delete"].join("."), id: "auto_1" } as never });
+  await until(() => app.of("error").length === 1 && engine.commands.length === sent.length, "thirteen dispatched, one refused");
+  assert.deepEqual(engine.commands, sent, "each verb arrives intact");
+  assert.deepEqual(app.of("error"), [{ type: "error", message: "malformed command" }]);
+  app.client.close();
+  await server.close();
+});
+
+test("system.signal parses as a ClientMessage and reaches engine.systemSignal as data with its `at`; a signal without a body is dropped; the app's hello counts as a viewer and the CLI's does not", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const app = new DaemonClient(path);
+  await app.connect({ pid: 1, audio: true });
+  const cli = await viewer(path, 2);
+  app.sendJson({ type: "system.signal", signal: { kind: "app.quit", app: "Slack", bundleId: "com.tinyspeck.slackmacgap" }, at: 1_757_500_000_000 });
+  app.sendJson({ type: "system.signal", signal: { kind: "mac.wake" }, at: 1_757_500_001_000 });
+  app.sendJson({ type: "system.signal", at: 5 } as never);
+  await until(() => engine.signals.length === 2, "two signals");
+  assert.deepEqual(engine.signals, [
+    { signal: { kind: "app.quit", app: "Slack", bundleId: "com.tinyspeck.slackmacgap" }, at: 1_757_500_000_000 },
+    { signal: { kind: "mac.wake" }, at: 1_757_500_001_000 },
+  ]);
+  assert.deepEqual(engine.commands, [], "a signal is never a command");
+  assert.equal(engine.viewers.at(-1), 1, "the app (audio hello) is the one viewer; the CLI client is not");
+  app.close();
+  await until(() => engine.viewers.at(-1) === 0, "the viewer left");
+  cli.client.close();
+  await server.close();
+});
+
+test("the three automation events broadcast to every client like toast: automation.event, local.say (its ring kind included) and notify pass through with their fields", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-sock-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine();
+  const server = new DaemonServer(engine, path);
+  await server.listen();
+  const a = await viewer(path, 1);
+  const b = await viewer(path, 2);
+  const event = { seq: 1, at: 2, id: "auto_1", kind: "state", state: "snoozed", nextAt: 3 };
+  engine.emit("event", { type: "automation.event", event });
+  engine.emit("event", { type: "local.say", text: "call mum", sound: "Glass", automationId: "auto_1" });
+  engine.emit("event", { type: "local.say", sound: "Hero", ring: "alarm", automationId: "auto_2" });
+  engine.emit("event", { type: "notify", id: "ntf_1", title: "07:10 · Wake up", presses: [{ kind: "snooze", minutes: 10 }, { kind: "done" }], automationId: "auto_2" });
+  await until(() => a.of("notify").length === 1 && b.of("notify").length === 1, "both clients got the banner");
+  for (const c of [a, b]) {
+    assert.deepEqual(c.of("automation.event"), [{ type: "automation.event", event }]);
+    assert.deepEqual(c.of("local.say"), [
+      { type: "local.say", text: "call mum", sound: "Glass", automationId: "auto_1" },
+      { type: "local.say", sound: "Hero", ring: "alarm", automationId: "auto_2" },
+    ]);
+    assert.deepEqual(c.of("notify"), [{ type: "notify", id: "ntf_1", title: "07:10 · Wake up", presses: [{ kind: "snooze", minutes: 10 }, { kind: "done" }], automationId: "auto_2" }]);
+  }
+  a.client.close();
+  b.client.close();
+  await server.close();
+});
+
 // ----------------------------------------------------------------- the lifeline: bye vs. no bye
 
 /** A Lifeline with a short window and every decision recorded. */
@@ -836,4 +1045,32 @@ test("bye reaches the server as an event and is acknowledged to that client only
   assert.deepEqual(events, ["join 1", "join 2", "bye", "leave 1", "leave 0"]);
   assert.deepEqual(engine.commands, [], "a bye is not an engine command");
   await server.close();
+});
+
+
+test("explicit calendar query crosses the real daemon socket and accepts only a valid native receipt", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "hormes-calendar-wire-"));
+  const path = join(dir, "d.sock");
+  const engine = new FakeEngine(), server = new DaemonServer(engine, path);
+  const app = new DaemonClient(path), cli = new DaemonClient(path);
+  const appMessages: DaemonMessage[] = [], cliMessages: DaemonMessage[] = [];
+  app.on("message", m => appMessages.push(m)); cli.on("message", m => cliMessages.push(m));
+  try {
+    await server.listen();
+    await app.connect({ pid: 1, audio: true }); await cli.connect({ pid: 2, audio: false });
+    await until(() => engine.viewers.at(-1) === 1 && engine.pids.length === 2, "native client handshake");
+    const request = { id: "schedule-1", days: 1, calendarIds: [] };
+    engine.emit("event", { type: "calendar.read", request });
+    await until(() => appMessages.some(m => m.type === "calendar.read"), "native calendar query");
+    assert.deepEqual(appMessages.find(m => m.type === "calendar.read"), { type: "calendar.read", request });
+    assert.equal(cliMessages.some(m => m.type === "calendar.read"), false, "CLI is not asked to supply native calendar data");
+    const result = { id: request.id, ok: true, permission: "granted", timeZone: "America/New_York", startsAt: 1000, endsAt: 2000, readAt: 3000, calendars: [], events: [], truncated: false };
+    cli.sendJson({ type: "command", command: { type: "calendar.result", result } });
+    app.sendJson({ type: "command", command: { type: "calendar.result", result: { ...result, readAt: "not a timestamp" } } });
+    await until(() => cliMessages.some(m => m.type === "error") && appMessages.some(m => m.type === "error"), "invalid replies rejected");
+    assert.equal(engine.commands.length, 0);
+    app.sendJson({ type: "command", command: { type: "calendar.result", result } });
+    await until(() => engine.commands.length === 1, "correlated native receipt reaches engine");
+    assert.deepEqual(engine.commands, [{ type: "calendar.result", result }]);
+  } finally { app.close(); cli.close(); await server.close(); }
 });

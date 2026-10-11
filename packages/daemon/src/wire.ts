@@ -1,3 +1,4 @@
+import type { PhoneState } from "@hormes/protocol";
 /**
  * The app ↔ daemon wire: one unix socket, binary frames.
  *
@@ -13,6 +14,7 @@
  */
 
 import type { ToolResult } from "@hormes/hands";
+import type { CalendarReadRequest, LedgerDayTotals, SystemSignal, WorkReply } from "@hormes/protocol";
 
 export const FRAME_JSON = 1;
 export const FRAME_MIC = 2;
@@ -70,7 +72,16 @@ export class FrameParser {
 
 /** daemon → app */
 export type DaemonMessage =
-  | { readonly type: "hello"; readonly version: string; readonly pid: number; readonly stateDir: string }
+  | { readonly type: "phone.state"; readonly state: PhoneState }
+  | { readonly type: "calendar.read"; readonly request: CalendarReadRequest }
+  | { readonly type: "work.state"; readonly reply: WorkReply }
+  /**
+   * `version` is the package's; `protocol` is PROTOCOL_VERSION (APP-3), which server.ts always sends. A surface whose
+   * number differs, or that reads none (a daemon from before the field), raises `app.version` and refuses Go until it
+   * clears (EngineClient). Required here because this daemon is always current; only the Swift decoder reads it as
+   * optional.
+   */
+  | { readonly type: "hello"; readonly version: string; readonly pid: number; readonly stateDir: string; readonly protocol: number }
   | { readonly type: "snapshot"; readonly snapshot: unknown }
   | { readonly type: "levels"; readonly levels: unknown }
   | { readonly type: "toast"; readonly text: string; readonly tone: "info" | "warn" | "error" }
@@ -78,7 +89,13 @@ export type DaemonMessage =
   | { readonly type: "audio"; readonly control: "flush" }
   /** Rows of a day, a session or a whole chain; `truncated` when a chain read kept only its newest CHAIN_ROWS_MAX rows. */
   | { readonly type: "ledger.rows"; readonly id: string; readonly rows: unknown[]; readonly truncated?: boolean }
-  | { readonly type: "ledger.days"; readonly id: string; readonly days: string[] }
+  /**
+   * The day list, newest first; `totals` (LM-6) carries each day's sessions and billed seconds, absent from a daemon
+   * before the field. `partial`: the daemon answered before it had read every day's totals (server.ts
+   * LEDGER_DAYS_BUDGET_MS), so `totals` leaves out the days it has not read yet; the read goes on, and asking again
+   * finds more.
+   */
+  | { readonly type: "ledger.days"; readonly id: string; readonly days: string[]; readonly totals?: readonly LedgerDayTotals[]; readonly partial?: true }
   /** Memory items (MemoryItem[]) for `memory.list` / `memory.search`; never a vector. */
   | { readonly type: "memory.items"; readonly id: string; readonly items: unknown[] }
   /** Hormes's own sessions (HormesSessionSummary[]), newest first. */
@@ -87,14 +104,24 @@ export type DaemonMessage =
   | { readonly type: "pong"; readonly id: string; readonly at: number }
   /** Words the on-device ear should be biased toward right now: visible control titles, the front app and window, agent names. */
   | { readonly type: "ear.hints"; readonly strings: readonly string[] }
-  /** Full-text hits over the ledger for the Console's search box. */
-  | { readonly type: "ledger.hits"; readonly id: string; readonly hits: unknown[] }
+  /**
+   * One page of full-text hits over the live ledger (the Console's search box, `hormes ledger search`), newest first.
+   * `older` is set when the page's byte bound stopped the read with older days unread: the day to send as the next
+   * request's `before`. Absent: nothing older is left to read.
+   */
+  | { readonly type: "ledger.hits"; readonly id: string; readonly hits: unknown[]; readonly older?: string }
   /** A page of an agent's conversation: sent to the clients viewing that agent (`agent.open`), never to the CLI's join/leave clients. */
   | { readonly type: "agent.transcript"; readonly transcript: unknown; readonly mode: "replace" | "append" | "prepend" }
   /** One change on one thread (a ThreadEvent; ≤ 200 B once the table caps its text, `started` excepted — it carries the record): broadcast, so the orb's satellites and the rail follow without a snapshot. */
   | { readonly type: "thread.event"; readonly event: unknown }
   /** A page of a thread's conversation (a ThreadTranscript): sent only to the clients that opened that thread (`thread.open`). */
   | { readonly type: "thread.transcript"; readonly transcript: unknown; readonly mode: "replace" | "append" | "prepend" }
+  /** One change on one automation row (an AutomationEvent; ≤ 200 B, `fired` ≈ 270 B with its presses): broadcast, like `thread.event`. */
+  | { readonly type: "automation.event"; readonly event: unknown }
+  /** Engine → app: play an earcon and/or have the LocalSpeaker read a FIXED line on-device; never model text except a redacted wake-brain line. `ring`: what a chime rings for (alarm · timer · chime). Broadcast. */
+  | { readonly type: "local.say"; readonly text?: string; readonly sound?: string; readonly ring?: string; readonly automationId: string }
+  /** Engine → app: a banner with the ring's presses (Snooze · Done / Open · Done); a press comes back as an `automation.*` command. Broadcast. */
+  | { readonly type: "notify"; readonly id: string; readonly title: string; readonly body?: string; readonly presses: readonly unknown[]; readonly automationId: string }
   /**
    * Answer to `tool.run`, sent only to the client that asked. `result` is the
    * ToolResult as the runner produced it (text / image {pngBase64, width, height,
@@ -113,9 +140,29 @@ export type DaemonMessage =
 
 /** app → daemon */
 export type ClientMessage =
-  | { readonly type: "hello"; readonly pid: number; readonly version?: string; readonly audio?: boolean }
+  | { readonly type: "phone.command"; readonly action: "pair" | "status" | "cancel" | "revoke" | "push.configure"; readonly deviceId?: string; readonly push?: import("./phone-push.ts").PhonePushConfiguration }
+  /**
+   * `protocol` is the sender's PROTOCOL_VERSION (APP-3; `ProtocolVersion.current` in Swift, sent from EngineClient's
+   * hello; DaemonClient sends this checkout's), absent from a build before the field. Optional for good: a CLI client
+   * may send none. The app's hello (`audio: true`) with another number, or with none, is a skew: while that app is
+   * attached the daemon lays `app.version` over its snapshots and refuses that app's session-opening commands with a
+   * toast (server.ts `opensSession`). The app judges the same skew from the daemon's hello and from a snapshot it
+   * cannot decode.
+   */
+  | { readonly type: "hello"; readonly pid: number; readonly version?: string; readonly audio?: boolean; readonly protocol?: number }
   | { readonly type: "command"; readonly command: unknown }
   | { readonly type: "mic-level"; readonly level: number }
+  /**
+   * design12: the app's audio graph as it read itself back (the protocol's AudioState: voice
+   * processing and its knobs, the winning rung, what it hears and speaks through, the echo
+   * guard's counters, who else holds the mic). Sent on start, stop, a route change and every
+   * 5 s with the counters, ≤ 1 Hz. The daemon checks the shape (`isAudioState`) and keeps it in
+   * the snapshot for `status`, the doctor and the Console; a malformed frame is dropped, and a
+   * malformed playout, duck or output costs only itself (`isAudioState(state, shed)` names what
+   * it shed, for the debug line). Data, never a command: nothing here changes a setting or the
+   * graph.
+   */
+  | { readonly type: "audio-state"; readonly state: unknown }
   | { readonly type: "permission"; readonly which: string; readonly state: "granted" | "denied" | "unknown"; readonly detail?: string }
   /** The app's full read of every permission (PermissionInfo[]), after a sweep or a poll. */
   | { readonly type: "permissions"; readonly all: unknown[] }
@@ -128,8 +175,12 @@ export type ClientMessage =
   /** A whole conversation in one read: every session of the chain `rootId` names (any member id will do), oldest first; answered with `ledger.rows` (+ `truncated`). */
   | { readonly type: "ledger.chain"; readonly id: string; readonly rootId: string }
   | { readonly type: "ping"; readonly id: string }
-  /** Search heard/said text and delegation requests across the live ledger (not the trash); `limit` default 50. */
-  | { readonly type: "ledger.search"; readonly id: string; readonly query: string; readonly limit?: number }
+  /**
+   * Search heard/said text and delegation requests and summaries across the live ledger (not the trash), one page per
+   * request: the newest SEARCH_PAGE_BYTES of day files before `before` (YYYY-MM-DD, exclusive; absent: from today),
+   * `limit` hits at most (default 50, 200 at most). Answered with `ledger.hits`, whose `older` is the next `before`.
+   */
+  | { readonly type: "ledger.search"; readonly id: string; readonly query: string; readonly limit?: number; readonly before?: string }
   /** The Memory rail: items by state (default live; "all"), `limit` default 50, at most 200; answered with `memory.items`. */
   | { readonly type: "memory.list"; readonly id: string; readonly state?: string; readonly limit?: number }
   | { readonly type: "memory.search"; readonly id: string; readonly query: string; readonly limit?: number }
@@ -147,10 +198,19 @@ export type ClientMessage =
   | { readonly type: "tool.run"; readonly id: string; readonly name: string; readonly input: unknown; readonly thread?: string }
   /**
    * The app's on-device ear while awake: a partial or final transcript of what
-   * Kevin is saying, ~100–200 ms behind his speech. `at` is ms since epoch when the
+   * User is saying, ~100–200 ms behind his speech. `at` is ms since epoch when the
    * recogniser produced it. The engine's reflex layer acts on unambiguous commands.
    */
   | { readonly type: "ear"; readonly text: string; readonly isFinal: boolean; readonly segment: number; readonly at: number }
+  /**
+   * A signal the app observed on User's behalf (design11): an app launched or quit
+   * (`NSWorkspace`), the Mac slept or woke, the screen locked or unlocked, a display
+   * connected or disconnected, the clock changed. `signal` is the protocol's SystemSignal
+   * (the parser types it; the engine still checks its shape — the wire is JSON); `at` is
+   * wall-clock ms. Data for the automations' watchers and their resync — never a
+   * command, never a wake: the engine reads it, matches armed rows, and nothing else.
+   */
+  | { readonly type: "system.signal"; readonly signal: SystemSignal; readonly at: number }
   /**
    * A clean quit is on its way: the app sends this right before it closes the daemon's
    * stdin (DaemonProcess.stop / applicationWillTerminate). Stdin closing *without* a

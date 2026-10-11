@@ -5,25 +5,65 @@ import Network
 /// frames, and publishes into `AppState` on the main actor. Speaker frames go to the
 /// `AudioEngine`; mic frames come from it through `sendMic`.
 /// Queue-confined (`net`); the class is safe to hand across threads.
+///
+/// Snapshots are decoded once, off `net`, on their own serial queue (voice PLAN W2.2): the speaker's
+/// frames and the `audio` flush ride the same socket and are handed on from `net` in arrival order,
+/// so a 283 KB snapshot decoded inline held every speaker frame behind it for the whole decode.
+/// Every other JSON frame stays on `net`, in order with the PCM. At most one decode runs and one
+/// payload waits, the newest (the app's half of W2.3): a burst is decoded twice, not once per frame.
 final class EngineClient: @unchecked Sendable {
     private let socketPath: String
     private let state: AppState
     private let net = DispatchQueue(label: "hormes.engine-client")
+    /// Where snapshots are decoded, one at a time (`decodeNextSnapshot`).
+    private let snapshotQueue = DispatchQueue(label: "hormes.engine-client.snapshot", qos: .userInitiated)
+    /// The newest snapshot payload not yet decoded, with its connection's epoch and its arrival number. A newer one
+    /// replaces it: snapshots are whole states, so only the newest says anything. On `net`.
+    private var snapshotSlot: (payload: Data, epoch: Int, seq: Int)?
+    /// A decode is under way on `snapshotQueue`. On `net`.
+    private var snapshotDecoding = false
+    /// Snapshots in arrival order, and the newest one applied: a decode that finishes after a newer snapshot
+    /// applied (on handleMessage's fallback path) is dropped. On `net`.
+    private var snapshotSeq = 0
+    private var snapshotAppliedSeq = 0
+    /// Snapshots decoded off `net` since launch. On `net`; the snapshot probe reads it by reflection, once the socket is quiet.
+    private var snapshotDecodes = 0
+    /// Bumped whenever a connection opens, drops or stops (on `net`): a snapshot decoded for a connection
+    /// that has gone since says nothing about the daemon now, and is not applied.
+    private var connectionEpoch = 0
     private var connection: NWConnection?
     private let decoder = FrameDecoder()
     private var running = false
     private var reconnectDelay: TimeInterval = 0.3
     private var reconnectScheduled = false
+    /// The socket is open (NWConnection `.ready`). Not yet "connected": a wedged daemon's kernel
+    /// accepts the connection into its backlog and nothing ever answers on it. On `net`.
+    private var transportReady = false
+    /// The daemon said `hello` on this connection: it is serving. `connected` means this. On `net`.
     private var isConnected = false
     /// Commands sent while the daemon is (re)connecting. Stop, wake, pause must not
-    /// vanish because a reconnect was in flight; they are delivered on `.ready`,
-    /// newest last, dropped after 5 s or beyond 20 entries. On `net`.
-    private var outbox: [(at: Date, json: [String: Any])] = []
+    /// vanish because a reconnect was in flight; they are delivered once the daemon's first
+    /// snapshot after its hello is judged (`releaseOutbox`), oldest first, dropped when they
+    /// were 5 s old at the hello or beyond 20 entries. `opens`: the command would open a paid
+    /// session (`opensSession`); `typed`: it is a typed line (its toast says "Not sent"). On `net`.
+    private var outbox: [(at: Date, json: [String: Any], opens: Bool, typed: Bool)] = []
+    /// The hello came and this connection's first snapshot is not judged yet (APP-3): commands
+    /// keep queueing behind the outbox, so nothing queued through an outage reaches a daemon
+    /// before the app knows it can read it. A Go pressed while a daemon respawns from new source
+    /// would otherwise open a paid session on a daemon whose snapshots this build cannot decode.
+    /// Ended by the first snapshot, decoded or not, or after `outboxSnapshotWait`. On `net`.
+    private var outboxHeld = false
+    /// When this connection's hello came: a queued command's 5 s are counted to it, not to the snapshot after it. On `net`.
+    private var helloAt: Date?
 
     /// Speaker frames and flush requests land here. Set before `start()`.
     var audio: AudioEngine?
     /// Fired (on the main queue) after each successful hello; re-send anything the daemon must know.
     var onConnected: (() -> Void)?
+    /// An automation fired while asleep (design11): `local.say` — the earcon and a fixed line through the app's
+    /// on-device speaker; `notify` — a banner with the ring's presses. Both on the main actor; the app installs them.
+    var onLocalSay: (@MainActor (LocalSayMessage) -> Void)?
+    var onNotify: (@MainActor (NotifyMessage) -> Void)?
 
     // Snapshot coalescing: at most ~30 publishes per second.
     private var pendingSnapshot: Snapshot?
@@ -42,41 +82,60 @@ final class EngineClient: @unchecked Sendable {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "2.0.0"
     }()
 
-    // MARK: - liveness, the daemon row, auto-resume (REDESIGN §16 "Liveness")
+    // MARK: - liveness, the daemon row, auto-resume (typed liveness and problems "Liveness")
     //
     // A daemon that exits is caught by DaemonProcess; a daemon that is alive on the socket
-    // and not answering — a wedged event loop — was invisible. So: one `ping` every 2 s
-    // while connected, answered by the daemon on the wire with no engine work (`pong`);
-    // two unanswered in a row and this client drops the connection and tells
+    // and not answering — a wedged event loop — was invisible. So: the client counts as
+    // connected only once the daemon's `hello` arrives (the kernel accepts a connection for
+    // a wedged daemon too), and one `ping` goes every 2 s from the moment the socket opens,
+    // answered by the daemon on the wire with no engine work (`pong`). Two unanswered in a
+    // row and this client drops the connection and reconnects. The kick is a SIGKILL that
+    // takes the session, the threads and the turn in flight with it, so it waits longer:
+    // only when the daemon has said nothing for `silenceBeforeKick` (it lands on the second
+    // silent connection, about 12 s after its last answer) does this client tell
     // DaemonProcess (a notification: both are the app's, no AppDelegate wiring) to kill and
-    // respawn it. While no daemon answers for more than a beat, the published snapshot
-    // carries one typed problem, `daemon`, whose remedy is "Restart daemon" (the
-    // `daemon.restart` command, routed to DaemonProcess while nothing is connected); the
-    // next real snapshot replaces it. And when the daemon comes back asleep after a session
-    // was open — a crash, a kill, a self-update mid-conversation — this client sends `go`
-    // once, inside 10 s of the reconnect; the engine resumes the conversation from the
-    // ledger (Engine.resumeFromLedger). Never after Kevin pressed Stop or Pause since that
-    // session's last snapshot; never twice.
+    // respawn it. A slow synchronous moment in the daemon (a long ledger search on a loaded
+    // Mac) costs a reconnect, not the daemon. While no daemon answers for more than a beat,
+    // the published snapshot carries one typed problem, `daemon`, whose remedy is "Restart
+    // daemon" (the `daemon.restart` command, routed to DaemonProcess while nothing is
+    // connected); the next real snapshot replaces it. The beat is `daemonProblemAfter` after
+    // a drop, and `daemonProblemAtStartAfter` from launch for a daemon that never answered
+    // at all (a fresh install whose daemon dies at start). And when the daemon comes back
+    // asleep after a session was open — a crash, a kill, a self-update mid-conversation —
+    // this client sends `go` once, inside 10 s of the reconnect; the engine resumes the
+    // conversation from the ledger (Engine.resumeFromLedger). Never after User pressed Stop
+    // or Pause since that session's last snapshot; never twice.
 
-    /// Posted on the main queue when `missedPongsBeforeRespawn` pings went unanswered. `userInfo`: `pid` (Int32, the daemon's, when its hello said) and `seconds` (Int).
+    /// Posted on the main queue when the daemon has answered nothing for `silenceBeforeKick`, across a fresh connection. `userInfo`: `pid` (Int32, the daemon's, when this connection's hello said) and `seconds` (Int, the silence).
     nonisolated static let daemonUnresponsiveNotification = Notification.Name("hormes.daemonUnresponsive")
     /// Posted on the main queue when the "Restart daemon" remedy is pressed while no daemon is connected. No `pid`: nothing is connected, so there is no daemon of ours to name.
     nonisolated static let restartDaemonNotification = Notification.Name("hormes.restartDaemon")
 
     static let pingInterval: TimeInterval = 2
-    static let missedPongsBeforeRespawn = 2
+    /// Unanswered pings on one connection before it is dropped and opened again.
+    static let missedPongsBeforeDrop = 2
+    /// How long the daemon may say nothing (counted from the first ping it left unanswered)
+    /// before the kick. A connection's two missed pings are 4 s, under it: that drop only
+    /// reconnects. The fresh connection's two are past it, so the kick lands on the second
+    /// silent connection, about 12 s after the daemon's last answer.
+    static let silenceBeforeKick: TimeInterval = 8
     /// How long disconnected before the `daemon` row appears: a normal respawn is back in 1–3 s and must not flash it.
     static let daemonProblemAfter: TimeInterval = 3
+    /// The same from launch, when no daemon has answered yet: a cold start (tsx compiling the engine on a fresh install) takes a few seconds more.
+    static let daemonProblemAtStartAfter: TimeInterval = 8
     /// After a reconnect, a daemon reporting asleep inside this window gets one `go` when a session was open before the drop.
     static let autoResumeWindow: TimeInterval = 10
     static let daemonProblemText = "The engine is not answering; Hormes cannot hear or act until it is back"
 
     private var pingTimer: DispatchSourceTimer?
-    /// Ping ids sent and not yet answered, oldest first. On `net`.
-    private var pendingPings: [String] = []
+    /// Pings sent on this connection and not yet answered, oldest first. On `net`.
+    private var pendingPings: [(id: String, at: Date)] = []
+    /// When the daemon went quiet: the send time of the first ping it left unanswered. Kept
+    /// across a drop and the fresh connection after it; cleared by any hello or pong. On `net`.
+    private var silentSince: Date?
     /// The daemon's pid from THIS connection's hello, for the kill when it stops answering.
     /// Cleared the moment the connection drops: a pid from a dead connection may have been
-    /// reused by one of Kevin's own processes, and is nobody's to kill. On `net`.
+    /// reused by one of User's own processes, and is nobody's to kill. On `net`.
     private var daemonPid: Int32?
     /// When this client last sent an auto-resume `go`; no second one inside `resumeCooldown`. On `net`.
     private var resumeGoSentAt: Date = .distantPast
@@ -88,12 +147,49 @@ final class EngineClient: @unchecked Sendable {
     /// The last snapshot the daemon sent (before any drop), and when. On `net`.
     private var lastSnapshot: Snapshot?
     private var lastSnapshotAt: Date = .distantPast
-    /// When this app last sent `stop` or `pause`: Kevin's word against an auto-resume. On `net`.
+    /// When this app last sent `stop` or `pause`: User's word against an auto-resume. On `net`.
     private var stopSentAt: Date = .distantPast
-    /// Armed at a drop when a session was open (or opening) and Kevin had not stopped it; consumed by the first snapshot after the reconnect.
+    /// Armed at a drop when a session was open (or opening) and User had not stopped it; consumed by the first snapshot after the reconnect.
     private var resumeCandidate = false
     private var resumeDeadline: Date = .distantPast
+    /// When the current outage began (launch, or the drop), nil while connected. On `net`.
     private var disconnectedAt: Date?
+    /// How long this outage waits before the `daemon` row: `daemonProblemAtStartAfter` until a daemon has answered once. On `net`.
+    private var outageGrace: TimeInterval = EngineClient.daemonProblemAtStartAfter
+    /// The outage whose row is already scheduled, so every failed connect can arm it without stacking timers. On `net`.
+    private var problemArmedFor: Date?
+
+    // MARK: version skew (APP-3)
+    //
+    // The app and the daemon are built from one checkout, and a pull or a respawn from new source under an old binary
+    // splits them. Two things say so: the daemon's hello names another PROTOCOL_VERSION (or none: a daemon from before
+    // the field), or a snapshot this build cannot decode. Either one raises `app.version` (`skewProblemText`, remedy
+    // Restart daemon with `pnpm build:mac` to copy) on top of every snapshot this client publishes, and refuses the
+    // commands that open a paid session (`opensSession`) with a toast, the auto-resume's `go` included: the app could
+    // not show the meter of a session it cannot read. It clears when a hello names this build's number and the
+    // snapshots decode again (a Restart daemon fixes a daemon older than the app; only a rebuild fixes an app older
+    // than the daemon).
+
+    static let skewProblemText = "The app and the daemon are from different builds. Restart the daemon. If this stays, run pnpm build:mac."
+    /// The toast when a command that would open a session is refused for the skew.
+    static let skewRefusedText = "Not started. The app and the daemon are from different builds."
+    static let skewNotSentText = "Not sent. The app and the daemon are from different builds."
+    /// How long after a hello the outbox waits for the daemon's first snapshot (server.ts sends one right after its
+    /// hello). None by then: what was queued goes, except what would open a session, which is refused with these.
+    static let outboxSnapshotWait: TimeInterval = 3
+    static let notJudgedRefusedText = "Not started. The daemon has not sent its state yet."
+    static let notJudgedNotSentText = "Not sent. The daemon has not sent its state yet."
+
+    /// This connection's hello named another contract, or none. Set at every hello. On `net`.
+    private var helloSkew = false
+    /// A snapshot frame did not decode, and none has since. Only a decoded snapshot clears it (a fresh connection's
+    /// first snapshot judges the daemon that answers now). On `net`.
+    private var undecodableSkew = false
+    /// When the skew in force was first seen (ms), the row's `since`; nil while there is none. On `net`.
+    private var skewSince: Double?
+    /// The daemon's state dir from this connection's hello: the engine-owned state directory. On `net`.
+    private var daemonStateDir: String?
+    private var skewed: Bool { helloSkew || undecodableSkew }
 
     init(socketPath: String, state: AppState) {
         self.socketPath = socketPath
@@ -106,6 +202,11 @@ final class EngineClient: @unchecked Sendable {
         net.async {
             guard !self.running else { return }
             self.running = true
+            // The outage starts now: nothing has answered yet. A daemon that never does (it dies
+            // at every start, its checkout lacks node_modules) gets the `daemon` row like a drop.
+            self.disconnectedAt = Date()
+            self.outageGrace = EngineClient.daemonProblemAtStartAfter
+            self.armDaemonProblem()
             self.openConnection()
         }
     }
@@ -113,11 +214,17 @@ final class EngineClient: @unchecked Sendable {
     func stop() {
         net.async {
             self.running = false
+            self.connectionEpoch += 1
+            self.outboxHeld = false
+            self.helloAt = nil
             self.stopPings()
+            self.silentSince = nil
             self.resumeCandidate = false
             self.daemonPid = nil
             self.connection?.cancel()
             self.connection = nil
+            self.transportReady = false
+            self.isConnected = false
             self.failPendingLedger()
             self.publishConnected(false)
         }
@@ -126,23 +233,21 @@ final class EngineClient: @unchecked Sendable {
     private func openConnection() {
         guard running else { return }
         connection?.cancel()
+        connectionEpoch += 1
         decoder.reset()
+        transportReady = false
         let conn = NWConnection(to: .unix(path: socketPath), using: .tcp)
         connection = conn
         conn.stateUpdateHandler = { [weak self] st in
             guard let self, conn === self.connection else { return }
             switch st {
             case .ready:
-                self.reconnectDelay = 0.3
-                self.isConnected = true
-                self.disconnectedAt = nil
+                // The socket is open; the daemon is not proven until its hello (`helloReceived`).
+                // The pings start now, so a daemon that never says hello is caught like one that
+                // stops answering.
+                self.transportReady = true
                 self.sendHello()
-                self.flushOutbox()
-                self.publishConnected(true)
                 self.startPings()
-                // The window for one `go` if the daemon comes back asleep after a session was open.
-                if self.resumeCandidate { self.resumeDeadline = Date().addingTimeInterval(EngineClient.autoResumeWindow) }
-                if let cb = self.onConnected { DispatchQueue.main.async(execute: cb) }
                 self.receiveLoop(conn)
             case .waiting(let err):
                 // For a unix socket "waiting" means nobody is listening; there is no path
@@ -161,9 +266,33 @@ final class EngineClient: @unchecked Sendable {
         conn.start(queue: net)
     }
 
+    /// On `net`: the daemon's hello on this connection. Only now is the app connected:
+    /// `connected` flips, the outage (and its `daemon` row) ends, the outbox waits for the
+    /// first snapshot (`holdOutbox`), and the app re-sends what a fresh daemon must know.
+    private func helloReceived() {
+        guard transportReady, !isConnected else { return }
+        reconnectDelay = 0.3
+        isConnected = true
+        disconnectedAt = nil
+        problemArmedFor = nil
+        holdOutbox()
+        publishConnected(true)
+        // The window for one `go` if the daemon comes back asleep after a session was open.
+        if resumeCandidate { resumeDeadline = Date().addingTimeInterval(EngineClient.autoResumeWindow) }
+        if let cb = onConnected { DispatchQueue.main.async(execute: cb) }
+    }
+
     private func dropAndReconnect() {
+        // A connect the socket refused or did not have (no file) is not silence: the daemon is
+        // gone or starting, and the one that answers next owes nothing to the last one's quiet.
+        if !transportReady { silentSince = nil }
         connection?.cancel()
         connection = nil
+        connectionEpoch += 1
+        transportReady = false
+        // Whatever the hold kept stays in the outbox for the next hello.
+        outboxHeld = false
+        helloAt = nil
         stopPings()
         // The pid lives exactly as long as the connection that hello'd it.
         daemonPid = nil
@@ -172,8 +301,25 @@ final class EngineClient: @unchecked Sendable {
             publishConnected(false)
             failPendingLedger()
             noteDisconnected()
+        } else {
+            // A connect that failed, or a socket that opened and never said hello: the outage
+            // goes on, and its row is armed (once per outage) however it began.
+            armDaemonProblem()
         }
         scheduleReconnect()
+    }
+
+    /// On `net`: the `daemon` row for the current outage, `outageGrace` after it began, unless
+    /// a hello ends the outage first. Idempotent per outage: every failed connect calls it.
+    private func armDaemonProblem() {
+        if disconnectedAt == nil { disconnectedAt = Date() }
+        guard let since = disconnectedAt, problemArmedFor != since else { return }
+        problemArmedFor = since
+        let wait = max(0, outageGrace - Date().timeIntervalSince(since))
+        net.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, self.running, !self.isConnected, self.disconnectedAt == since else { return }
+            self.publishDaemonProblem()
+        }
     }
 
     /// On `net`, once per drop: arm the auto-resume from what the daemon last said, and
@@ -181,6 +327,7 @@ final class EngineClient: @unchecked Sendable {
     private func noteDisconnected() {
         let now = Date()
         disconnectedAt = now
+        outageGrace = EngineClient.daemonProblemAfter
         recentDrops = recentDrops.filter { now.timeIntervalSince($0) < EngineClient.dropLoopWindow }
         let dropsBefore = recentDrops.count
         recentDrops.append(now)
@@ -191,7 +338,7 @@ final class EngineClient: @unchecked Sendable {
             let wanted = open && stopSentAt <= lastSnapshotAt
             // The loop guards: a resume `go` inside the cooldown, or a second drop inside the
             // window, means the daemon is dying after every resume — each cycle a paid Live
-            // session and a "back". One resume; then Kevin's own Go.
+            // session and a "back". One resume; then User's own Go.
             let sinceResume = now.timeIntervalSince(resumeGoSentAt)
             if wanted && sinceResume < EngineClient.resumeCooldown {
                 resumeCandidate = false
@@ -206,10 +353,7 @@ final class EngineClient: @unchecked Sendable {
         } else {
             resumeCandidate = false
         }
-        net.asyncAfter(deadline: .now() + EngineClient.daemonProblemAfter) { [weak self] in
-            guard let self, self.running, !self.isConnected, self.disconnectedAt == now else { return }
-            self.publishDaemonProblem()
-        }
+        armDaemonProblem()
     }
 
     // MARK: pings
@@ -231,30 +375,38 @@ final class EngineClient: @unchecked Sendable {
         pendingPings.removeAll()
     }
 
-    /// On `net`. Two pings unanswered (4 s of silence) is a daemon that is up and not
-    /// listening: drop the connection — the reconnect loop takes over — and ask
-    /// DaemonProcess to kill and respawn it. Otherwise send the next ping.
+    /// On `net`. Two pings unanswered on this connection: drop it, and the reconnect loop opens
+    /// a fresh one. When the daemon has also been silent for `silenceBeforeKick` (so a fresh
+    /// connection got nothing either), it is up and not listening: ask DaemonProcess to kill
+    /// and respawn it as well. Otherwise send the next ping.
     private func pingTick() {
-        guard isConnected, connection != nil else { return }
-        if pendingPings.count >= EngineClient.missedPongsBeforeRespawn {
-            let seconds = Int(EngineClient.pingInterval * Double(pendingPings.count))
-            log("daemon unresponsive: no pong for \(seconds) s (\(pendingPings.count) pings unanswered); dropping the connection and asking for a respawn")
-            var info: [AnyHashable: Any] = ["seconds": seconds]
-            if let pid = daemonPid { info["pid"] = pid }
-            DispatchQueue.main.async { NotificationCenter.default.post(name: EngineClient.daemonUnresponsiveNotification, object: nil, userInfo: info) }
+        guard transportReady, connection != nil else { return }
+        if pendingPings.count >= EngineClient.missedPongsBeforeDrop {
+            let now = Date()
+            let since = silentSince ?? pendingPings.first?.at ?? now
+            silentSince = since
+            let silence = now.timeIntervalSince(since)
+            let unanswered = "\(pendingPings.count) pings unanswered on this connection"
+            if silence >= EngineClient.silenceBeforeKick {
+                log("daemon unresponsive: nothing for \(Int(silence)) s (\(unanswered)); dropping the connection and asking for a respawn")
+                var info: [AnyHashable: Any] = ["seconds": Int(silence)]
+                if let pid = daemonPid { info["pid"] = pid }
+                DispatchQueue.main.async { NotificationCenter.default.post(name: EngineClient.daemonUnresponsiveNotification, object: nil, userInfo: info) }
+            } else {
+                log("daemon quiet: nothing for \(Int(silence)) s (\(unanswered)); dropping the connection and reconnecting (the kick waits for \(Int(EngineClient.silenceBeforeKick)) s of silence)")
+            }
             dropAndReconnect()
             return
         }
         let id = UUID().uuidString
-        pendingPings.append(id)
-        rawSend(json: ["type": "ping", "id": id])
+        pendingPings.append((id, Date()))
+        write(json: ["type": "ping", "id": id])
     }
 
     // MARK: the daemon row
 
-    /// On `net`. The last snapshot, republished with one typed problem on top: `daemon`, with
-    /// "Restart daemon" as its remedy. `problems` (the plain list older surfaces read) gets
-    /// the same line. Every utterance is sealed first: nothing is being typed by a daemon
+    /// On `net`. The last snapshot, republished with one problem on top: `daemon`, with
+    /// "Restart daemon" as its remedy. Every utterance is sealed first: nothing is being typed by a daemon
     /// that is gone, and a `final: false` item would keep its caret blinking for the whole
     /// outage (the last snapshot is all this client has; the engine's settle never runs).
     /// The daemon's next snapshot replaces the whole thing, row included.
@@ -263,12 +415,11 @@ final class EngineClient: @unchecked Sendable {
         onMain { st in
             var s = st.snapshot.finalisingTranscript()
             let text = EngineClient.daemonProblemText
-            s.problems = s.problems.filter { $0 != text } + [text]
-            var typed = (s.problemsTyped ?? []).filter { $0.kind != "daemon" }
-            typed.append(Problem(kind: "daemon", text: text,
-                                 remedy: ProblemRemedy(label: "Restart daemon", command: ["type": .string("daemon.restart")], open: nil),
-                                 since: sinceMs))
-            s.problemsTyped = typed
+            var problems = s.problems.filter { $0.kind != "daemon" }
+            problems.append(Problem(kind: "daemon", text: text,
+                                    remedy: ProblemRemedy(label: "Restart daemon", command: ["type": .string("daemon.restart")], open: nil),
+                                    since: sinceMs))
+            s.problems = problems
             st.snapshot = s
         }
     }
@@ -294,9 +445,13 @@ final class EngineClient: @unchecked Sendable {
             log("auto-resume: the daemon is back \(snap.phase.rawValue); nothing to resume")
             return
         }
+        guard !skewed else {
+            log("auto-resume: the app and the daemon are from different builds; not sending go (app.version)")
+            return
+        }
         log("auto-resume: the daemon came back asleep after a session was open; sending go once")
         resumeGoSentAt = Date()
-        rawSend(json: ["type": "command", "command": EngineCommand.go.json])
+        rawSend(json: ["type": "command", "command": EngineCommand.go.json], opens: true)
     }
 
     private func scheduleReconnect() {
@@ -335,14 +490,34 @@ final class EngineClient: @unchecked Sendable {
     // MARK: - sending
 
     private func sendHello() {
-        rawSend(json: ["type": "hello", "pid": Int(ProcessInfo.processInfo.processIdentifier), "version": appVersion, "audio": true])
+        write(json: ["type": "hello", "pid": Int(ProcessInfo.processInfo.processIdentifier), "version": appVersion, "audio": true, "protocol": ProtocolVersion.current])
+    }
+
+    func sendPhone(action: String, deviceId: String?) {
+        net.async {
+            var message: [String: Any] = ["type": "phone.command", "action": action]
+            if let deviceId { message["deviceId"] = deviceId }
+            self.write(json: message)
+        }
+    }
+    func configurePhonePush(teamId: String, keyId: String, key: String, environment: String) {
+        net.async {
+            self.write(json: ["type": "phone.command", "action": "push.configure", "push": ["teamId": teamId, "keyId": keyId, "key": key, "environment": environment]])
+        }
     }
 
     func send(_ command: EngineCommand) {
         net.async {
+            if self.skewed, EngineClient.opensSession(command) {
+                // APP-3: nothing opens a paid session the app cannot read. The row says what to do.
+                self.log("refused \(command.json["type"] as? String ?? "?"): the app and the daemon are from different builds (app.version)")
+                let words = EngineClient.isTypedLine(command) ? EngineClient.skewNotSentText : EngineClient.skewRefusedText
+                self.onMain { $0.toast(words, tone: .warn) }
+                return
+            }
             switch command {
             case .stop, .pause:
-                // Kevin's word: a daemon that comes back asleep after this is not resumed.
+                // User's word: a daemon that comes back asleep after this is not resumed.
                 self.stopSentAt = Date()
                 self.resumeCandidate = false
             case .agentSend(let agentId, let text):
@@ -363,7 +538,25 @@ final class EngineClient: @unchecked Sendable {
             default:
                 break
             }
-            self.rawSend(json: ["type": "command", "command": command.json])
+            self.rawSend(json: ["type": "command", "command": command.json], opens: EngineClient.opensSession(command), typed: EngineClient.isTypedLine(command))
+        }
+    }
+
+    /// The commands that can open a paid session: Go, a resume, Switch now's reopen, and a typed line (it resumes a
+    /// paused conversation, or wakes Hormes with typed wakes on). Refused while the builds differ (APP-3).
+    static func opensSession(_ command: EngineCommand) -> Bool {
+        switch command {
+        case .go, .resume, .voiceReopen: return true
+        default: return isTypedLine(command)
+        }
+    }
+
+    /// A line typed to the main conversation (the composer, the main thread's pane).
+    static func isTypedLine(_ command: EngineCommand) -> Bool {
+        switch command {
+        case .sayText: return true
+        case .threadSay(let threadId, _): return threadId == "main"
+        default: return false
         }
     }
 
@@ -377,6 +570,14 @@ final class EngineClient: @unchecked Sendable {
     func sendMicLevel(_ level: Double) {
         let clamped = max(0, min(1, level.isFinite ? level : 0))
         net.async { self.rawSend(json: ["type": "mic-level", "level": clamped]) }
+    }
+
+    /// design12: the audio graph's read-back (wire.ts `audio-state`, beside `mic-level`): the daemon keeps it in
+    /// `snapshot.audioState` for `pnpm hormes status` / `doctor` and the per-turn `audio.guard` ledger row. The
+    /// AppDelegate coalesces to ≤ 1 Hz; the field names are the protocol's, exactly (`AudioStateInfo.json`).
+    func sendAudioState(_ state: AudioStateInfo) {
+        let json = state.json
+        net.async { self.rawSend(json: ["type": "audio-state", "state": json]) }
     }
 
     /// One permission as this app read it (wire.ts `permission`); `detail` is the row's
@@ -394,6 +595,17 @@ final class EngineClient: @unchecked Sendable {
         net.async { self.rawSend(json: ["type": "permissions", "all": rows]) }
     }
 
+    /// A signal the app observed on User's behalf (wire.ts `system.signal`, design11): an app quit, the Mac
+    /// woke, a display came. Data for the daemon's watchers, never a command — so never queued: a signal from
+    /// before a reconnect is stale, and the daemon's resync covers what it slept through.
+    func sendSignal(_ signal: SystemSignal) {
+        let json = signal.json(at: Date().timeIntervalSince1970 * 1000)
+        net.async {
+            guard self.connection != nil, self.isConnected else { return }
+            self.rawSend(json: json)
+        }
+    }
+
     /// The on-device ear's partial or final transcript (wire.ts `ear`): `at` is ms
     /// since epoch when the recogniser produced it. Never queued: a partial from before
     /// a reconnect is stale by the time the socket is back, so it is simply dropped.
@@ -404,25 +616,70 @@ final class EngineClient: @unchecked Sendable {
         }
     }
 
-    /// Must run on `net`.
-    /// On `net`. Delivers what was queued while disconnected, oldest first.
-    private func flushOutbox() {
-        let now = Date()
-        let due = outbox.filter { now.timeIntervalSince($0.at) < 5 }
-        outbox.removeAll()
-        for item in due { rawSend(json: item.json) }
-        if !due.isEmpty { log("delivered \(due.count) queued command(s) after reconnect") }
+    /// On `net`, at the hello: the outbox waits for this connection's first snapshot (`releaseOutbox`), or
+    /// `outboxSnapshotWait`, whichever comes first.
+    private func holdOutbox() {
+        helloAt = Date()
+        outboxHeld = true
+        let epoch = connectionEpoch
+        net.asyncAfter(deadline: .now() + EngineClient.outboxSnapshotWait) { [weak self] in
+            guard let self, self.connectionEpoch == epoch, self.outboxHeld else { return }
+            self.log("no snapshot \(Int(EngineClient.outboxSnapshotWait)) s after the hello; the outbox goes, nothing that opens a session")
+            self.releaseOutbox(judged: false)
+        }
     }
 
-    private func rawSend(json: [String: Any]) {
-        guard let conn = connection, isConnected else {
-            if json["type"] as? String == "command" {
-                outbox.append((Date(), json))
-                if outbox.count > 20 { outbox.removeFirst(outbox.count - 20) }
-                log("daemon not connected; queued command \((json["command"] as? [String: Any])?["type"] as? String ?? "?")")
+    /// On `net`: this connection's first snapshot was judged (`judged`: decoded, or not, which raised the skew first),
+    /// or none came in time. The hold ends, and the outbox goes.
+    private func releaseOutbox(judged: Bool) {
+        guard outboxHeld else { return }
+        outboxHeld = false
+        flushOutbox(judged: judged)
+    }
+
+    /// On `net`. Delivers what was queued while disconnected or held, oldest first. A command that would open a session
+    /// goes only when the first snapshot was judged and the builds match: skewed, or with no snapshot yet, it is refused
+    /// with a toast, the way `send` refuses one (APP-3). A Go from before a reconnect waits for the daemon's state.
+    private func flushOutbox(judged: Bool) {
+        let cutoff = helloAt ?? Date()
+        let due = outbox.filter { cutoff.timeIntervalSince($0.at) < 5 }
+        outbox.removeAll()
+        var delivered = 0
+        var toasts: [String] = []
+        for item in due {
+            if item.opens && (skewed || !judged) {
+                let type = (item.json["command"] as? [String: Any])?["type"] as? String ?? "?"
+                log("refused queued \(type): \(skewed ? "the app and the daemon are from different builds (app.version)" : "no snapshot from the daemon yet")")
+                let words = skewed ? (item.typed ? EngineClient.skewNotSentText : EngineClient.skewRefusedText)
+                    : (item.typed ? EngineClient.notJudgedNotSentText : EngineClient.notJudgedRefusedText)
+                if !toasts.contains(words) { toasts.append(words) }
+                continue
             }
+            write(json: item.json)
+            delivered += 1
+        }
+        if delivered > 0 { log("delivered \(delivered) queued command(s) after reconnect") }
+        for words in toasts { onMain { $0.toast(words, tone: .warn) } }
+    }
+
+    /// On `net`. To a daemon that has said hello; a command sent before that, or while the outbox is held for the first
+    /// snapshot, waits in the outbox. Any other frame goes at once, or nowhere while disconnected.
+    private func rawSend(json: [String: Any], opens: Bool = false, typed: Bool = false) {
+        let isCommand = json["type"] as? String == "command"
+        if isCommand && (connection == nil || !isConnected || outboxHeld) {
+            outbox.append((Date(), json, opens, typed))
+            if outbox.count > 20 { outbox.removeFirst(outbox.count - 20) }
+            let type = (json["command"] as? [String: Any])?["type"] as? String ?? "?"
+            log(isConnected ? "queued command \(type) until the daemon's first snapshot" : "daemon not connected; queued command \(type)")
             return
         }
+        guard connection != nil, isConnected else { return }
+        write(json: json)
+    }
+
+    /// On `net`. Onto the open socket, hello or not: the app's own hello and the pings.
+    private func write(json: [String: Any]) {
+        guard let conn = connection, transportReady else { return }
         do {
             let frame = try Wire.encodeJSON(json)
             conn.send(content: frame, completion: .contentProcessed { [weak self] err in
@@ -435,9 +692,19 @@ final class EngineClient: @unchecked Sendable {
 
     // MARK: - ledger
 
-    func ledgerDays() async -> [String] {
+    /// The day list, newest first, with each day's totals beside it (LM-6; none from a daemon before them). nil when
+    /// nothing answered. A total that does not decode is left out, never the list.
+    func ledgerDaysAnswer() async -> LedgerDays? {
         let any = await request(["type": "ledger.days"])
-        return (any as? [String]) ?? []
+        guard let obj = any as? [String: Any], let days = obj["days"] as? [String] else { return nil }
+        var totals: [String: LedgerDayTotals] = [:]
+        for entry in (obj["totals"] as? [Any]) ?? [] {
+            guard JSONSerialization.isValidJSONObject(entry), let data = try? JSONSerialization.data(withJSONObject: entry),
+                  let t = try? hormesJSONDecoder.decode(LedgerDayTotals.self, from: data) else { continue }
+            totals[t.day] = t
+        }
+        // `partial`: the daemon answered within its budget with the days it had read; asking again finds more.
+        return LedgerDays(days: days, totals: totals, partial: (obj["partial"] as? Bool) ?? false)
     }
 
     func ledgerRows(day: String) async -> [LedgerRow] {
@@ -513,17 +780,20 @@ final class EngineClient: @unchecked Sendable {
 
     // MARK: - search
 
-    /// Full-text hits over the live ledger for the Console's search box (`ledger.search`,
-    /// answered with `ledger.hits`). nil when nothing answers — a daemon from before the
-    /// message runs into the request timeout — so the rail can say so instead of "no hits".
-    func ledgerSearch(query: String, limit: Int = 50) async -> [LedgerHit]? {
-        let any = await request(["type": "ledger.search", "query": query, "limit": limit])
-        guard let list = any as? [Any] else { return nil }
-        return list.compactMap { ($0 as? [String: Any]).flatMap(LedgerHit.init(json:)) }
+    /// Full-text hits over the live ledger for the Console's search box, one page (`ledger.search {before}` →
+    /// `ledger.hits {older}`): the daemon reads a bounded slice of day files per request, and `older` is where the next
+    /// page starts. nil when nothing answers (a disconnect, or the request timeout), so the rail can say so instead of
+    /// "no hits".
+    func ledgerSearchPage(query: String, limit: Int, before: String?) async -> LedgerSearchPage? {
+        var message: [String: Any] = ["type": "ledger.search", "query": query, "limit": limit]
+        if let before { message["before"] = before }
+        let any = await request(message)
+        guard let obj = any as? [String: Any], let list = obj["hits"] as? [Any] else { return nil }
+        let older = (obj["older"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+        return LedgerSearchPage(hits: list.compactMap { ($0 as? [String: Any]).flatMap(LedgerHit.init(json:)) }, older: older)
     }
 
-    /// One request → one answer by id, or nil after `timeout` (the daemon ignores a message
-    /// type it does not know, so an older daemon shows up as a timeout) or on a disconnect.
+    /// One request → one answer by id, or nil after `timeout` or on a disconnect.
     private func request(_ message: [String: Any], timeout: TimeInterval = EngineClient.ledgerTimeout) async -> Any? {
         await withCheckedContinuation { (cont: CheckedContinuation<Any?, Never>) in
             net.async {
@@ -567,6 +837,11 @@ final class EngineClient: @unchecked Sendable {
         case FrameType.speaker.rawValue:
             audio?.play(pcm: frame.payload)
         case FrameType.json.rawValue:
+            // A snapshot goes to its own queue; nothing behind it waits for its decode.
+            if EngineClient.isSnapshotFrame(frame.payload) {
+                decodeSnapshot(frame.payload)
+                return
+            }
             guard let obj = try? JSONSerialization.jsonObject(with: frame.payload) as? [String: Any],
                   let type = obj["type"] as? String else { return }
             handleMessage(type: type, obj)
@@ -580,20 +855,42 @@ final class EngineClient: @unchecked Sendable {
         case "hello":
             let dir = obj["stateDir"] as? String
             if let pid = obj["pid"] as? Int, pid > 0, pid <= Int(Int32.max) { daemonPid = Int32(pid) }
+            daemonStateDir = dir
+            noteHelloProtocol(obj["protocol"])
             onMain { st in
                 if let dir, !dir.isEmpty { st.stateDir = URL(fileURLWithPath: dir) }
                 // A daemon process numbers its thread events from 1: the replay guard restarts with it.
                 st.noteDaemonHello()
+                st.send(.work(HormesWorkCommand(action: "refresh")))
             }
+            silentSince = nil
+            helloReceived()
         case "pong":
-            if let id = obj["id"] as? String { pendingPings.removeAll { $0 == id } }
+            // An answer: the daemon's loop is running, whatever came before.
+            silentSince = nil
+            if let id = obj["id"] as? String { pendingPings.removeAll { $0.id == id } }
         case "snapshot":
+            // A snapshot frame that does not start with its type (`isSnapshotFrame`), decoded here as before.
+            snapshotSeq += 1
             guard let sub = obj["snapshot"], let snap: Snapshot = decode(sub) else {
-                log("undecodable snapshot")
+                snapshotUndecodable()
                 return
             }
-            noteSnapshotForResume(snap)
-            queueSnapshot(sanitized(snap))
+            applySnapshot(snap, seq: snapshotSeq)
+        case "calendar.read":
+            guard let sub = obj["request"], let request: CalendarReadRequest = decode(sub) else { return }
+            onMain { st in
+                Task { @MainActor in
+                    let result = await NativeCalendarReader.read(request)
+                    st.send(.calendarResult(result))
+                }
+            }
+        case "phone.state":
+            guard let sub = obj["state"], let phone: HormesPhoneState = decode(sub) else { return }
+            onMain { $0.phone = phone }
+        case "work.state":
+            guard let sub = obj["reply"], let reply: HormesWorkReply = decode(sub) else { return }
+            onMain { st in st.work = reply.state; st.workReplies.send(reply) }
         case "levels":
             guard let sub = obj["levels"], let levels: AudioLevels = decode(sub) else { return }
             let clean = AudioLevels(input: finiteLevel(levels.input), output: finiteLevel(levels.output))
@@ -628,11 +925,33 @@ final class EngineClient: @unchecked Sendable {
         case "memory.items":
             if let id = obj["id"] as? String, let resolve = pendingLedger.removeValue(forKey: id) { resolve(obj["items"]) }
         case "ledger.days":
-            if let id = obj["id"] as? String, let resolve = pendingLedger.removeValue(forKey: id) { resolve(obj["days"]) }
+            // The whole message: `days`, and the `totals` beside them (LM-6).
+            if let id = obj["id"] as? String, let resolve = pendingLedger.removeValue(forKey: id) { resolve(obj) }
         case "ledger.sessions":
             if let id = obj["id"] as? String, let resolve = pendingLedger.removeValue(forKey: id) { resolve(obj["sessions"]) }
         case "ledger.hits":
-            if let id = obj["id"] as? String, let resolve = pendingLedger.removeValue(forKey: id) { resolve(obj["hits"]) }
+            // The whole message: `hits`, and `older` when the page stopped with older days unread.
+            if let id = obj["id"] as? String, let resolve = pendingLedger.removeValue(forKey: id) { resolve(obj) }
+        case "automation.event":
+            // One ≤ 200 B delta on one automation row (design11): `set` carries the row, the rest patch what
+            // AppState holds; `fired` is what a crash report should know the app was doing.
+            guard let sub = obj["event"], let e: AutomationEvent = decode(sub) else { return }
+            if e.kind == "fired" {
+                var note = "automation → fired \(e.id)"
+                if let line = e.line { note += " “\(line.prefix(40))”" }
+                CrashGuard.remember(note)
+            }
+            onMain { $0.applyAutomationEvent(e) }
+        case "local.say":
+            // The daemon has no speaker: the app plays the earcon and reads the fixed line (never model text but a
+            // redacted wake-brain line ≤ 160) through the gate's LocalSpeaker — never while a session is open.
+            guard let msg: LocalSayMessage = decode(obj) else { return }
+            CrashGuard.remember("automation → local.say \(msg.automationId)")
+            onMain { [onLocalSay] _ in onLocalSay?(msg) }
+        case "notify":
+            guard let msg: NotifyMessage = decode(obj) else { return }
+            CrashGuard.remember("automation → notify \(msg.automationId)")
+            onMain { [onNotify] _ in onNotify?(msg) }
         case "ear.hints":
             // What is on the screen (wire.ts `ear.hints`): the words the on-device ear should
             // be biased toward. Handed over by notification on this queue; ReflexEar owns the
@@ -646,6 +965,140 @@ final class EngineClient: @unchecked Sendable {
         default:
             break
         }
+    }
+
+    // MARK: - snapshots, off `net`
+
+    /// `{"type":"snapshot"` opens every snapshot frame: server.ts writes `type` first (JSON.stringify keeps
+    /// insertion order). Checking it costs a few bytes; parsing the frame to learn its type cost the whole decode.
+    static let snapshotPrefix = Data(#"{"type":"snapshot""#.utf8)
+
+    static func isSnapshotFrame(_ payload: Data) -> Bool {
+        payload.count >= snapshotPrefix.count && payload.prefix(snapshotPrefix.count).elementsEqual(snapshotPrefix)
+    }
+
+    /// The frame as the wire spells it, decoded in one pass: no `[String: Any]`, no re-serialisation.
+    private struct SnapshotFrame: Decodable {
+        let snapshot: Snapshot
+    }
+
+    /// On `net`: the payload waits in the one slot (replacing any older one), and a decode starts unless one runs.
+    private func decodeSnapshot(_ payload: Data) {
+        snapshotSeq += 1
+        snapshotSlot = (payload, connectionEpoch, snapshotSeq)
+        if !snapshotDecoding { decodeNextSnapshot() }
+    }
+
+    /// On `net`: decode the waiting payload on `snapshotQueue`, apply it back on `net` unless its connection has gone
+    /// since, then take whatever arrived meanwhile (the newest only). A payload from a gone connection is dropped undecoded.
+    private func decodeNextSnapshot() {
+        guard let next = snapshotSlot else {
+            snapshotDecoding = false
+            return
+        }
+        snapshotSlot = nil
+        guard next.epoch == connectionEpoch else {
+            decodeNextSnapshot()
+            return
+        }
+        snapshotDecoding = true
+        snapshotDecodes += 1
+        snapshotQueue.async { [weak self] in
+            guard let self else { return }
+            var snap: Snapshot?
+            do {
+                snap = try hormesJSONDecoder.decode(SnapshotFrame.self, from: next.payload).snapshot
+            } catch {
+                self.log("decode Snapshot: \(error)")
+            }
+            self.net.async {
+                if next.epoch == self.connectionEpoch {
+                    if let snap {
+                        self.applySnapshot(snap, seq: next.seq)
+                    } else {
+                        self.snapshotUndecodable()
+                    }
+                }
+                self.decodeNextSnapshot()
+            }
+        }
+    }
+
+    /// On `net`: a snapshot frame that did not decode, from either path (the prefix path off `net`, which every
+    /// daemon snapshot takes, or `handleMessage`'s fallback). It is logged and dropped, and it raises `app.version`
+    /// (APP-3): an app that cannot read the daemon is not connected in any way User can see.
+    private func snapshotUndecodable() {
+        log("undecodable snapshot")
+        if !undecodableSkew {
+            undecodableSkew = true
+            noteSkew(because: "a snapshot this build cannot decode")
+        }
+        // Judged: the skew is up, so the outbox's Go is refused, never handed to this daemon.
+        releaseOutbox(judged: true)
+    }
+
+    /// On `net`, at every hello: the daemon's PROTOCOL_VERSION against this build's.
+    private func noteHelloProtocol(_ value: Any?) {
+        let theirs = (value as? NSNumber)?.intValue
+        let was = skewed
+        helloSkew = theirs != ProtocolVersion.current
+        if helloSkew {
+            noteSkew(because: "the daemon's hello names protocol \(theirs.map(String.init) ?? "none"), this app \(ProtocolVersion.current)")
+        } else if was && !skewed {
+            skewSince = nil
+            log("app.version: the daemon's hello names protocol \(ProtocolVersion.current), as this app does")
+        }
+    }
+
+    /// On `net`: a skew was seen. The first one stamps `since` and publishes the row at once, over whatever this
+    /// client last published: a snapshot that never decodes would otherwise leave the app connected and silent.
+    private func noteSkew(because why: String) {
+        log("app.version: \(why); Go is refused until it clears")
+        if skewSince == nil { skewSince = Date().timeIntervalSince1970 * 1000 }
+        publishSkewProblem()
+    }
+
+    /// The `app.version` row (mirror of the probe fixture's sample).
+    private func skewProblem() -> Problem {
+        Problem(kind: "app.version", text: EngineClient.skewProblemText,
+                remedy: ProblemRemedy(label: "Restart daemon", command: ["type": .string("daemon.restart")], open: nil, copy: "pnpm build:mac"),
+                since: skewSince ?? Date().timeIntervalSince1970 * 1000)
+    }
+
+    /// `snap` with the `app.version` row on top while the builds differ; as it is otherwise.
+    private func withSkewProblem(_ snap: Snapshot) -> Snapshot {
+        guard skewed else { return snap }
+        var s = snap
+        s.problems = s.problems.filter { $0.kind != "app.version" } + [skewProblem()]
+        return s
+    }
+
+    /// On `net`: publish a version problem over the last snapshot, or the empty one.
+    private func publishSkewProblem() {
+        let problem = skewProblem()
+        onMain { st in
+            var s = st.snapshot == .empty ? Snapshot.empty : st.snapshot.finalisingTranscript()
+            s.problems = s.problems.filter { $0.kind != "app.version" } + [problem]
+            st.snapshot = s
+        }
+    }
+
+    /// On `net`: the snapshot for the auto-resume, then the ≤ 30 Hz publish. One older than the last applied is dropped.
+    /// A decoded snapshot ends a skew that only an undecodable one raised; a hello's skew rides on top of it.
+    private func applySnapshot(_ snap: Snapshot, seq: Int) {
+        guard seq > snapshotAppliedSeq else { return }
+        snapshotAppliedSeq = seq
+        if undecodableSkew {
+            undecodableSkew = false
+            if !helloSkew {
+                skewSince = nil
+                log("app.version: the daemon's snapshots decode again")
+            }
+        }
+        // Judged: the outbox goes (its Go only when the hello matched), before the auto-resume's own Go.
+        releaseOutbox(judged: true)
+        noteSnapshotForResume(snap)
+        queueSnapshot(sanitized(snap))
     }
 
     // MARK: - bad numbers
@@ -719,10 +1172,12 @@ final class EngineClient: @unchecked Sendable {
             guard let self else { return }
             self.snapshotPublishScheduled = false
             self.lastSnapshotPublish = .now()
-            guard let s = self.pendingSnapshot else { return }
+            // The `app.version` row as the skew stands at the publish, not at the decode: a skew raised in between
+            // must not be overwritten by a snapshot queued before it (APP-3).
+            guard let pending = self.pendingSnapshot else { return }
             self.pendingSnapshot = nil
-            // The snapshot's thread summaries merge into AppState.threads beside the events
-            // (a daemon without `threads` sends nil and touches nothing there).
+            let s = self.withSkewProblem(pending)
+            // The snapshot's thread summaries merge into AppState.threads beside the events.
             self.onMain { st in
                 st.snapshot = s
                 st.applySnapshotThreads(s.threads)
