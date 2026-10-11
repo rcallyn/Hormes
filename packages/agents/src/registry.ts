@@ -1,6 +1,6 @@
 import { logger } from "@hormes/core";
 import type { AgentInfo, ConnectorHealth } from "@hormes/protocol";
-import { splitAgentId, type AgentConnector, type ReadOptions, type SendResult, type StartOptions, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "./types.ts";
+import { splitAgentId, type AgentConnector, type ReadOptions, type SendResult, type SendOptions, type StartOptions, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "./types.ts";
 
 /**
  * All connectors behind one door. The brain's `agents_*` tools call this; the
@@ -104,8 +104,8 @@ export class AgentRegistry {
     return scored[0]?.a;
   }
 
-  async send(agentIdValue: string, text: string): Promise<SendResult> {
-    const r = await this.connectorFor(agentIdValue).send(agentIdValue, text);
+  async send(agentIdValue: string, text: string, opts?: SendOptions): Promise<SendResult> {
+    const r = await this.connectorFor(agentIdValue).send(agentIdValue, text, opts);
     this.cache = undefined;
     return r;
   }

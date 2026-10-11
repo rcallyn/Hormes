@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
+import * as nodeModule from "node:module";
 import { logger } from "@hormes/core";
 import type { AgentStatus } from "@hormes/protocol";
 import { AsyncQueue } from "./queue.ts";
@@ -66,6 +68,10 @@ export interface ClaudeSessionOptions {
   readonly name?: string;
   readonly systemPromptAppend?: string;
   readonly mcpServers?: Record<string, unknown>;
+  /** Only the MCP servers in `mcpServers`: none from ~/.claude.json, project `.mcp.json` or plugins. */
+  readonly strictMcpConfig?: boolean;
+  /** The built-in tools that exist at all; `[]` leaves none (MCP tools are separate). Omitted: the CLI's defaults. */
+  readonly tools?: readonly string[];
   readonly allowedTools?: readonly string[];
   readonly disallowedTools?: readonly string[];
   readonly permissionMode?: string;
@@ -76,11 +82,18 @@ export interface ClaudeSessionOptions {
   readonly maxTurns?: number;
   /** Decide a permission request. Returning a Promise that stays pending marks the session "blocked". */
   readonly canUseTool?: (toolName: string, input: Record<string, unknown>) => Promise<PermissionDecision>;
+  /** Runs before every SDK tool invocation, including permission-auto-approved tools. */
+  readonly toolGuard?: (toolName: string, input: Record<string, unknown>) => PermissionDecision;
   readonly resume?: string;
-  /** False keeps the session out of ~/.claude/projects (the brain and probes are not Kevin's transcripts). */
+  /** False keeps the session out of ~/.claude/projects (the brain and probes are not User's transcripts). */
   readonly persistSession?: boolean;
   /** Working with no SDK message for this long reads `unknown`. Default `TURN_STALL_MS`. */
   readonly turnStallMs?: number;
+  /**
+   * The clock `startedAt` and `lastActivityAt` are read on. Default Date.now. The sessions connector passes its own,
+   * so a run's last activity and the connector's stall checks share one clock (BL-13).
+   */
+  readonly now?: () => number;
 }
 
 export interface ToolUseEvent {
@@ -96,7 +109,8 @@ export interface SessionEvents {
   assistant: [text: string];
   tool: [event: ToolUseEvent];
   toolResult: [toolUseId: string, content: unknown, isError: boolean];
-  result: [message: SdkMessage];
+  /** `turn` is the number `send()` returned for the message this result answers; 0 for a result no send asked for. */
+  result: [message: SdkMessage, turn: number];
   error: [error: Error];
   closed: [];
 }
@@ -115,13 +129,58 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
   lastAssistantText = "";
   private currentText = "";
   private pendingPermission: { toolName: string; resolve: (d: PermissionDecision) => void } | undefined;
-  readonly startedAt = Date.now();
-  lastActivityAt = Date.now();
+  private readonly now: () => number;
+  readonly startedAt: number;
+  lastActivityAt: number;
   costUsd = 0;
   private stallTimer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * Turn accounting. The CLI runs the user messages it is sent one after another and ends each with exactly one
+   * `result`, an interrupted one included (`error_during_execution`, a little after the interrupt). So the n-th
+   * result answers the n-th send, and a result that arrives after its asker gave up is recognised by its number.
+   * That holds only while each message is sent to an idle CLI: one queued behind a running turn may be folded into
+   * it (one result for two sends), and an interrupt can be lost (no result at all). A caller that cannot wait for
+   * `settled()` should stop sending on this session and open a new one.
+   */
+  private sent = 0;
+  private answered = 0;
 
   constructor(private readonly opts: ClaudeSessionOptions) {
     super();
+    this.now = opts.now ?? Date.now;
+    this.startedAt = this.now();
+    this.lastActivityAt = this.startedAt;
+  }
+
+  /** The turn the CLI is working on (the oldest send with no result yet), if any. */
+  get runningTurn(): number | undefined {
+    return this.answered < this.sent ? this.answered + 1 : undefined;
+  }
+
+  /** Sends whose result has not arrived. */
+  get turnsInFlight(): number {
+    return Math.max(0, this.sent - this.answered);
+  }
+
+  /** Resolves true once every send has its result, false after `timeoutMs` or when the session ends first. */
+  settled(timeoutMs: number): Promise<boolean> {
+    if (this.turnsInFlight === 0) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      const done = (value: boolean): void => {
+        clearTimeout(timer);
+        this.off("result", onResult);
+        this.off("closed", onClosed);
+        resolve(value);
+      };
+      const onResult = (): void => {
+        if (this.turnsInFlight === 0) done(true);
+      };
+      const onClosed = (): void => done(false);
+      const timer = setTimeout(() => done(false), timeoutMs);
+      timer.unref?.();
+      this.on("result", onResult);
+      this.on("closed", onClosed);
+    });
   }
 
   /** Arm the stall clock while working; every SDK message re-arms it, any other status clears it. */
@@ -146,7 +205,7 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
   }
 
   private setStatus(status: AgentStatus, detail?: string): void {
-    this.lastActivityAt = Date.now();
+    this.lastActivityAt = this.now();
     if (this.status === status && this.statusDetail === detail) {
       this.watchStall();
       return;
@@ -166,6 +225,8 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
       ...(o.model ? { model: o.model } : {}),
       ...(o.effort ? { effort: o.effort } : {}),
       ...(o.mcpServers ? { mcpServers: o.mcpServers } : {}),
+      ...(o.strictMcpConfig !== undefined ? { strictMcpConfig: o.strictMcpConfig } : {}),
+      ...(o.tools ? { tools: [...o.tools] } : {}),
       ...(o.allowedTools ? { allowedTools: [...o.allowedTools] } : {}),
       ...(o.disallowedTools ? { disallowedTools: [...o.disallowedTools] } : {}),
       ...(o.permissionMode ? { permissionMode: o.permissionMode } : {}),
@@ -177,9 +238,19 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
       ...(o.resume ? { resume: o.resume } : {}),
       ...(o.persistSession !== undefined ? { persistSession: o.persistSession } : {}),
       ...(o.systemPromptAppend ? { systemPrompt: { type: "preset", preset: "claude_code", append: o.systemPromptAppend } } : {}),
+      ...(o.toolGuard ? { hooks: { PreToolUse: [{ hooks: [async (input: { tool_name?: unknown; tool_input?: unknown }) => {
+        let decision: PermissionDecision;
+        try {
+          if (typeof input.tool_name !== "string" || !input.tool_input || typeof input.tool_input !== "object" || Array.isArray(input.tool_input)) throw new Error("Malformed SDK tool invocation");
+          decision = o.toolGuard!(input.tool_name, input.tool_input as Record<string, unknown>);
+        } catch { decision = { behavior: "deny", message: "Bounded tool guard failed closed" }; }
+        return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: decision.behavior,
+          ...(decision.behavior === "deny" ? { permissionDecisionReason: decision.message } : decision.updatedInput ? { updatedInput: decision.updatedInput } : {}) } };
+      }] }] } } : {}),
       ...(o.canUseTool
         ? {
             canUseTool: async (toolName: string, input: Record<string, unknown>) => {
+              if (o.toolGuard) return o.toolGuard(toolName, input);
               this.setStatus("blocked", `permission: ${toolName}`);
               try {
                 const decision = await new Promise<PermissionDecision>((resolve) => {
@@ -210,7 +281,7 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
   }
 
   private handle(msg: SdkMessage): void {
-    this.lastActivityAt = Date.now();
+    this.lastActivityAt = this.now();
     this.watchStall();
     if (msg.type === "system" && msg.subtype === "init") {
       this.sessionId = msg.session_id;
@@ -249,6 +320,7 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
       return;
     }
     if (msg.type === "result") {
+      const turn = this.answered < this.sent ? ++this.answered : 0;
       if (this.currentText) this.lastAssistantText = this.currentText;
       this.currentText = "";
       if (typeof msg.total_cost_usd === "number") this.costUsd = msg.total_cost_usd;
@@ -259,13 +331,13 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
       } else {
         this.setStatus("idle");
       }
-      this.emit("result", msg);
+      this.emit("result", msg, turn);
       return;
     }
   }
 
-  /** Push a user turn. Images are Anthropic-shaped image blocks. */
-  send(text: string, images: readonly { pngBase64: string }[] = []): void {
+  /** Push a user turn. Images are Anthropic-shaped image blocks. Returns the turn's number, which its `result` carries. */
+  send(text: string, images: readonly { pngBase64: string }[] = []): number {
     if (this.queue.isClosed) throw new Error("session is closed");
     const content: unknown[] = [];
     for (const img of images) content.push({ type: "image", source: { type: "base64", media_type: "image/png", data: img.pngBase64 } });
@@ -273,10 +345,11 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
     this.currentText = "";
     this.setStatus("working", "thinking");
     this.queue.push({ type: "user", message: { role: "user", content: images.length ? content : text }, parent_tool_use_id: null, session_id: this.sessionId ?? "" });
+    return ++this.sent;
   }
 
   /** Answer a pending permission request. */
-  resolvePermission(allow: boolean, message = "denied by Kevin"): boolean {
+  resolvePermission(allow: boolean, message = "denied by User"): boolean {
     const p = this.pendingPermission;
     if (!p) return false;
     p.resolve(allow ? { behavior: "allow" } : { behavior: "deny", message });
@@ -300,7 +373,10 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
 
   async close(): Promise<void> {
     this.queue.close();
-    await this.interrupt(1500);
+    // A session that was never sent anything has no turn to end, and a CLI still booting may not answer an interrupt
+    // for a while. Any other session gets the bounded interrupt: it may be on a turn no send() asked for (a background
+    // task's notification) or on a folded follow-up, which the turn counter does not see.
+    if (this.sent > 0) await this.interrupt(1500);
     const ended = this.consuming ? Promise.race([this.consuming.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 1500))]) : Promise.resolve(true);
     if (!(await ended)) {
       log.warn("claude session did not end on its own; aborting the process");
@@ -313,10 +389,47 @@ export class ClaudeSession extends EventEmitter<SessionEvents> {
   }
 }
 
-/** Load the real SDK. Kept separate so tests never touch it. */
-export async function loadSdk(): Promise<SdkLike> {
-  const mod = (await import("@anthropic-ai/claude-agent-sdk")) as unknown as SdkLike;
-  return mod;
+let sdkLoad: Promise<SdkLike> | undefined;
+
+/**
+ * Load the real SDK, once per process. Kept separate so tests never touch it.
+ *
+ * The daemon runs under tsx, whose load hook rewrites every ES module that holds an `import(`, source map included. The
+ * SDK's entry is a 1.5 MB bundle that needs no transform, and tsx's copy of it cost ~200 MB of RSS and three times the
+ * CPU of the file as it is, all of it on the event loop (PERF-12). So the entry is handed to Node as it is on disk, by a
+ * load hook of ours: registered after tsx's, it is asked first, and it is gone again once the import settles. A failed
+ * load is not remembered.
+ */
+export function loadSdk(): Promise<SdkLike> {
+  sdkLoad ??= importAsOnDisk("@anthropic-ai/claude-agent-sdk").catch((e: unknown) => {
+    sdkLoad = undefined;
+    throw e;
+  });
+  return sdkLoad;
+}
+
+/**
+ * Import the ES module `specifier` names from its bytes on disk, past every other loader in this process.
+ *
+ * module.registerHooks is still marked active development. Where it is missing or refuses the hook, the module loads
+ * through the plain import and every loader in the process: it costs the memory again, never the SDK.
+ */
+async function importAsOnDisk(specifier: string): Promise<SdkLike> {
+  const url = import.meta.resolve(specifier);
+  let hooks: nodeModule.ModuleHooks | undefined;
+  try {
+    if (typeof nodeModule.registerHooks !== "function") throw new Error("node:module has no registerHooks");
+    hooks = nodeModule.registerHooks({
+      load: (u, context, next) => (u === url ? { format: "module", source: readFileSync(new URL(u)), shortCircuit: true } : next(u, context)),
+    });
+  } catch (e) {
+    log.warn(`the Agent SDK loads through every loader, at the full memory cost: ${(e as Error).message}`);
+  }
+  try {
+    return (await import(url)) as SdkLike;
+  } finally {
+    hooks?.deregister();
+  }
 }
 
 /**
@@ -324,7 +437,7 @@ export async function loadSdk(): Promise<SdkLike> {
  *
  * Two things are removed: the nested-session guards this process may carry when
  * Hormes itself was launched from inside Claude Code, and — when asked — the
- * ANTHROPIC_API_KEY, so the CLI falls back to Kevin's OAuth login.
+ * ANTHROPIC_API_KEY, so the CLI falls back to User's OAuth login.
  */
 export function claudeEnv(base: NodeJS.ProcessEnv = process.env, opts: { readonly dropApiKey?: boolean } = {}): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...base };

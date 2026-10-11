@@ -8,12 +8,12 @@ import { isRecord, str } from "./store.ts";
 /**
  * Where the agent CLIs live on this Mac.
  *
- * None of them can be assumed to be on PATH: Kevin's Codex is the copy bundled inside
+ * None of them can be assumed to be on PATH: User's Codex is the copy bundled inside
  * ChatGPT.app (Codex Desktop), Claude Code installs itself under ~/.local/bin, and the
  * daemon may run with a launchd PATH that has neither. So every runner and the health
  * check ask here, and the answer says where the binary came from — the difference
  * between "Codex 0.153.4 (ChatGPT.app)" and "codex not found: looked in …" is what
- * Kevin needs to hear when something is off.
+ * User needs to hear when something is off.
  *
  * Order for codex: HORMES_CODEX_BIN → PATH → /Applications/ChatGPT.app → /Applications/
  * Codex.app → ~/.codex/bin → nvm / homebrew / ~/.local/bin. The other tools follow the
@@ -21,6 +21,14 @@ import { isRecord, str } from "./store.ts";
  */
 
 export type CliTool = "codex" | "claude" | "gemini" | "opencode" | "cursor-agent" | "amp";
+
+/**
+ * Where a desktop app keeps the Codex CLI, newest layout first. ChatGPT.app since the end of
+ * September 2026: `codex-cli/bin/codex`, a launcher that execs `codex-cli/CodexCLI.app/Contents/
+ * MacOS/codex`; before that, `Resources/codex`. The brain's own lookup (brain/src/codex.ts
+ * CODEX_IN_BUNDLE) lists the same three.
+ */
+export const CODEX_IN_BUNDLE = ["Contents/Resources/codex-cli/bin/codex", "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "Contents/Resources/codex"] as const;
 
 export interface FoundCli {
   readonly tool: CliTool;
@@ -61,8 +69,7 @@ export async function cliCandidates(tool: CliTool, opts: FindCliOptions = {}): P
   if (override) out.push({ path: expandTilde(override, home), origin: overrideVar(tool) });
   for (const dir of (env["PATH"] ?? "").split(delimiter)) if (dir) out.push({ path: join(dir, tool), origin: "PATH" });
   if (tool === "codex") {
-    out.push({ path: join(apps, "ChatGPT.app", "Contents", "Resources", "codex"), origin: "ChatGPT.app" });
-    out.push({ path: join(apps, "Codex.app", "Contents", "Resources", "codex"), origin: "Codex.app" });
+    for (const app of ["ChatGPT.app", "Codex.app"]) for (const inside of CODEX_IN_BUNDLE) out.push({ path: join(apps, app, inside), origin: app });
     out.push({ path: join(home, ".codex", "bin", "codex"), origin: "~/.codex/bin" });
   }
   if (tool === "claude") {

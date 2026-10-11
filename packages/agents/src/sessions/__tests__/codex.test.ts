@@ -11,10 +11,13 @@ import { SessionsConnector, normalizeSessionTool, type SessionsConnectorOptions 
 import { classifyCommand, type AgentProcess } from "../processes.ts";
 import { speakable } from "../runners/codex.ts";
 
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
+
 // ------------------------------------------------------------------ fixtures ---
 // The Codex driver, exercised end to end against a fake `codex` (fixtures/fake-codex.mjs)
 // that speaks the `codex exec --json` event shapes recorded from codex-cli 0.153.4 on
-// Kevin's machine (fixtures/codex-exec-events.jsonl, fixtures/codex-exec-reconnect-events.jsonl),
+// User's machine (fixtures/codex-exec-events.jsonl, fixtures/codex-exec-reconnect-events.jsonl),
 // answers `--version` and `queue` the way the real one does (exit 0 whenever the rollout
 // exists, daemon or not), and appends to the rollout like the real one. Discovery is pinned
 // to the temp home, so the real ChatGPT.app copy is never touched.
@@ -50,7 +53,7 @@ function makeHome(): Home {
   const c1Path = join(codexRoot, "sessions", "2026", "09", "01", `rollout-2026-09-01T09-00-00-${C1}.jsonl`);
   const cwd = join(home, "demo-site");
   mkdirSync(cwd);
-  writeFileSync(c1Path, readFileSync(c1Path, "utf8").replaceAll("/Users/kevinliu/demo-site", cwd));
+  writeFileSync(c1Path, readFileSync(c1Path, "utf8").replaceAll("/Users/user/demo-site", cwd));
   for (const [p, when] of [
     [c1Path, "2026-09-01T09:05:00.000Z"],
     [join(codexRoot, "archived_sessions", `rollout-2026-08-30T12-00-00-${C2}.jsonl`), "2026-08-30T12:01:00.000Z"],
@@ -91,7 +94,7 @@ function connector(h: Home, over: { procs?: AgentProcess[]; env?: Record<string,
   mkdirSync(emptyBin, { recursive: true });
   return new SessionsConnector({
     home: h.home,
-    now: Date.now,
+    now: () => NOW, // the fixtures are dated 2026-09-01; the real clock left the 14-day window on 2026-09-15
     processes: async () => over.procs ?? [],
     processCacheMs: 0,
     pollMs: 30,
@@ -157,6 +160,10 @@ test("findCli: HORMES_CODEX_BIN, then PATH, then ChatGPT.app, Codex.app, ~/.code
     assert.deepEqual(await findCli("codex", opts), { tool: "codex", path: codexApp, origin: "Codex.app" });
     const chatgpt = install(join(apps, "ChatGPT.app", "Contents", "Resources", "codex"));
     assert.deepEqual(await findCli("codex", opts), { tool: "codex", path: chatgpt, origin: "ChatGPT.app" }, "the copy Codex Desktop ships beats a stand-alone Codex.app");
+    const binary = install(join(apps, "ChatGPT.app", "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex"));
+    assert.deepEqual(await findCli("codex", opts), { tool: "codex", path: binary, origin: "ChatGPT.app" }, "ChatGPT.app's layout since the end of September 2026 beats the old Resources/codex");
+    const launcher = install(join(apps, "ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex"));
+    assert.deepEqual(await findCli("codex", opts), { tool: "codex", path: launcher, origin: "ChatGPT.app" }, "and its launcher beats the binary it execs");
     const onPath = install(join(pathDir, "codex"));
     assert.deepEqual(await findCli("codex", opts), { tool: "codex", path: onPath, origin: "PATH" });
     const override = install(join(home, "somewhere", "codex"));
@@ -407,7 +414,7 @@ test("send(): a writer lock nobody holds is a leftover → resumed, no queue; de
     // ps/lsof down: nobody can say whether the thread is open. A queue would look delivered either way; refuse, as for Claude Code.
     const degraded = new SessionsConnector({
       home: h.home,
-      now: Date.now,
+      now: () => NOW, // the fixtures are dated 2026-09-01; the real clock left the 14-day window on 2026-09-15
       processCacheMs: 0,
       codexBin: h.fake,
       applicationsDir: join(h.home, "Applications"),
@@ -441,7 +448,7 @@ test("send(): sub-agent and automation rollouts are refused by id with nothing s
   }
 });
 
-test("send(): between turns, ownership is asked again — Kevin opening the thread in Codex turns the next send into a queue", async () => {
+test("send(): between turns, ownership is asked again — User opening the thread in Codex turns the next send into a queue", async () => {
   const h = makeHome();
   try {
     h.signIn();
@@ -561,7 +568,7 @@ test("interrupt(): SIGINT ends the turn; a child that ignores it is SIGKILLed af
     const after = (await c.list()).find((a) => a.id === ID1);
     assert.equal(after?.status, "idle");
     assert.equal(after?.detail, "codex · 3 msgs · demo-site · resumed: interrupted");
-    assert.ok(Date.now() - t0 < 1_000, "SIGINT was enough");
+    assert.ok(Date.now() - t0 < 1_000 * RUNNER_SLACK, `SIGINT was enough: under ${1_000 * RUNNER_SLACK} ms (${Date.now() - t0} ms)`);
     await c.closeAll();
 
     const stubborn = connector(h, { env: { FAKE_CODEX_MODE: "hang", FAKE_CODEX_IGNORE_SIGINT: "1" }, opts: { codexKillGraceMs: 100 } });
@@ -571,7 +578,7 @@ test("interrupt(): SIGINT ends the turn; a child that ignores it is SIGKILLed af
     const t1 = Date.now();
     await stubborn.interrupt(ID1);
     assert.equal((await stubborn.list()).find((a) => a.id === ID1)?.status, "idle");
-    assert.ok(Date.now() - t1 >= 90 && Date.now() - t1 < 1_500, `SIGKILL after the grace (${Date.now() - t1} ms)`);
+    assert.ok(Date.now() - t1 >= 90 && Date.now() - t1 < 1_500 * RUNNER_SLACK, `SIGKILL after the grace, under ${1_500 * RUNNER_SLACK} ms (${Date.now() - t1} ms)`);
     await stubborn.closeAll();
 
     const budget = connector(h, { env: { FAKE_CODEX_MODE: "hang" }, opts: { codexTurnBudgetMs: 200, codexKillGraceMs: 100 } });

@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { DaemonServer, type EngineLike } from "@hormes/daemon";
 import type { ToolResult } from "@hormes/hands";
 import { resultText } from "../runner.ts";
-import { RAILS, SelfEditManager, firstFailureLine, railsNamed, railsTouched, saysApplyAnyway, selfEditDoctorRow, selfEditPrompt } from "../selfedit.ts";
+import { DEFAULT_CHECKS, RAILS, SelfEditManager, firstFailureLine, railsNamed, railsTouched, saysApplyAnyway, selfEditDoctorRow, selfEditPrompt, type SelfEditRecord } from "../selfedit.ts";
 import { makeRunner, makeSink, makeTask } from "./fakes.ts";
 
 /** The shared stand-in for the Codex CLI (speaks `codex exec --json`); see packages/agents. */
@@ -68,6 +68,13 @@ function fakeRepo(root: string): string {
   return repo;
 }
 
+async function approveSelfEdit(h: Pick<ReturnType<typeof makeRunner>, "runner" | "toolset">, task: string) {
+  const args = { task };
+  assert.equal((await h.runner.run("self_edit", args)).result.kind, "needs-confirmation", "starting a coding agent requires a separate approval");
+  h.toolset.confirmations.arm();
+  return h.runner.run("self_edit", args);
+}
+
 interface Harness {
   root: string;
   repo: string;
@@ -75,6 +82,17 @@ interface Harness {
   codexHome: string;
   logFile: string;
 }
+
+test("self-edit verification includes every affected build, including protocol mirrors and installer assets", () => {
+  const dir = mkdtempSync(join(tmpdir(), "jh-build-selection-"));
+  const names = (changed: string[], lockfileChanged = false) => DEFAULT_CHECKS({ dir, changed, lockfileChanged }).map((c) => c.name);
+  assert.deepEqual(names(["README.md"]), ["typecheck", "test"]);
+  assert.deepEqual(names(["packages/hands/native/OwnerApproval.swift"]), ["typecheck", "test", "hands build"]);
+  assert.deepEqual(names(["packages/protocol/src/index.ts"]), ["typecheck", "test", "swift build", "hands build", "workspace typecheck", "workspace build"]);
+  for (const path of ["apps/workspace/src/App.tsx", "packages/engine/src/work/canvas-plan.ts"]) assert.deepEqual(names([path]), ["typecheck", "test", "workspace typecheck", "workspace build"]);
+  assert.deepEqual(names(["scripts/install.sh"]), ["typecheck", "test"]);
+  assert.deepEqual(names([], true), ["typecheck", "test", "workspace typecheck", "workspace build"]);
+});
 
 function harness(): Harness {
   const root = mkdtempSync(join(tmpdir(), "jh-selfedit-"));
@@ -98,6 +116,20 @@ function manager(h: Harness, env: Record<string, string> = {}, extra: Partial<Co
     ...extra,
   });
 }
+
+test("a failed native-helper build prevents declaring a self-edit verified", async () => {
+  const h = harness();
+  const pkg = JSON.parse(readFileSync(join(h.repo, "package.json"), "utf8"));
+  pkg.scripts["build:hands"] = "node broken-hands.mjs";
+  writeFileSync(join(h.repo, "package.json"), JSON.stringify(pkg));
+  writeFileSync(join(h.repo, "broken-hands.mjs"), 'console.error("Error: Swift helper failed"); process.exit(1);');
+  git(h.repo, "add", "."); git(h.repo, "commit", "-qm", "native build fixture");
+  const m = manager(h, { FAKE_EDIT_FILE: "packages/hands/native/Fixture.swift", FAKE_EDIT_TEXT: "invalid Swift" });
+  const { record } = await m.edit("change the native helper");
+  assert.equal(record.green, false);
+  assert.deepEqual(record.checks.map((c) => `${c.name}:${c.ok}`), ["typecheck:true", "test:true", "hands build:false"]);
+  assert.match(record.checks.at(-1)?.firstFailure ?? "", /Swift helper failed/);
+});
 
 test("self_edit: a worktree, the fake Codex edits it under workspace-write, the change is committed and the checks are green", async () => {
   const h = harness();
@@ -159,7 +191,7 @@ test("self_edit: red checks carry the first failure line; a rail is flagged; not
   const rail = manager(h, { FAKE_EDIT_FILE: "packages/core/src/policy.ts", FAKE_EDIT_TEXT: "export const LOOSER = true;" });
   const touched = await rail.edit("relax the policy");
   assert.deepEqual(touched.record.rails, ["the policy (packages/core/src/policy.ts)"]);
-  assert.match(touched.summary, /touches Hormes's own safety rails: the policy \(packages\/core\/src\/policy\.ts\)\. Applying it needs Kevin to name that rail himself\./);
+  assert.match(touched.summary, /touches Hormes's own safety rails: the policy \(packages\/core\/src\/policy\.ts\)\. Applying it needs User to name that rail\./);
 
   const none = manager(h, {});
   const nothing = await none.edit("do nothing");
@@ -182,7 +214,7 @@ test("self_edit: red checks carry the first failure line; a rail is flagged; not
   await assert.rejects(manager(h, {}).edit("x"), /on branch feature, not main/);
 });
 
-test("self_edit: Kevin's stop kills the agent; no agent means a manual worktree and self_check runs the checks afterwards", async () => {
+test("self_edit: User's stop kills the agent; no agent means a manual worktree and self_check runs the checks afterwards", async () => {
   const h = harness();
   const hang = manager(h, { FAKE_CODEX_MODE: "hang" });
   const abort = new AbortController();
@@ -217,7 +249,7 @@ test("self_apply through the runner: the question comes first, a yes fast-forwar
   const log = makeSink();
   runner.attach(log.sink, makeTask("change hormes so other.ts exports y"));
 
-  const edited = resultText((await runner.run("self_edit", { task: "export y from other.ts" })).result);
+  const edited = resultText((await approveSelfEdit({ runner, toolset }, "export y from other.ts")).result);
   const id = /Self-edit (se_\w+)/.exec(edited)?.[1];
   assert.ok(id, edited);
   assert.match(edited, /Checks green/);
@@ -230,6 +262,8 @@ test("self_apply through the runner: the question comes first, a yes fast-forwar
   runner.attach(log.sink, makeTask(`apply ${id}`));
   const stale = await runner.run("self_apply", { id });
   assert.match(resultText(stale.result), /refused: the worktree of se_\w+ changed since its checks ran; call self_check/);
+  assert.equal((await runner.run("self_check", { id })).result.kind, "needs-confirmation");
+  toolset.confirmations.arm();
   const rechecked = resultText((await runner.run("self_check", { id })).result);
   assert.match(rechecked, /changed 2 files/);
 
@@ -241,7 +275,7 @@ test("self_apply through the runner: the question comes first, a yes fast-forwar
   assert.deepEqual(restarts, []);
   assert.equal(git(h.repo, "log", "--oneline", "main").split("\n").length, 1, "nothing merged yet");
 
-  // Kevin says yes: the delegator arms the pending confirmation and the brain calls the same tool again.
+  // User says yes: the delegator arms the pending confirmation and the brain calls the same tool again.
   assert.ok(toolset.confirmations.arm());
   const applied = resultText((await runner.run("self_apply", { id })).result);
   assert.match(applied, /^Applied self-edit se_\w+ to main \([0-9a-f]{7}\): 2 files\. Engine code changed, so Hormes restarts on the new code in 0 seconds/);
@@ -263,7 +297,7 @@ test("self_apply through the runner: the question comes first, a yes fast-forwar
   assert.match(resultText((await runner.run("self_apply", { id: "se_nope" })).result), /no self-edit se_nope/);
 });
 
-test("self_apply: red checks are refused unless Kevin says anyway; a touched rail is refused unless he names it; discard removes everything; a README change needs no restart", async () => {
+test("self_apply: red checks are refused unless User says anyway; a touched rail is refused unless he names it; discard removes everything; a README change needs no restart", async () => {
   const h = harness();
   const restarts: string[] = [];
   const mk = (edit: { file: string; text: string }) => {
@@ -274,13 +308,13 @@ test("self_apply: red checks are refused unless Kevin says anyway; a touched rai
   // Red checks.
   const red = mk({ file: "FAIL", text: "boom" });
   red.runner.attach(makeSink().sink, makeTask("break things"));
-  const redId = /Self-edit (se_\w+)/.exec(resultText((await red.runner.run("self_edit", { task: "break the tests" })).result))![1]!;
+  const redId = /Self-edit (se_\w+)/.exec(resultText((await approveSelfEdit(red, "break the tests")).result))![1]!;
   red.runner.attach(makeSink().sink, makeTask(`apply ${redId}`));
-  assert.match(resultText((await red.runner.run("self_apply", { id: redId })).result), /refused: the checks were red \(test: not ok 1 - boom.*\); Kevin has to say to apply it anyway/);
+  assert.match(resultText((await red.runner.run("self_apply", { id: redId })).result), /refused: the checks were red \(test: not ok 1 - boom.*\); User has to say to apply it anyway/);
   red.runner.attach(makeSink().sink, makeTask(`apply ${redId} anyway, I know the tests fail`));
   const redAsk = await red.runner.run("self_apply", { id: redId });
   assert.equal(redAsk.result.kind, "needs-confirmation");
-  assert.match(resultText(redAsk.result), /checks red, applying anyway on Kevin's word/);
+  assert.match(resultText(redAsk.result), /checks red, applying anyway on User's word/);
   assert.ok(saysApplyAnyway("apply it anyway") && saysApplyAnyway("even though the tests fail") && !saysApplyAnyway("apply it"));
   // Discard instead.
   const discarded = resultText((await red.runner.run("self_discard", { id: redId })).result);
@@ -288,14 +322,14 @@ test("self_apply: red checks are refused unless Kevin says anyway; a touched rai
   assert.equal(red.runner.selfEdit.get(redId)?.status, "discarded");
   assert.ok(!git(h.repo, "branch", "--list", `hormes/self-${redId}`));
 
-  // A rail: the policy file. Kevin must name it.
+  // A rail: the policy file. User must name it.
   const rail = mk({ file: "packages/core/src/policy.ts", text: "export const LOOSER = true;" });
   rail.runner.attach(makeSink().sink, makeTask("loosen the never list"));
-  const railText = resultText((await rail.runner.run("self_edit", { task: "loosen the never list" })).result);
+  const railText = resultText((await approveSelfEdit(rail, "loosen the never list")).result);
   const railId = /Self-edit (se_\w+)/.exec(railText)![1]!;
   assert.match(railText, /touches Hormes's own safety rails: the policy/);
   rail.runner.attach(makeSink().sink, makeTask(`apply ${railId}`));
-  assert.match(resultText((await rail.runner.run("self_apply", { id: railId })).result), /refused: this change touches Hormes's own safety rails \(the policy \(packages\/core\/src\/policy\.ts\)\) and Kevin's request did not name them/);
+  assert.match(resultText((await rail.runner.run("self_apply", { id: railId })).result), /refused: this change touches Hormes's own safety rails \(the policy \(packages\/core\/src\/policy\.ts\)\) and User's request did not name them/);
   rail.runner.attach(makeSink().sink, makeTask(`yes apply ${railId}, I want the policy change`));
   const railAsk = await rail.runner.run("self_apply", { id: railId });
   assert.equal(railAsk.result.kind, "needs-confirmation");
@@ -309,7 +343,7 @@ test("self_apply: red checks are refused unless Kevin says anyway; a touched rai
   restarts.length = 0;
   const docs = mk({ file: "README.md", text: "More words." });
   docs.runner.attach(makeSink().sink, makeTask("extend the readme"));
-  const docsId = /Self-edit (se_\w+)/.exec(resultText((await docs.runner.run("self_edit", { task: "extend the readme" })).result))![1]!;
+  const docsId = /Self-edit (se_\w+)/.exec(resultText((await approveSelfEdit(docs, "extend the readme")).result))![1]!;
   docs.runner.attach(makeSink().sink, makeTask(`apply ${docsId}`));
   await docs.runner.run("self_apply", { id: docsId });
   docs.toolset.confirmations.arm();
@@ -321,15 +355,19 @@ test("self_apply: red checks are refused unless Kevin says anyway; a touched rai
 
 test("rails: touched by file, or by changed lines in shared files; named by keyword or file name", () => {
   const diffs: Record<string, string> = {
-    "packages/brain/src/brain.ts": "@@ -60,3 +60,4 @@ export function brainSystemPrompt(userName = \"Kevin\"): string {\n-  return `You are`;\n+  return `You are looser`;\n",
+    "packages/brain/src/brain.ts": "@@ -60,3 +60,4 @@ export function brainSystemPrompt(userName = \"User\"): string {\n-  return `You are`;\n+  return `You are looser`;\n",
     "packages/brain/src/other.ts": "@@ -1 +1 @@\n-a\n+b\n",
     "packages/hands/src/toolset.ts": "@@ -100,2 +100,2 @@ export class ComputerToolset {\n-    const scroll = 60;\n+    const scroll = 61;\n",
   };
   const diffOf = (f: string): string => diffs[f] ?? "";
   assert.deepEqual(railsTouched(["packages/core/src/policy.ts"], diffOf), ["the policy (packages/core/src/policy.ts)"]);
+  const voiceRail = "the spoken learning checks (packages/engine/src/work/spoken-answer.ts)";
+  assert.deepEqual(railsTouched(["packages/engine/src/work/spoken-answer.ts"], diffOf), [voiceRail], "numeric and assistance validation is a whole-file rail");
+  assert.deepEqual(railsNamed([voiceRail], "change the voice checker"), { ok: true, missing: [] });
+  assert.deepEqual(railsNamed([voiceRail], "make the lesson look nicer"), { ok: false, missing: [voiceRail] });
   assert.deepEqual(railsTouched(["packages/brain/src/brain.ts"], diffOf), ["the brain's standing orders (brainSystemPrompt in brain.ts)"]);
   assert.deepEqual(railsTouched(["packages/brain/src/other.ts"], diffOf), []);
-  assert.deepEqual(railsTouched(["packages/hands/src/toolset.ts"], diffOf), [], "toolset.ts outside the handshake is ordinary code");
+  assert.deepEqual(railsTouched(["packages/hands/src/toolset.ts"], diffOf), ["the confirmation handshake (ConfirmationState / YES_PATTERN)"], "approval enforcement is protected as a whole file");
   assert.deepEqual(railsTouched(["packages/hands/src/toolset.ts"], () => "@@ -1 +1 @@\n-export const YES_PATTERN = /yes/;\n+export const YES_PATTERN = /.*/;\n"), ["the confirmation handshake (ConfirmationState / YES_PATTERN)"]);
   assert.deepEqual(railsTouched(["apps/mac/Sources/Hormes/Wake/WakeListener.swift", "packages/live/src/instructions.ts"], diffOf), ["the voice instructions (packages/live/src/instructions.ts)", "the wake gate (apps/mac/Sources/Hormes/Wake)"]);
   assert.deepEqual(railsTouched(["scripts/build-mac.ts"], () => "@@ -1 +1 @@\n-const sign = identity;\n+const sign = '-';\n"), ["app signing (scripts/build-mac.ts)"]);
@@ -358,9 +396,14 @@ test("self_status and doctor row with nothing pending", async (t: TestContext) =
 /** An engine that only records the commands the daemon hands it. */
 class RecordingEngine extends EventEmitter implements EngineLike {
   commands: unknown[] = [];
-  ledger = { read: () => [], days: () => [], sessions: () => [], readSession: () => [] };
+  ledger = { read: () => [], days: () => [], sessions: () => [], readSession: () => [], search: () => [], readChain: () => ({ rows: [], truncated: false }) };
+  memory = { list: () => [], search: async () => [] };
   config = { stateDir: "/tmp/jh-test" };
   runner = { run: async (name: string): Promise<{ result: ToolResult }> => ({ result: { kind: "text", text: `${name} ok` } }) };
+  runnerFor(): undefined {
+    return undefined;
+  }
+  dropViewers(): void {}
   snapshot(): unknown {
     return {};
   }
@@ -369,7 +412,8 @@ class RecordingEngine extends EventEmitter implements EngineLike {
   }
   feedMic(): void {}
   reportInputLevel(): void {}
-  setMicrophonePermission(): void {}
+  setPermission(): void {}
+  setPermissions(): void {}
   registerOwnPid(): void {}
   ear(): void {}
   problem(): void {}
@@ -385,7 +429,7 @@ test("self_apply without an engine hook sends daemon.restart over the daemon's o
   const env = { ...process.env, FAKE_EDIT_FILE: "packages/engine/src/other.ts", FAKE_EDIT_TEXT: "export const z = 3;" };
   const { runner, toolset } = makeRunner({ home: h.root, socketPath, restartDelayMs: 0, repoRoot: h.repo, env, selfEdit: { repoRoot: h.repo, codexBin: h.bin, codexHome: h.codexHome, claude: false, env } });
   runner.attach(makeSink().sink, makeTask("export z"));
-  const id = /Self-edit (se_\w+)/.exec(resultText((await runner.run("self_edit", { task: "export z" })).result))![1]!;
+  const id = /Self-edit (se_\w+)/.exec(resultText((await approveSelfEdit({ runner, toolset }, "export z")).result))![1]!;
   runner.attach(makeSink().sink, makeTask(`apply ${id}`));
   assert.equal((await runner.run("self_apply", { id })).result.kind, "needs-confirmation");
   toolset.confirmations.arm();
@@ -404,8 +448,8 @@ test("rails: security-critical files are rails as a whole, re-exports and new co
   assert.deepEqual(railsTouched(["packages/core/src/index.ts", "packages/core/src/policy-open.ts"], () => "@@ -1 +1 @@\n-export * from './policy.ts'\n+export * from './policy-open.ts'\n"), ["the core exports (packages/core/src/index.ts, or a new module next to the policy)"]);
   assert.deepEqual(railsTouched(["packages/core/src/env.ts", "packages/core/src/ledger.ts", "packages/core/src/__tests__/policy.test.ts"], () => "@@ -1 +1 @@\n-a\n+b\n"), [], "the ordinary core modules and tests are not rails");
   assert.deepEqual(railsTouched(["packages/brain/src/shell.ts", "packages/brain/src/files.ts", "packages/brain/src/index.ts"], () => ""), ["the secret scrubbing and redaction (packages/brain/src/shell.ts)", "the file tools' symlink handling (packages/brain/src/files.ts)", "the brain exports (packages/brain/src/index.ts)"]);
-  assert.deepEqual(railsTouched(["packages/protocol/src/index.ts"], () => "@@ -266 +266 @@\n-export const SECRET_KEYS = [\"OPENAI_API_KEY\"] as const;\n+export const SECRET_KEYS = [] as const;\n"), ["the secret key list (SECRET_KEYS in packages/protocol)"]);
-  assert.deepEqual(railsTouched(["packages/protocol/src/index.ts"], () => "@@ -10 +10 @@\n-export type Foo = 1;\n+export type Foo = 2;\n"), [], "the rest of the protocol is ordinary");
+  assert.deepEqual(railsTouched(["packages/protocol/src/index.ts"], () => "@@ -266 +266 @@\n-export const SECRET_KEYS = [\"OPENAI_API_KEY\"] as const;\n+export const SECRET_KEYS = [] as const;\n"), ["the approval protocol (packages/protocol/src/index.ts)"]);
+  assert.deepEqual(railsTouched(["packages/protocol/src/index.ts"], () => "@@ -10 +10 @@\n-export type Foo = 1;\n+export type Foo = 2;\n"), ["the approval protocol (packages/protocol/src/index.ts)"], "the approval protocol is protected as a whole file");
   assert.deepEqual(railsTouched(["packages/brain/src/claude.ts"], () => "@@ -260 +260 @@\n-    if (redirect[toolName]) return { behavior: \"deny\" };\n+    if (redirect[toolName]) return { behavior: \"allow\" };\n"), ["the Claude Code permission gate (packages/brain/src/claude.ts)"]);
 
   const policy = RAILS[0]!.name;
@@ -416,7 +460,7 @@ test("rails: security-critical files are rails as a whole, re-exports and new co
   assert.deepEqual(railsNamed([prompt], "change the prompts"), { ok: true, missing: [] }, "a plural still names it");
   assert.deepEqual(railsNamed([policy], "apply the policyx change"), { ok: false, missing: [policy] });
   // Hormes's own summary must not count: the runner strips its lines, and the words alone are judged here.
-  const hormesSummary = "Hormes: This change touches Hormes's own safety rails: the policy (packages/core/src/policy.ts). Applying it needs Kevin to name that rail himself.";
+  const hormesSummary = "Hormes: This change touches Hormes's own safety rails: the policy (packages/core/src/policy.ts). Applying it needs User to name that rail.";
   assert.deepEqual(railsNamed([policy], hormesSummary), { ok: true, missing: [] }, "the words themselves name it — which is why the runner never feeds Hormes's lines in");
 
   assert.ok(saysApplyAnyway("apply it anyway"));
@@ -429,39 +473,39 @@ test("rails: security-critical files are rails as a whole, re-exports and new co
   assert.ok(!saysApplyAnyway("regardless of the weather, open slack"));
 });
 
-test("self_apply reads Kevin's words only: a rail named in Hormes's own dialogue line does not count, in his own line it does; red checks likewise", async () => {
+test("self_apply reads User's words only: a rail named in Hormes's own dialogue line does not count, in his own line it does; red checks likewise", async () => {
   const h = harness();
   const restarts: string[] = [];
   const env = { ...process.env, FAKE_EDIT_FILE: "packages/core/src/policy.ts", FAKE_EDIT_TEXT: "export const LOOSER = true;" };
   const { runner, toolset } = makeRunner({ home: h.root, requestRestart: (r) => restarts.push(r), restartDelayMs: 0, repoRoot: h.repo, env, selfEdit: { repoRoot: h.repo, codexBin: h.bin, codexHome: h.codexHome, claude: false, env } });
   runner.attach(makeSink().sink, makeTask("loosen the never list"));
-  const id = /Self-edit (se_\w+)/.exec(resultText((await runner.run("self_edit", { task: "loosen the never list" })).result))![1]!;
+  const id = /Self-edit (se_\w+)/.exec(resultText((await approveSelfEdit({ runner, toolset }, "loosen the never list")).result))![1]!;
 
-  // The dialogue carries Hormes's summary, which names the rail and says "anyway"; Kevin only said "yes".
-  const dialogue = `Kevin: apply it\nHormes: Apply the change to Hormes and restart it? Self-edit ${id}: It changes 1 file (policy.ts); checks green, applying anyway on Kevin's word; it touches the policy (packages/core/src/policy.ts).\nKevin: yes`;
-  runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue, kevinDialogue: "apply it\nyes" }));
+  // The dialogue carries Hormes's summary, which names the rail and says "anyway"; User only said "yes".
+  const dialogue = `User: apply it\nHormes: Apply the change to Hormes and restart it? Self-edit ${id}: It changes 1 file (policy.ts); checks green, applying anyway on User's word; it touches the policy (packages/core/src/policy.ts).\nUser: yes`;
+  runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue, userDialogue: "apply it\nyes" }));
   const refused = await runner.run("self_apply", { id });
   assert.equal(refused.result.kind, "error", resultText(refused.result));
-  assert.match(resultText(refused.result), /touches Hormes's own safety rails .*Kevin's request did not name them/);
-  // Without kevinDialogue at all, only the request counts (fail closed).
+  assert.match(resultText(refused.result), /touches Hormes's own safety rails .*User's request did not name them/);
+  // Without userDialogue at all, only the request counts (fail closed).
   runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue }));
   assert.match(resultText((await runner.run("self_apply", { id })).result), /did not name them/);
-  // Kevin's own earlier line names the policy: the guard passes and the question is asked.
-  runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue, kevinDialogue: "apply the policy change\nyes" }));
+  // User's own earlier line names the policy: the guard passes and the question is asked.
+  runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue, userDialogue: "apply the policy change\nyes" }));
   const ask = await runner.run("self_apply", { id });
   assert.equal(ask.result.kind, "needs-confirmation", resultText(ask.result));
   toolset.confirmations.arm();
   assert.match(resultText((await runner.run("self_apply", { id })).result), /^Applied self-edit/);
   assert.deepEqual(restarts, [`self-update ${id}`]);
 
-  // Red checks: "anyway" in Hormes's line is not Kevin's word.
+  // Red checks: "anyway" in Hormes's line is not User's word.
   const redEnv = { ...process.env, FAKE_EDIT_FILE: "FAIL", FAKE_EDIT_TEXT: "boom" };
   const red = makeRunner({ home: h.root, requestRestart: () => undefined, restartDelayMs: 0, repoRoot: h.repo, env: redEnv, selfEdit: { repoRoot: h.repo, codexBin: h.bin, codexHome: h.codexHome, claude: false, env: redEnv, worktreesDir: join(h.root, "worktrees") } });
   red.runner.attach(makeSink().sink, makeTask("break the tests"));
-  const redId = /Self-edit (se_\w+)/.exec(resultText((await red.runner.run("self_edit", { task: "break the tests" })).result))![1]!;
-  red.runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue: "Hormes: the checks are red; apply it anyway?\nKevin: yes", kevinDialogue: "yes" }));
+  const redId = /Self-edit (se_\w+)/.exec(resultText((await approveSelfEdit(red, "break the tests")).result))![1]!;
+  red.runner.attach(makeSink().sink, makeTask("yes", undefined, { dialogue: "Hormes: the checks are red; apply it anyway?\nUser: yes", userDialogue: "yes" }));
   assert.match(resultText((await red.runner.run("self_apply", { id: redId })).result), /refused: the checks were red/);
-  red.runner.attach(makeSink().sink, makeTask("yes", undefined, { kevinDialogue: "apply it anyway, I know the tests fail\nyes" }));
+  red.runner.attach(makeSink().sink, makeTask("yes", undefined, { userDialogue: "apply it anyway, I know the tests fail\nyes" }));
   assert.equal((await red.runner.run("self_apply", { id: redId })).result.kind, "needs-confirmation");
 });
 
@@ -472,7 +516,7 @@ test("self_apply with neither a restart hook nor a daemon socket says so instead
   const { runner, toolset, dir } = makeRunner({ home: h.root, restartDelayMs: 0, repoRoot: h.repo, env, selfEdit: { repoRoot: h.repo, codexBin: h.bin, codexHome: h.codexHome, claude: false, env } });
   assert.equal(existsSync(join(dir, "hormes.sock")), false);
   runner.attach(makeSink().sink, makeTask("export w"));
-  const id = /Self-edit (se_\w+)/.exec(resultText((await runner.run("self_edit", { task: "export w" })).result))![1]!;
+  const id = /Self-edit (se_\w+)/.exec(resultText((await approveSelfEdit({ runner, toolset }, "export w")).result))![1]!;
   runner.attach(makeSink().sink, makeTask(`apply ${id}`));
   assert.equal((await runner.run("self_apply", { id })).result.kind, "needs-confirmation");
   toolset.confirmations.arm();
@@ -482,4 +526,38 @@ test("self_apply with neither a restart hook nor a daemon socket says so instead
   assert.ok(!/restarts on the new code/.test(applied), applied);
   assert.equal(runner.selfEdit.restartPending, undefined, "nothing was scheduled, so nothing is pending");
   assert.ok(!/restart is pending/.test(await runner.selfEdit.status()));
+});
+
+// ------------------------------------------------------------ the user's name ---
+
+test("the user's name: the agent prompt and the spoken summary say the name the runner passes, with no pronoun after it; the default renders as before", () => {
+  const user = selfEditPrompt("fix the typo", "/wt");
+  const sam = selfEditPrompt("fix the typo", "/wt", "Sam");
+  assert.doesNotMatch(sam, /User/);
+  assert.match(sam, /^You are making one change to Hormes, Sam's voice-first Mac assistant, in a git worktree at \/wt \(branch of main\)\. Sam asked, out loud: "fix the typo"/);
+  assert.equal(sam.replaceAll("Sam", "User"), user, "only the name moves");
+  const rec = {
+    id: "se_name",
+    task: "relax the policy",
+    branch: "hormes/self-se_name",
+    dir: "/wt",
+    createdAt: 1,
+    updatedAt: 1,
+    status: "checked",
+    agent: "codex",
+    agentOk: true,
+    agentSummary: "",
+    files: ["packages/core/src/policy.ts"],
+    diffStat: " 1 file changed, 1 insertion(+)",
+    checks: [{ name: "typecheck", ok: true, ms: 1 }],
+    green: true,
+    rails: ["the policy (packages/core/src/policy.ts)"],
+  } satisfies SelfEditRecord;
+  const worktreesDir = join(tmpdir(), "jh-selfedit-name");
+  const forSam = new SelfEditManager({ worktreesDir, codexBin: false, claude: false, userName: () => "Sam" }).summary(rec);
+  const forUser = new SelfEditManager({ worktreesDir, codexBin: false, claude: false }).summary(rec);
+  assert.doesNotMatch(forSam, /User/);
+  assert.match(forSam, /This change touches Hormes's own safety rails: the policy \(packages\/core\/src\/policy\.ts\)\. Applying it needs Sam to name that rail\. Say the word to apply se_name/);
+  assert.match(forUser, /Applying it needs User to name that rail\./);
+  assert.equal(forSam.replaceAll("Sam", "User"), forUser, "only the name moves");
 });

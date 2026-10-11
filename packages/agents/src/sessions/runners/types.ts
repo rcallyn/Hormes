@@ -1,3 +1,4 @@
+import type { CodingProfile } from "../../claude-code/coding-profile.ts";
 import type { AgentStatus } from "@hormes/protocol";
 import type { PermissionDecision } from "../../claude-code/session.ts";
 import type { ClaudeSession } from "../../claude-code/session.ts";
@@ -37,6 +38,7 @@ export type RunSink = (event: RunEvent, handle: RunHandle) => void;
 
 /** A session this process is driving: a Claude Code SDK session or a Codex thread run through `codex exec`. */
 export interface RunHandle {
+  readonly codingProfile?: CodingProfile | undefined;
   readonly tool: SessionTool;
   /** The tool's own id; for a freshly started thread, known once the tool reports it. */
   readonly sessionId: string | undefined;
@@ -50,7 +52,7 @@ export interface RunHandle {
   readonly pids: readonly number[];
   /** Resolves once the run is up (Codex: thread id known; Claude: session started). Rejects when it never got there. */
   readonly ready: Promise<void>;
-  /** Tool the run is waiting on Kevin for, when the driver itself asks (Claude Code's canUseTool). */
+  /** Tool the run is waiting on User for, when the driver itself asks (Claude Code's canUseTool). */
   readonly pendingPermissionTool: string | undefined;
   /** Push another turn. Throws when the handle is closed. */
   send(text: string): void;
@@ -79,6 +81,7 @@ export type ContinueOutcome =
   | { readonly kind: "refused"; readonly reason: string };
 
 export interface ContinueOptions {
+  readonly codingProfile?: CodingProfile | undefined;
   /** Claude Code: decide a permission request. Ignored by tools whose sandbox does the gating. */
   readonly canUseTool?: (toolName: string, input: Record<string, unknown>, session: ClaudeSession) => Promise<PermissionDecision>;
 }

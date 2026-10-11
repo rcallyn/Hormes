@@ -18,7 +18,7 @@ import { TranscriptParser, outputText, prettyInput } from "./transcript.ts";
  * A message is written one block per line, so its parts arrive over several pushes; the
  * parser merges by message.id and marks the message changed each time.
  *
- * Turn markers (liveness.ts): every user line Kevin or a tool wrote and every assistant
+ * Turn markers (liveness.ts): every user line User or a tool wrote and every assistant
  * line are turn-bearing; an assistant line with `stop_reason: "end_turn"` closes the
  * turn (checked on a real 10 MB session: 167 tool_use, 5 end_turn, nothing else).
  */

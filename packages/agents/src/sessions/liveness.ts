@@ -7,7 +7,7 @@ import type { AgentHint, AgentStatus } from "@hormes/protocol";
  * session with no owner was `done` for six hours and `unknown` after. Codex Desktop
  * holds a dozen rollouts open and writes token counts into them, so held threads read
  * `working` for nothing; a killed process left its thread `working` until the mtime
- * aged out; 55 of Kevin's 65 sessions read `unknown` because they were old, not because
+ * aged out; 55 of User's 65 sessions read `unknown` because they were old, not because
  * anything was unknown about them.
  *
  * Here `working` is a lease: a live owner AND a turn-bearing write inside
@@ -41,7 +41,7 @@ export interface Evidence {
   readonly lastTurn: TurnMark | undefined;
   /** A run this process drives (Codex `exec resume`, the Claude Agent SDK), when one is on. `since` is its last event. */
   readonly run: { readonly status: AgentStatus; readonly detail: string | undefined; readonly since: number } | undefined;
-  /** A permission question is open for Kevin. */
+  /** A permission question is open for User. */
   readonly ask: boolean;
 }
 
@@ -85,5 +85,3 @@ export function deriveStatus(e: Evidence, now: number, l: Leases = DEFAULT_LEASE
   return working ? { status: "working", hint: "running" } : { status: "idle", hint: "quiet" };
 }
 
-/** Statuses `waitSettled` and the brain's agent_wait treat as settled: nothing more will come without a nudge. */
-export const SETTLED_STATUSES: ReadonlySet<AgentStatus> = new Set<AgentStatus>(["idle", "blocked", "done", "ended", "offline"]);

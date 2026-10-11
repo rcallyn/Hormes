@@ -1,7 +1,8 @@
+import type { CodingProfile } from "./claude-code/coding-profile.ts";
 import type { AgentInfo, AgentKind, AgentMessage, ConnectorHealth } from "@hormes/protocol";
 
 /**
- * One interface over every place Kevin's agents live.
+ * One interface over every place User's agents live.
  *
  * A connector never throws for "the thing is not running": that is a health
  * result and an empty list. It throws only for programmer errors (bad ids, bad
@@ -19,8 +20,8 @@ export interface AgentConnector {
   /** Every agent this connector knows about, offline ones included when known. */
   list(): Promise<AgentInfo[]>;
 
-  /** Deliver text to an agent as if Kevin typed it and pressed Enter. An `ended` session is resumed by it. */
-  send(agentId: string, text: string): Promise<SendResult>;
+  /** Deliver text to an agent as if User typed it and pressed Enter. An `ended` session is resumed by it. */
+  send(agentId: string, text: string, opts?: SendOptions): Promise<SendResult>;
 
   /** Recent output: the last assistant message, or the last N terminal lines. */
   read(agentId: string, opts?: ReadOptions): Promise<string>;
@@ -90,6 +91,11 @@ export interface TranscriptDelta {
   readonly total: number;
 }
 
+export interface SendOptions {
+  /** Trusted application binding, never populated from model tool arguments. */
+  readonly codingProfile?: CodingProfile;
+}
+
 export interface SendResult {
   readonly accepted: boolean;
   readonly detail?: string;
@@ -106,7 +112,7 @@ export interface ReadOptions {
   readonly lines?: number;
 }
 
-export interface StartOptions {
+export interface StartOptions extends SendOptions {
   /** Display name; connectors may need it unique. */
   readonly name?: string;
   readonly cwd?: string;

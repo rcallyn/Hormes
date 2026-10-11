@@ -58,7 +58,7 @@ test("connector lists, sends, reads, and settles; registry finds by name", async
   const sdk = fakeSdk((_t, n) => turn(`reply ${n}`));
   const conn = new ClaudeCodeConnector({ sdk });
   const reg = new AgentRegistry([conn], 0);
-  const info = await conn.start({ cwd: "/Users/kevinliu/gt/gt-cloud", name: "gt-cloud", prompt: "run the tests" });
+  const info = await conn.start({ cwd: "/Users/user/gt/gt-cloud", name: "gt-cloud", prompt: "run the tests" });
   assert.equal(info.kind, "claude-code");
   assert.equal(info.id, "claude-code:s1");
   const settled = await conn.waitSettled(info.id, 2000);

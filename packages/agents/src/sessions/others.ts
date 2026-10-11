@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 /**
  * Presence-only detectors for agent tools whose session formats Hormes does
- * not read yet. The Console can say "also found: gemini, opencode" so Kevin
+ * not read yet. The Console can say "also found: gemini, opencode" so User
  * knows what is on the machine; nothing here is parsed.
  */
 

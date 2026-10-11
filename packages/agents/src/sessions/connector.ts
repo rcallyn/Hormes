@@ -1,3 +1,4 @@
+import { sameCodingProfile, type CodingProfileStore } from "../claude-code/coding-profile.ts";
 import { EventEmitter } from "node:events";
 import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
@@ -7,7 +8,7 @@ import { logger } from "@hormes/core";
 import type { AgentHint, AgentInfo, AgentStatus, ConnectorHealth } from "@hormes/protocol";
 import { defaultCanUseTool } from "../claude-code/connector.ts";
 import type { ClaudeSession, PermissionDecision, SdkLike } from "../claude-code/session.ts";
-import { agentId, splitAgentId, type AgentConnector, type ReadOptions, type SendResult, type StartOptions, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "../types.ts";
+import { agentId, splitAgentId, type AgentConnector, type ReadOptions, type SendResult, type SendOptions, type StartOptions, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "../types.ts";
 import { defaultClaudeSessionsDir, readClaudeRegistry, type SessionOwner } from "./claude-registry.ts";
 import { ClaudeStore, defaultClaudeProjectsRoot } from "./claude-store.ts";
 import { CodexStore, defaultCodexRoot } from "./codex-store.ts";
@@ -25,7 +26,7 @@ import { ago, truncate, type DiscoveredSession, type SessionTool } from "./store
 const log = logger("agents.sessions");
 
 /**
- * The agent sessions Kevin already has on this Mac, as agents.
+ * The agent sessions User already has on this Mac, as agents.
  *
  * Claude Code and Codex each keep a JSONL transcript per session; this connector
  * reads those (never writes) and pairs them with the agent CLIs `ps` shows
@@ -57,6 +58,7 @@ const log = logger("agents.sessions");
  */
 
 export interface SessionsConnectorOptions {
+  readonly codingProfiles?: CodingProfileStore;
   /** Base for the default roots; tests point this at a temp dir. */
   readonly home?: string;
   readonly claudeRoot?: string;
@@ -83,12 +85,14 @@ export interface SessionsConnectorOptions {
   readonly leases?: Partial<Leases>;
   /** How long a ps/lsof snapshot is reused across list()/health() calls. Default 5 s. */
   readonly processCacheMs?: number;
-  /** How long a resumed session waits for Kevin's yes/no before the tool is denied. Default 5 min. */
+  /** How long a resumed session waits for the user's yes/no before the tool is denied. Default 5 min. */
   readonly permissionTimeoutMs?: number;
+  /** The user's name as the status lines and the refusals say it (the engine's effective name; "User" when none is wired). */
+  readonly userName?: (() => string) | undefined;
   readonly permissionMode?: string;
-  /** Full override of the permission policy; the default allows read-only tools and asks Kevin for the rest. */
+  /** Full override of the permission policy; the default allows read-only tools and asks User for the rest. */
   readonly canUseTool?: (toolName: string, input: Record<string, unknown>, session: ClaudeSession) => Promise<PermissionDecision>;
-  /** Keep Hormes's own API keys away from the CLIs so they use Kevin's logins. Default true. */
+  /** Keep Hormes's own API keys away from the CLIs so they use User's logins. Default true. */
   readonly dropApiKey?: boolean;
   readonly onChange?: (agent: AgentInfo) => void;
   /** Environment for CLI discovery (PATH, HORMES_*_BIN) and the children. Default process.env. */
@@ -113,6 +117,9 @@ export interface SessionsConnectorOptions {
 
 /** lstart has one-second resolution; allow that much slack when matching a process to a file. */
 const START_SLACK_MS = 5_000;
+
+/** The longest delay setTimeout keeps (2^31 − 1 ms, ~24.8 days). Node fires a longer one after 1 ms, with a TimeoutOverflowWarning. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /**
  * Processes that own this session, most exact signal first:
@@ -266,7 +273,7 @@ interface Snapshot {
 /** What `AgentInfo.send` carries: typed, so the Console never reads the detail's words to decide whether the composer works. */
 type SendGate = NonNullable<AgentInfo["send"]>;
 
-/** A resumed session's question for Kevin, held until send("yes"/"no"), resolvePermission(), or the timeout. */
+/** A resumed session's question for User, held until send("yes"/"no"), resolvePermission(), or the timeout. */
 export interface PendingAsk {
   readonly toolName: string;
   readonly summary: string;
@@ -275,7 +282,7 @@ export interface PendingAsk {
 
 interface Ask extends PendingAsk {
   readonly settle: (decision: PermissionDecision) => void;
-  /** Start the answer timeout: called once, when the ask becomes the one Kevin is shown. */
+  /** Start the answer timeout: called once, when the ask becomes the one User is shown. */
   readonly show: () => void;
 }
 
@@ -308,7 +315,7 @@ export class SessionsConnector implements AgentConnector {
   /** Threads started here whose file the store has not listed yet, by runKey. */
   private readonly pendingStarts = new Map<string, DiscoveredSession>();
   /**
-   * Permission questions waiting on Kevin, by Claude session id, oldest first. Claude
+   * Permission questions waiting on User, by Claude session id, oldest first. Claude
    * routinely issues several tool calls in one message, so a session can have more than
    * one open; the first is the one shown and answered, the rest wait their turn.
    */
@@ -325,6 +332,11 @@ export class SessionsConnector implements AgentConnector {
   private lastListed = new Map<string, Listed>();
   private lastListedAt = 0;
   private othersCache: { at: number; names: string[] } | undefined;
+
+  /** The user's name as every line here says it. */
+  private get userName(): string {
+    return this.opts.userName?.() || "User";
+  }
 
   constructor(private readonly opts: SessionsConnectorOptions = {}) {
     this.home = opts.home ?? homedir();
@@ -352,11 +364,14 @@ export class SessionsConnector implements AgentConnector {
     const dropApiKey = opts.dropApiKey ?? true;
     this.runners = {
       claude: new ClaudeCodeRunner({
+        ...(opts.codingProfiles ? { codingProfiles: opts.codingProfiles } : {}),
         ...discovery,
         ...(opts.sdk ? { sdk: opts.sdk } : {}),
         ...(opts.permissionMode ? { permissionMode: opts.permissionMode } : {}),
         dropApiKey,
         nameOf: sessionName,
+        userName: () => this.userName,
+        now: this.now,
       }),
       codex: new CodexRunner({
         ...discovery,
@@ -481,7 +496,7 @@ export class SessionsConnector implements AgentConnector {
       // the first of several parallel asks is answered, while the next is still waiting.
       const ask = s.tool === "claude" ? this.headAsk(s.id) : undefined;
       const extra = ask
-        ? `needs Kevin's yes or no: ${ask.toolName}${ask.summary ? ` — ${ask.summary}` : ""}`
+        ? `needs ${this.userName}'s yes or no: ${ask.toolName}${ask.summary ? ` — ${ask.summary}` : ""}`
         : run.statusDetail
           ? `resumed: ${run.statusDetail}`
           : "resumed by Hormes";
@@ -494,7 +509,7 @@ export class SessionsConnector implements AgentConnector {
 
   /**
    * Evidence for a session this process drives: the run's own status and last event, and
-   * whether a question is open for Kevin. One place, so the rail (`info`) and `waitSettled`
+   * whether a question is open for User. One place, so the rail (`info`) and `waitSettled`
    * read the same rule — a run whose stream went silent past `runStallMs` is `unknown` to both.
    */
   private runEvidence(s: DiscoveredSession, run: RunHandle, degraded: string | undefined): Evidence {
@@ -573,7 +588,7 @@ export class SessionsConnector implements AgentConnector {
     const when = ago(Math.max(s.lastActivityAt, run?.lastActivityAt ?? 0), this.now());
     const context = [sessionName(s), s.cwd, when].filter((x): x is string => Boolean(x)).join(" — ");
     const ask = s.tool === "claude" ? this.headAsk(s.id) : undefined;
-    if (ask) return `${context}\nwaiting for Kevin's yes or no before ${ask.toolName}${ask.summary ? `: ${ask.summary}` : ""}`;
+    if (ask) return `${context}\nwaiting for ${this.userName}'s yes or no before ${ask.toolName}${ask.summary ? `: ${ask.summary}` : ""}`;
     const text = run?.lastReply || s.lastAssistantText || (run?.status === "working" ? "(still working)" : "(no assistant reply recorded)");
     return `${context}\n${text}`;
   }
@@ -722,14 +737,18 @@ export class SessionsConnector implements AgentConnector {
     return messages.length ? { messages, total: source.total } : undefined;
   }
 
-  async send(id: string, text: string): Promise<SendResult> {
+  async send(id: string, text: string, opts: SendOptions = {}): Promise<SendResult> {
     const s = await this.resolve(id);
+    if (opts.codingProfile && s.tool !== "claude") return { accepted: false, detail: "The bounded EvoSim profile requires Claude" };
     const key = runKey(s.tool, s.id);
     // Another send() may be mid-continuation for this very session: wait for it, then reuse what it made.
     const inflight = this.starting.get(key);
     if (inflight) await inflight;
     const existing = this.runs.get(key);
     if (existing && existing.status !== "offline") {
+      if (opts.codingProfile && !sameCodingProfile(existing.codingProfile, opts.codingProfile, s.cwd)) {
+        return { accepted: false, detail: "Start a new bounded EvoSim session; this running session does not carry the requested file restrictions" };
+      }
       if (s.tool === "claude") {
         const tool = this.pendingPermission(id)?.toolName;
         if (tool) {
@@ -751,7 +770,7 @@ export class SessionsConnector implements AgentConnector {
         existing.send(text);
         return { accepted: true, detail: "sent to the resumed session", mode: "resume" };
       }
-      // Idle between turns. Kevin may have opened the thread in Codex since; ask again who owns it.
+      // Idle between turns. User may have opened the thread in Codex since; ask again who owns it.
       const can = await this.runnerFor(s.tool).canContinue(s, await this.ownership(s));
       if (!can.ok) return { accepted: false, detail: can.reason };
       if (can.mode === "resume") {
@@ -761,7 +780,7 @@ export class SessionsConnector implements AgentConnector {
       return this.fileOutcome(key, await this.runnerFor(s.tool).continue(s, text, can.mode, this.sinkFor(id, s)));
     }
     // Reserve the key before the first await below; concurrent callers see `inflight` and wait.
-    const attempt = this.continueSession(id, s, text);
+    const attempt = this.continueSession(id, s, text, opts);
     this.starting.set(key, attempt);
     try {
       return await attempt;
@@ -771,12 +790,12 @@ export class SessionsConnector implements AgentConnector {
   }
 
   /** Continue `s` with `text` the way its runner says; refuses when ownership is unclear. */
-  private async continueSession(id: string, s: DiscoveredSession, text: string): Promise<SendResult> {
+  private async continueSession(id: string, s: DiscoveredSession, text: string, opts: SendOptions = {}): Promise<SendResult> {
     const runner = this.runnerFor(s.tool);
     const can = await runner.canContinue(s, await this.ownership(s));
     if (!can.ok) return { accepted: false, detail: can.reason };
-    const handler = this.opts.canUseTool ?? ((toolName: string, input: Record<string, unknown>, session: ClaudeSession) => this.askKevin(id, s.id, toolName, input, session));
-    const outcome = await runner.continue(s, text, can.mode, this.sinkFor(id, s), { canUseTool: handler });
+    const handler = this.opts.canUseTool ?? ((toolName: string, input: Record<string, unknown>, session: ClaudeSession) => this.askUser(id, s.id, toolName, input, session));
+    const outcome = await runner.continue(s, text, can.mode, this.sinkFor(id, s), { canUseTool: handler, ...opts });
     return this.fileOutcome(runKey(s.tool, s.id), outcome);
   }
 
@@ -817,6 +836,7 @@ export class SessionsConnector implements AgentConnector {
   async start(opts: StartOptions): Promise<AgentInfo> {
     const tool = normalizeSessionTool(opts.tool ?? opts.kind);
     if (!tool) throw new Error(`sessions can start "codex" or "claude" threads, not "${opts.tool ?? opts.kind ?? ""}"`);
+    if (opts.codingProfile && tool !== "claude") throw new Error("The bounded EvoSim profile requires Claude");
     const cwd = opts.cwd ?? process.cwd();
     const prompt = opts.prompt ?? "";
     const runner = this.runnerFor(tool);
@@ -838,9 +858,9 @@ export class SessionsConnector implements AgentConnector {
       this.opts.canUseTool ??
       ((toolName: string, input: Record<string, unknown>, session: ClaudeSession) => {
         const sid = session.sessionId ?? "";
-        return this.askKevin(filed?.id ?? agentId(this.kind, `${tool}:${sid}`), sid, toolName, input, session);
+        return this.askUser(filed?.id ?? agentId(this.kind, `${tool}:${sid}`), sid, toolName, input, session);
       });
-    const handle = await runner.start(cwd, prompt, sink, { canUseTool: handler });
+    const handle = await runner.start(cwd, prompt, sink, { canUseTool: handler, ...(opts.codingProfile ? { codingProfile: opts.codingProfile } : {}) });
     try {
       await handle.ready;
     } catch (e) {
@@ -892,12 +912,12 @@ export class SessionsConnector implements AgentConnector {
    * The default permission policy for resumed sessions. Read-only tools, safe shell and
    * edits pass at once, as in the primary Claude Code connector; anything else becomes a
    * question the Console and the voice loop can see (status "blocked", detail names the
-   * tool and its input) and stays open until Kevin answers through send("yes"/"no") or
+   * tool and its input) and stays open until User answers through send("yes"/"no") or
    * resolvePermission(). Parallel tool calls queue up and reach him one at a time, each
    * with its own clock. No answer within the timeout denies the tool: closed, not open.
    */
-  private async askKevin(id: string, sid: string, toolName: string, input: Record<string, unknown>, session: ClaudeSession): Promise<PermissionDecision> {
-    const quick = await defaultCanUseTool(toolName, input, session);
+  private async askUser(id: string, sid: string, toolName: string, input: Record<string, unknown>, session: ClaudeSession): Promise<PermissionDecision> {
+    const quick = await defaultCanUseTool(toolName, input, session, this.userName);
     if (quick.behavior === "allow") return quick;
     return new Promise<PermissionDecision>((resolve) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -920,7 +940,7 @@ export class SessionsConnector implements AgentConnector {
           void this.notify(id);
         },
         show: () => {
-          timer ??= setTimeout(() => ask.settle({ behavior: "deny", message: `Kevin did not answer within ${Math.round(this.permissionTimeoutMs / 1000)} s; ${toolName} was not run` }), this.permissionTimeoutMs);
+          timer ??= setTimeout(() => ask.settle({ behavior: "deny", message: `${this.userName} did not answer within ${Math.round(this.permissionTimeoutMs / 1000)} s; ${toolName} was not run` }), this.permissionTimeoutMs);
           timer.unref?.();
         },
       };
@@ -934,7 +954,7 @@ export class SessionsConnector implements AgentConnector {
     });
   }
 
-  /** The question Kevin is shown for a session: the oldest open one. */
+  /** The question User is shown for a session: the oldest open one. */
   private headAsk(sid: string): Ask | undefined {
     return this.asks.get(sid)?.[0];
   }
@@ -949,11 +969,11 @@ export class SessionsConnector implements AgentConnector {
     if (this.opts.canUseTool) return run.resolvePermission(allow);
     const ask = this.headAsk(sid);
     if (!ask) return false;
-    ask.settle(allow ? { behavior: "allow" } : { behavior: "deny", message: "denied by Kevin" });
+    ask.settle(allow ? { behavior: "allow" } : { behavior: "deny", message: `denied by ${this.userName}` });
     return true;
   }
 
-  /** What a resumed session is waiting on Kevin for, if anything: the first of its open questions. */
+  /** What a resumed session is waiting on User for, if anything: the first of its open questions. */
   pendingPermission(id: string): PendingAsk | undefined {
     const parsed = parseSessionsAgentId(id);
     if (!parsed || parsed.tool !== "claude") return undefined;
@@ -991,7 +1011,7 @@ export class SessionsConnector implements AgentConnector {
         await new Promise<void>((resolve) => {
           const { runChanges, askChanges, leases } = this;
           let recheck: ReturnType<typeof setTimeout> | undefined;
-          const timer = setTimeout(() => done(), timeoutMs);
+          const timer = setTimeout(() => done(), Math.min(Math.max(0, timeoutMs), MAX_TIMER_MS));
           const done = (): void => {
             clearTimeout(timer);
             if (recheck) clearTimeout(recheck);
@@ -1004,10 +1024,13 @@ export class SessionsConnector implements AgentConnector {
               done();
               return;
             }
-            // The stall bounds are clocks, not events: look again when the nearest one runs out.
+            // The stall bounds are clocks, not events: look again when the nearest one runs out. No run has more than
+            // its whole bound left, whatever the clocks say: a run stamped weeks ahead of this clock asked for a 33-day
+            // timer, which Node fires after 1 ms, so the check spun every millisecond until the run settled (BL-13).
             const bound = run.statusDetail === "finishing" ? leases.finishingMaxMs : leases.runStallMs;
+            const left = Math.min(bound, bound - (this.now() - run.lastActivityAt));
             if (recheck) clearTimeout(recheck);
-            recheck = setTimeout(check, Math.max(1, bound - (this.now() - run.lastActivityAt) + 1));
+            recheck = setTimeout(check, Math.min(Math.max(1, left + 1), MAX_TIMER_MS));
             recheck.unref?.();
           };
           runChanges.on(key, check);

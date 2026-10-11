@@ -18,7 +18,7 @@ import { FileTail, LINE_HEAD_BYTES, LineAssembler, MAX_LINE_BYTES, READ_CHUNK_BY
  * Reading is bounded like the stores: the newest page comes from the end of the file
  * in growing slices; every older page is read BACKWARD from the byte where the page
  * after it begins (`readBackward`), so "Load earlier" costs the span of the page, not
- * the distance from the end of the file — Kevin has rollouts of 2 to 164 GB and the old
+ * the distance from the end of the file — User has rollouts of 2 to 164 GB and the old
  * re-read-from-the-end failed on them after five seconds. Nothing reads a file whole.
  * `TranscriptSource` remembers where each read ended so the live tail that follows
  * starts exactly there, with the parser that knows the open tool calls, and where each
@@ -440,7 +440,7 @@ interface Slice {
 type Pick<T> = (slice: Slice) => T | undefined;
 
 /**
- * The most one page read goes back from its cursor. Kevin has rollouts of 2 to 164 GB
+ * The most one page read goes back from its cursor. User has rollouts of 2 to 164 GB
  * (single lines of 48 MB); past this the page is whatever the slice holds — never a
  * daemon that reads the file whole, or dies: fs.read() aborts the process on a length
  * of 2^31 or more. It bounds one page's reach from ITS cursor, never the distance from

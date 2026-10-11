@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Generators for the durability tests: session files the shape of Kevin's, at the
+ * Generators for the durability tests: session files the shape of User's, at the
  * sizes that broke things — a 50 MB session, a rollout with a single 48 MB line, a
  * thread whose process died mid-tool, a rollout that Codex moved. Deterministic
  * (seeded), written in 4 MB batches so generating 50 MB costs one second, not a
@@ -123,7 +123,7 @@ export function bigClaude(path: string, bytes: number, opts: ClaudeOptions = {})
   const every = opts.endTurnEvery ?? 3;
   const perRound = Math.max(1, opts.toolsPerRound ?? 1);
   const sessionId = opts.sessionId ?? "50505050-5050-4505-8505-505050505050";
-  const cwd = opts.cwd ?? "/Users/kevinliu/big-app";
+  const cwd = opts.cwd ?? "/Users/user/big-app";
   const w = new Writer(path);
   const ids: string[] = [];
   let lastAt = BASE;
@@ -198,7 +198,7 @@ export interface GeneratedCodex extends Generated {
 export function bigCodex(path: string, bytes: number, opts: CodexOptions = {}): GeneratedCodex {
   const r = rng(opts.seed ?? 11);
   const id = opts.id ?? "01a05050-0000-7000-8000-000000005050";
-  const cwd = opts.cwd ?? "/Users/kevinliu/big-site";
+  const cwd = opts.cwd ?? "/Users/user/big-site";
   const start = opts.startAt ?? BASE;
   const hugeBytes = opts.hugeLineBytes ?? 8 * 1024 * 1024;
   const w = new Writer(path);

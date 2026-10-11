@@ -6,7 +6,7 @@ import { TranscriptParser, outputText, prettyInput, type Draft } from "./transcr
 /**
  * Codex rollouts as a conversation.
  *
- * response_item payloads and what becomes of them (shapes from codex-store.ts and Kevin's
+ * response_item payloads and what becomes of them (shapes from codex-store.ts and User's
  * 0.145–0.153 rollouts):
  *   message user/assistant           → one message, id = payload.id; developer messages and
  *                                       injected "user" context (AGENTS.md, plugin lists…) dropped
@@ -26,7 +26,7 @@ import { TranscriptParser, outputText, prettyInput, type Draft } from "./transcr
  * rollout from today: 1 task_started, 1 task_complete, 13 token_count, 21 item_completed.
  */
 
-/** Same rule as the listing: injected context arrives as "user" but Kevin never typed it. */
+/** Same rule as the listing: injected context arrives as "user" but User never typed it. */
 const SYNTHETIC_USER = /^\s*(#\s*AGENTS\.md instructions|#\s*Files mentioned by the user|<[a-z_][\w-]*(\s|>))/i;
 const INTERESTING = /"type":"(response_item|event_msg)"/;
 const EXIT_CODE = /"exit_code":\s*(-?\d+)|\bexited with code (\d+)\b/i;

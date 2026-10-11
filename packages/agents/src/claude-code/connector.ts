@@ -1,9 +1,10 @@
+import { CodingProfileStore, type BoundedCoding } from "./coding-profile.ts";
 import { logger } from "@hormes/core";
 import type { AgentInfo, ConnectorHealth } from "@hormes/protocol";
 import { ClaudeStore } from "../sessions/claude-store.ts";
 import { ClaudeTranscriptParser } from "../sessions/claude-transcript.ts";
 import { TranscriptSource } from "../sessions/transcript.ts";
-import { agentId, splitAgentId, type AgentConnector, type ReadOptions, type SendResult, type StartOptions, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "../types.ts";
+import { agentId, splitAgentId, type AgentConnector, type ReadOptions, type SendResult, type SendOptions, type StartOptions, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "../types.ts";
 import { ClaudeSession, claudeEnv, loadSdk, type PermissionDecision, type SdkLike } from "./session.ts";
 
 const log = logger("agents.claude-code");
@@ -17,10 +18,11 @@ const log = logger("agents.claude-code");
  *
  * The CLI behind the SDK writes each session to ~/.claude/projects/<slug>/<sessionId>.jsonl
  * like any other; `transcript()` and `watch()` read that file, so stepping into one of
- * these looks the same as stepping into a session Kevin opened himself.
+ * these looks the same as stepping into a session User opened himself.
  */
 
 export interface ClaudeCodeConnectorOptions {
+  readonly codingProfiles?: CodingProfileStore;
   readonly sdk?: SdkLike;
   readonly model?: string;
   readonly effort?: string;
@@ -35,6 +37,8 @@ export interface ClaudeCodeConnectorOptions {
   /** watch(): stat interval when fs.watch cannot be used (default 1 s) and the burst window (default 50 ms). */
   readonly tailPollMs?: number;
   readonly tailCoalesceMs?: number;
+  /** The user's name as the refusals say it (the engine's effective name; "User" when none is wired). */
+  readonly userName?: (() => string) | undefined;
 }
 
 export class ClaudeCodeConnector implements AgentConnector {
@@ -43,12 +47,20 @@ export class ClaudeCodeConnector implements AgentConnector {
   private readonly listeners = new Set<(agent: AgentInfo) => void>();
   private sdkPromise: Promise<SdkLike> | undefined;
   private seq = 0;
+  private readonly codingProfiles: CodingProfileStore;
+  private readonly boundedSessions = new Map<string, BoundedCoding>();
   private readonly store: ClaudeStore;
   /** Conversation sources by local id, once the session has a file. */
   private readonly sources = new Map<string, TranscriptSource>();
 
   constructor(private readonly opts: ClaudeCodeConnectorOptions = {}) {
+    this.codingProfiles = opts.codingProfiles ?? new CodingProfileStore();
     this.store = new ClaudeStore(opts.claudeRoot ? { root: opts.claudeRoot } : {});
+  }
+
+  /** The user's name as every refusal here says it. */
+  private get userName(): string {
+    return this.opts.userName?.() || "User";
   }
 
   private sdk(): Promise<SdkLike> {
@@ -92,8 +104,11 @@ export class ClaudeCodeConnector implements AgentConnector {
     return { localId, session };
   }
 
-  async send(id: string, text: string): Promise<SendResult> {
-    const { session } = this.resolve(id);
+  async send(id: string, text: string, opts: SendOptions = {}): Promise<SendResult> {
+    const { session, localId } = this.resolve(id);
+    if (opts.codingProfile && !this.boundedSessions.get(localId)?.matches(opts.codingProfile, session.cwd)) {
+      return { accepted: false, detail: "Start a new bounded EvoSim session; this running session does not carry the requested file restrictions" };
+    }
     if (session.status === "offline") return { accepted: false, detail: "session has ended" };
     if (session.pendingPermissionTool) {
       // A yes/no while blocked answers the permission rather than starting a turn.
@@ -102,7 +117,7 @@ export class ClaudeCodeConnector implements AgentConnector {
         return { accepted: true, detail: `allowed ${session.pendingPermissionTool}` };
       }
       if (/^\s*(no|n|deny|stop|don'?t)/i.test(text)) {
-        session.resolvePermission(false);
+        session.resolvePermission(false, `denied by ${this.userName}`);
         return { accepted: true, detail: "denied" };
       }
     }
@@ -118,8 +133,9 @@ export class ClaudeCodeConnector implements AgentConnector {
   async start(opts: StartOptions): Promise<AgentInfo> {
     const sdk = await this.sdk();
     const cwd = opts.cwd ?? process.cwd();
+    const bounded = this.codingProfiles.open(cwd, opts.codingProfile);
     const localId = `s${++this.seq}`;
-    const handler = this.opts.canUseTool ?? defaultCanUseTool;
+    const handler = this.opts.canUseTool ?? ((toolName: string, input: Record<string, unknown>, s: ClaudeSession): Promise<PermissionDecision> => defaultCanUseTool(toolName, input, s, this.userName));
     const session: ClaudeSession = new ClaudeSession({
       sdk,
       cwd,
@@ -131,8 +147,21 @@ export class ClaudeCodeConnector implements AgentConnector {
       env: claudeEnv(process.env, { dropApiKey: this.opts.dropApiKey ?? false }),
       includePartialMessages: false,
       canUseTool: (toolName: string, input: Record<string, unknown>): Promise<PermissionDecision> => handler(toolName, input, session),
+      ...(bounded ? bounded.options(claudeEnv(process.env, { dropApiKey: true })) : {}),
+      ...(bounded ? { toolGuard: (tool: string, input: Record<string, unknown>): PermissionDecision => {
+        if (!session.sessionId) return { behavior: "deny", message: "Bounded session identity is not available" };
+        bounded.bind(session.sessionId);
+        return bounded.guard(tool, input);
+      } } : {}),
     });
     this.sessions.set(localId, session);
+    if (bounded) {
+      this.boundedSessions.set(localId, bounded);
+      session.on("init", (id: string) => {
+        try { bounded.bind(id); }
+        catch (error) { log.warn(`cannot persist bounded coding session: ${(error as Error).message}`); void session.close(); }
+      });
+    }
     session.on("status", () => this.notify(localId, session));
     session.on("closed", () => this.notify(localId, session));
     session.start();
@@ -176,7 +205,7 @@ export class ClaudeCodeConnector implements AgentConnector {
 
   /** Answer a blocked session's permission prompt by voice. */
   resolvePermission(id: string, allow: boolean): boolean {
-    return this.resolve(id).session.resolvePermission(allow);
+    return this.resolve(id).session.resolvePermission(allow, `denied by ${this.userName}`);
   }
 
   // ---------------------------------------------------------- conversations ---
@@ -278,6 +307,7 @@ export class ClaudeCodeConnector implements AgentConnector {
     this.sources.clear();
     await Promise.all([...this.sessions.values()].map((s) => s.close()));
     this.sessions.clear();
+    this.boundedSessions.clear();
   }
 }
 
@@ -286,13 +316,13 @@ const SAFE_BASH = /^\s*(ls|cat|head|tail|wc|pwd|echo|git (status|log|diff|branch
 
 /**
  * Coding agents started by voice get a tight default: read anything, run tests and
- * git queries, and stop for everything else so Kevin can say yes or no.
+ * git queries, and stop for everything else so User can say yes or no.
  */
-export async function defaultCanUseTool(toolName: string, input: Record<string, unknown>, _session: ClaudeSession): Promise<PermissionDecision> {
+export async function defaultCanUseTool(toolName: string, input: Record<string, unknown>, _session: ClaudeSession, userName = "User"): Promise<PermissionDecision> {
   if (toolName.startsWith("mcp__hormes__")) return { behavior: "allow" };
   if (READ_ONLY_TOOLS.has(toolName)) return { behavior: "allow" };
   if (toolName === "Bash" && typeof input["command"] === "string" && SAFE_BASH.test(input["command"])) return { behavior: "allow" };
   // Edits within the working tree are what a coding agent is for.
   if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit" || toolName === "NotebookEdit") return { behavior: "allow" };
-  return { behavior: "deny", message: `Hormes needs Kevin's spoken yes before ${toolName}${typeof input["command"] === "string" ? `: ${String(input["command"]).slice(0, 80)}` : ""}` };
+  return { behavior: "deny", message: `Hormes needs ${userName}'s spoken yes before ${toolName}${typeof input["command"] === "string" ? `: ${String(input["command"]).slice(0, 80)}` : ""}` };
 }

@@ -18,7 +18,7 @@ const NEWLINE = 0x0a;
 /** Bytes per read() call, here and in the page reader (transcript.ts re-exports it). */
 export const READ_CHUNK_BYTES = 16 * 1024 * 1024;
 /**
- * Longest line assembled and parsed. Kevin's 164 GB rollout carries single lines of 48
+ * Longest line assembled and parsed. User's 164 GB rollout carries single lines of 48
  * MB (base64 screenshots in tool outputs); concatenating and JSON.parsing one took 4.7 s
  * on the loop that runs the voice. Past this a line is skipped, head kept.
  */

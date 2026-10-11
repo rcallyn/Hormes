@@ -1,26 +1,27 @@
-import { accessSync, constants, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { LineSplitter, REPO_ROOT, logger } from "@hormes/core";
-import { DaemonClient, DaemonServer, type EngineLike } from "@hormes/daemon";
+import { DaemonClient, DaemonServer, type ToolHost } from "@hormes/daemon";
 import { SECRET_KEYS, type Effort } from "@hormes/protocol";
 import type { Brain, BrainAttachment, BrainResult, BrainSink, BrainTask } from "./brain.ts";
 import { SYSTEM_PROMPT_VERSION, brainSystemPrompt } from "./brain.ts";
 import { delegationPrompt } from "./anthropic.ts";
 import { progressLine } from "./responses.ts";
 import type { ToolRunner } from "./runner.ts";
-import { CODEX_MCP_SERVER, codexMcpConfigArgs, codexPromptTrimArgs, prepareCodexHome, toml, type CodexHome } from "./codex-config.ts";
+import { CODEX_MCP_SERVER, codexBuiltinsOffArgs, codexMcpConfigArgs, codexPromptTrimArgs, prepareCodexHome, toml, type CodexHome } from "./codex-config.ts";
+import { codexModel } from "./models.ts";
 import { CodexAppServer, type AppServerItem, type TurnResult, type UserInput } from "./codex-app-server.ts";
 
 export { CODEX_MCP_SERVER } from "./codex-config.ts";
 
 /**
- * The Codex brain: the Codex CLI (`codex exec`) on Kevin's ChatGPT login, with
+ * The Codex brain: the Codex CLI (`codex exec`) on User's ChatGPT login, with
  * Hormes's tools mounted as an MCP server.
  *
- * Kevin uses Codex Desktop, which ships inside ChatGPT.app; the CLI binary sits
+ * User uses Codex Desktop, which ships inside ChatGPT.app; the CLI binary sits
  * in its Resources folder and is not on PATH, so the finder below looks there
  * after HORMES_CODEX_BIN and PATH. Auth is whatever ~/.codex/auth.json holds
  * (a ChatGPT login, or an API key from `codex login --with-api-key`).
@@ -38,16 +39,20 @@ export { CODEX_MCP_SERVER } from "./codex-config.ts";
  * that arrives before it is up runs on exec, and a failed start is retried in
  * the background a minute later. `detail` says which transport is live and why.
  *
- * Either way Codex runs in its read-only sandbox with Kevin's own MCP servers off
- * (`--ignore-user-config` for exec; per-server `enabled=false` plus
- * `--disable apps` for the app-server, which has no such flag) — his config.toml
- * enables Codex's own computer-use, browser and REPL servers, and the plugin
- * runtime binds his ChatGPT connectors, which would let it act on the Mac and on
- * his accounts around Hormes's policy — so the only way it can act is through
+ * Either way Codex runs in its read-only sandbox with its own shell, image reader
+ * and plugin runtime switched off (`codexBuiltinsOffArgs`: the sandbox stops
+ * writes, not reads, and the plugin runtime binds his ChatGPT connectors) and
+ * User's own MCP servers off (`--ignore-user-config` for exec; per-server
+ * `enabled=false` for the app-server, which has no such flag). His config.toml
+ * enables Codex's own computer-use, browser and REPL servers, which would let it
+ * act on the Mac and on his accounts around Hormes's policy. So the only way it
+ * can read or act is through
  * the `hormes` MCP server (`mcp-bridge.ts`), whose calls land in the same
  * ToolRunner as every other brain: policy, ledger, screenshot archive,
- * confirmation handshake included. A call to any other MCP server fails the turn
- * outright. The bridge reaches the runner over the daemon socket when the daemon
+ * confirmation handshake included. A call to any other MCP server, or a command
+ * of Codex's own shell, fails the turn outright: the runner lets go at once,
+ * nothing more of that turn reaches the timeline, and the warm thread that saw it
+ * is retired. The bridge reaches the runner over the daemon socket when the daemon
  * is this process; otherwise (`hormes live` / `probe`, or another Hormes on the
  * default path) the brain serves a socket of its own. Hormes's secrets never
  * enter Codex's environment.
@@ -79,9 +84,16 @@ function labelFor(p: string, fallback: string): string {
   return fallback;
 }
 
+/**
+ * Where a desktop app keeps the CLI, newest layout first. ChatGPT.app since the end of September
+ * 2026: `codex-cli/bin/codex`, a launcher that execs `codex-cli/CodexCLI.app/Contents/MacOS/codex`;
+ * before that, `Resources/codex`. The agents' lookup (agents/src/sessions/codex-bin.ts) lists the same three.
+ */
+export const CODEX_IN_BUNDLE = ["Contents/Resources/codex-cli/bin/codex", "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex", "Contents/Resources/codex"] as const;
+
 /** The desktop apps that bundle the CLI, system-wide and per-user. */
 export function codexBundleCandidates(home: string): string[] {
-  return ["/Applications", join(home, "Applications")].flatMap((apps) => [join(apps, "ChatGPT.app/Contents/Resources/codex"), join(apps, "Codex.app/Contents/Resources/codex")]);
+  return ["/Applications", join(home, "Applications")].flatMap((apps) => ["ChatGPT.app", "Codex.app"].flatMap((app) => CODEX_IN_BUNDLE.map((inside) => join(apps, app, inside))));
 }
 
 export interface FindCodexOptions {
@@ -115,7 +127,7 @@ export function codexHomeDir(env: NodeJS.ProcessEnv = process.env): string {
 interface AuthFile {
   auth_mode?: string;
   OPENAI_API_KEY?: string | null;
-  tokens?: { access_token?: string; refresh_token?: string } | null;
+  tokens?: { access_token?: string | null; refresh_token?: string | null } | null;
 }
 
 function readAuth(codexHome: string): AuthFile | undefined {
@@ -126,10 +138,74 @@ function readAuth(codexHome: string): AuthFile | undefined {
   }
 }
 
-/** auth.json says yes/no; undefined when there is no readable file (then `codex login status` decides). Never returns a token. */
+/** A JWT's `exp` in ms, when the token is one (ChatGPT access tokens are); undefined otherwise. Reads the claim only, never a signature. */
+function jwtExpiryMs(token: string | null | undefined): number | undefined {
+  const payload = typeof token === "string" ? token.split(".")[1] : undefined;
+  if (!payload) return undefined;
+  try {
+    const exp = (JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { exp?: unknown }).exp;
+    return typeof exp === "number" && Number.isFinite(exp) ? exp * 1000 : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Logins the server refused at run time (a 401, "token has expired", "could not
+ * be refreshed"), by auth.json's real path, with the file's mtime and size then.
+ * auth.json alone cannot say a refresh token died, so the refusal is the proof;
+ * it holds until the file changes (Codex refreshed, or a new sign-in). This
+ * process only: a restarted daemon tries once more and learns it again.
+ */
+const refusedLogins = new Map<string, { mtimeMs: number; size: number }>();
+
+/** auth.json's real path (Hormes's private home links it to the user's) and its stat, or undefined. */
+function authFileStat(codexHome: string): { path: string; mtimeMs: number; size: number } | undefined {
+  try {
+    const path = realpathSync(join(codexHome, "auth.json"));
+    const st = statSync(path);
+    return { path, mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    return undefined;
+  }
+}
+
+/** A turn failed on the login itself: the next probe of this auth.json says signed out until the file changes. */
+export function markCodexLoginRefused(codexHome: string): void {
+  const st = authFileStat(codexHome);
+  if (st) refusedLogins.set(st.path, { mtimeMs: st.mtimeMs, size: st.size });
+}
+
+/**
+ * A Codex error that is about the login, not the task: the backend's 401 and Codex's
+ * own words for a refresh that failed ("…could not be refreshed… Please log out and
+ * sign in again"). Narrow on purpose: a match reads the login as signed out until
+ * auth.json changes, so a bare "401" from some tool must not count.
+ */
+export const CODEX_AUTH_FAILURE = /\b401 Unauthorized\b|authentication token has expired|could not be refreshed|sign(?:ing)? in again|not logged in/i;
+
+/**
+ * Why this login cannot work, or undefined while it may: the server refused this
+ * very auth.json at run time, or its access token has expired with no refresh
+ * token to renew it. An expired access token beside a refresh token is Codex's
+ * to renew (it does on the next request), so that is not "expired" here.
+ */
+export function codexLoginExpired(codexHome: string = codexHomeDir(), now = Date.now()): string | undefined {
+  const st = authFileStat(codexHome);
+  const refused = st ? refusedLogins.get(st.path) : undefined;
+  if (refused && st && refused.mtimeMs === st.mtimeMs && refused.size === st.size) return "its login was refused";
+  const auth = readAuth(codexHome);
+  const tokens = auth?.tokens;
+  if (!tokens || auth?.OPENAI_API_KEY || tokens.refresh_token) return undefined;
+  const exp = jwtExpiryMs(tokens.access_token);
+  return exp !== undefined && exp <= now ? "its login has expired" : undefined;
+}
+
+/** auth.json says yes/no (an expired login is a no); undefined when there is no readable file (then `codex login status` decides). Never returns a token. */
 export function codexSignedIn(codexHome: string = codexHomeDir()): boolean | undefined {
   const auth = readAuth(codexHome);
   if (!auth) return undefined;
+  if (codexLoginExpired(codexHome)) return false;
   return Boolean(auth.tokens?.access_token || auth.tokens?.refresh_token || auth.OPENAI_API_KEY);
 }
 
@@ -149,7 +225,7 @@ export function codexConfigModel(codexHome: string = codexHomeDir()): string | u
  * OPENAI_API_KEY, ANTHROPIC_API_KEY, HORMES_BRAIN_API_KEY) sit in the daemon's
  * environment and would otherwise reach Codex's sandboxed shell (`env` works in
  * read-only) and, through Codex, the bridge. None of them is Codex's business:
- * this brain runs on Kevin's ChatGPT login, and an OPENAI_API_KEY is one of the
+ * this brain runs on User's ChatGPT login, and an OPENAI_API_KEY is one of the
  * ways Codex authenticates, so the voice key in particular must not be there (a
  * key he gave Codex itself via `codex login --with-api-key` lives in auth.json
  * and still counts). CODEX_HOME is pinned so probe and run agree.
@@ -221,9 +297,12 @@ export async function probeCodex(opts: CodexProbeOptions = {}): Promise<CodexPro
   }
   const authMode = auth?.auth_mode;
   const where = `Codex ${version} via ${bin.label}`;
+  const expired = signedIn ? undefined : codexLoginExpired(codexHome);
   const detail = signedIn
     ? `${where}, signed in${authMode === "chatgpt" ? " with ChatGPT" : authMode ? ` (${authMode})` : ""}${desktopRunning ? ", desktop app running" : ""}`
-    : `${where} is not signed in; sign in to Codex in ChatGPT or run \`codex login\``;
+    : expired
+      ? `${where} is signed out: ${expired}. Sign in to Codex in ChatGPT or run \`codex login\``
+      : `${where} is not signed in; sign in to Codex in ChatGPT or run \`codex login\``;
   return { ...base, bin, version, signedIn, authMode, detail };
 }
 
@@ -247,14 +326,16 @@ export interface CodexExecOptions {
   /** MCP server start / per-tool budgets, in seconds. */
   readonly startupTimeoutSec?: number | undefined;
   readonly toolTimeoutSec?: number | undefined;
-  /** PNGs attached to the prompt with `-i` (the regions Kevin circled). */
+  /** PNGs attached to the prompt with `-i` (the regions User circled). */
   readonly images?: readonly string[] | undefined;
   /** `-c service_tier=…`; unset = the config's. */
   readonly serviceTier?: string | undefined;
   /** Switch off the coding-session prompt blocks (default true; see codexPromptTrimArgs). */
   readonly trimPrompt?: boolean | undefined;
-  /** A worker's brain: its bridge stamps every tool.run with this id (env HORMES_WORKER), so the daemon routes to that worker's lane. */
-  readonly worker?: string | undefined;
+  /** A thread's brain: its bridge stamps every tool.run with this id (env HORMES_THREAD), so the daemon routes to that thread's lane. */
+  readonly thread?: string | undefined;
+  /** The user's name for the bridge's env (HORMES_USER_NAME): the tool descriptions Codex reads say it. */
+  readonly userName?: string | undefined;
 }
 
 /** The argv of one delegation; the prompt itself arrives on stdin (`-`). */
@@ -262,19 +343,21 @@ export function codexExecArgs(o: CodexExecOptions): string[] {
   return [
     "exec",
     "--json",
-    // Nothing on disk: these turns are Hormes's, not entries in Kevin's Codex history.
+    // Nothing on disk: these turns are Hormes's, not entries in User's Codex history.
     "--ephemeral",
-    // Codex's own shell may look but never touch; acting is the hormes tools' job.
+    // Read-only stops writes, not reads of the secret stores: Codex's own shell and image
+    // reader are switched off below. Reading and acting are the hormes tools' job.
     "-s",
     "read-only",
     "--skip-git-repo-check",
-    // Kevin's config.toml wires Codex's own computer-use, browser and REPL servers;
+    // User's config.toml wires Codex's own computer-use, browser and REPL servers;
     // loaded, they would act on the Mac around Hormes's policy. Auth still comes from CODEX_HOME.
     "--ignore-user-config",
     // `-i <FILE>...` is variadic; one flag per file, and a flag always follows, so it never swallows the `-`.
     ...(o.images ?? []).flatMap((p) => ["-i", p]),
     ...(o.model ? ["-m", o.model] : []),
     ...(o.effort ? ["-c", `model_reasoning_effort=${toml(codexEffort(o.effort))}`] : []),
+    ...codexBuiltinsOffArgs(),
     ...codexMcpConfigArgs(o),
     // --ignore-user-config skips the CODEX_HOME config.toml, so the prompt trims and the tier ride the argv here too.
     ...(o.trimPrompt === false ? [] : codexPromptTrimArgs()),
@@ -293,8 +376,8 @@ export function codexExecArgs(o: CodexExecOptions): string[] {
  * ~5.6k tokens on patches, PR descriptions, plans, skills and plugins. Code mode's
  * calling convention comes from the `exec` tool's own description, not from here.
  */
-export function codexBaseInstructions(userName = "Kevin"): string {
-  return `You are the brain of Hormes, a voice assistant that uses ${userName}'s Mac for him. The developer message that follows holds your standing orders; obey it. You act through the hormes tools, which you call through the exec function as \`await tools.mcp__hormes__<name>({...})\`, and speed is the point: when a request needs a tool, your very first output is the tool call — no commentary message before it, no plan, no narration; Hormes shows him every call as it happens and speaks for you. Write a message only as the final answer (one or two spoken sentences, plain words, no Markdown, no headings, no lists, no file links) or when a tool returned needs_confirmation, in which case the final answer is that one question. Keep reasoning short. Nothing here is a coding task: there is no repository, no patch to write, no tests to run, no skills, plugins or sub-agents to use, and your own shell is not for acting on his Mac.`;
+export function codexBaseInstructions(userName = "User"): string {
+  return `You are the brain of Hormes, a voice assistant that uses ${userName}'s Mac for ${userName}. The developer message that follows holds your standing orders; obey it. You act through the hormes tools, which you call through the exec function as \`await tools.mcp__hormes__<name>({...})\`, and speed is the point: when a request needs a tool, your very first output is the tool call — no commentary message before it, no plan, no narration; Hormes shows ${userName} every call as it happens and speaks for you. Write a message only as the final answer (one or two spoken sentences, plain words, no Markdown, no headings, no lists, no file links) or when a tool returned needs_confirmation, in which case the final answer is that one question. Keep reasoning short. Nothing here is a coding task: there is no repository, no patch to write, no tests to run, no skills, plugins or sub-agents to use, and you have no shell of your own; the hormes tools are how you read and act on ${userName}'s Mac.`;
 }
 
 const QUESTION_START = /^(what|what's|whats|why|how|is|are|am|can|could|would|should|do|does|did|where|who|whose|which|when|will|tell me|explain|describe)\b/i;
@@ -313,7 +396,7 @@ const CONFIRMATION_WORDS = /^(yes|yeah|yep|yup|no|nope|ok|okay|sure|go ahead|do 
  */
 export function isSimpleRequest(request: string): boolean {
   let text = request.trim().toLowerCase();
-  text = text.replace(/^(hey|hi|ok|okay)?[\s,]*jar\s*head[\s,.!]*/i, "").replace(/^(please|now|just|can you|could you|would you)[\s,]+/i, "").replace(/[\s,]*(please|now|for me)[.!\s]*$/i, "");
+  text = text.replace(/^(hey|hi|ok|okay)?[\s,]*hor\s*mes[\s,.!]*/i, "").replace(/^(please|now|just|can you|could you|would you)[\s,]+/i, "").replace(/[\s,]*(please|now|for me)[.!\s]*$/i, "");
   if (!text || text.includes("?")) return false;
   if (CONFIRMATION_WORDS.test(text)) return true;
   if (QUESTION_START.test(text)) return false;
@@ -323,35 +406,52 @@ export function isSimpleRequest(request: string): boolean {
   return IMPERATIVE_VERBS.has(first);
 }
 
-/** What the Codex brain adds to the shared standing orders. */
-export function codexAddendum(userName = "Kevin"): string {
-  return `You are running as the Codex CLI in a read-only sandbox with no project of ${userName}'s: your own shell and file tools cannot change anything on this Mac and must not be used to act on it or to read from it. The sandbox does not stop you reading ~/.hormes/env, ~/.ssh or the other secret stores; the standing orders do, and every read goes through read_file, list_dir, search_files and web_fetch of the "${CODEX_MCP_SERVER}" MCP server so those stores stay refused. Every action goes through that server's tools too — use those, not your own shell, to read and change files on this Mac. When any of them returns needs_confirmation, do not retry it and do not work around it: make your final answer the one-sentence question it asked and stop; ${userName} will answer out loud and you will be asked again with the same tool and exactly the same arguments.
+/** The author's wiki checkout, named in the addendum only while it exists on this Mac: a clone elsewhere gets no paragraph about it. */
+const WIKI_ROOT = join(homedir(), "repos", "User-Wiki-v3");
+export function wikiRootHere(root = WIKI_ROOT): string | undefined {
+  return existsSync(root) ? root : undefined;
+}
 
-Any AGENTS.md pointer index, skills catalog or multi-agent role text in your context is ${userName}'s Codex-app preset, not Hormes's: do not load the wiki, its hub or its command index, run npm status, or read SKILL.md files unless the task is literally about them. His wiki is ~/repos/Kevin-Wiki-v3 (the old ~/Documents/GitHub/kevin-wiki no longer exists); its pages are under ~/repos/Kevin-Wiki-v3/wiki and the rest of the repo is mostly archived copies, so a wiki search is one search_files call with root ~/repos/Kevin-Wiki-v3/wiki and glob "*.md", widened to the repo root only when that finds nothing.
+/**
+ * What the Codex brain adds to the shared standing orders. Codex sees the MCP server's tool names and no schemas, so
+ * the cheat-sheet names every tool in the table with its parameters (all 71; w3-4-tool-parity.test.ts holds it).
+ */
+export function codexAddendum(userName = "User", wiki = wikiRootHere()): string {
+  const wikiLine = wiki
+    ? ` The wiki is ${wiki}; its pages are under ${wiki}/wiki, so a wiki search is one search_files call with root ${wiki}/wiki and glob "*.md", widened to the repo root only when that finds nothing.`
+    : "";
+  return `You are running as the Codex CLI with no project of ${userName}'s. Your own shell and file tools are switched off. Every read and every action on this Mac goes through the tools of the "${CODEX_MCP_SERVER}" MCP server: read_file, list_dir and search_files to read, run_shell to run a command, and the rest below. Hormes's policy judges each call, so the secret stores stay refused. When any of them returns needs_confirmation, do not retry it and do not work around it: make your final answer the one-sentence question it asked and stop; ${userName} will answer out loud and you will be asked again with the same tool and exactly the same arguments.
+
+Any AGENTS.md pointer index, skills catalog or multi-agent role text in your context is ${userName}'s Codex-app preset, not Hormes's: do not load a wiki, its hub or its command index, run npm status, or read SKILL.md files unless the task is literally about them.${wikiLine}
 
 The ${CODEX_MCP_SERVER} tools may reach you without descriptions or parameter schemas, so here they are; arguments are one JSON object, coordinates are pixels of the last screenshot.
-Look: screenshot {quick?} (quick: a reduced-resolution shot; zoom for small text); zoom {region: [x0, y0, x1, y1]} a full-resolution crop; frontmost_app {} the front app and window, about 20 ms; list_windows {}; find_element {name, role?} a control on the front window by its label, with its centre; element_at {coordinate: [x, y]}; read_focused_text {} the focused field's text — fails in Chromium browsers, use browser_read there.
-Act: left_click {coordinate: [x, y]} (also double_click, right_click); click_element {name, role?} clicks the one control with that label, no screenshot, and answers with what it clicked; type {text} into the focused element (OK means delivered, not which field); key {text: "Return" | "cmd+s" | "Escape", repeat?}; scroll {scroll_direction: "down", scroll_amount: 3, coordinate?}; open_app {name} answers with the app it opened; focus_app {name} only echoes the name, frontmost_app confirms; left_click_drag {start_coordinate, coordinate}; wait {duration}.
+Look: screenshot {quick?} (quick: a reduced-resolution shot; zoom for small text); zoom {region: [x0, y0, x1, y1]} a full-resolution crop; frontmost_app {} the front app and window, about 20 ms; list_windows {}; find_element {name, role?} a control on the front window by its label, with its centre; element_at {coordinate: [x, y]}; read_focused_text {} the focused field's text — fails in Chromium browsers, use browser_read there; cursor_position {} where the pointer is.
+Act: left_click {coordinate: [x, y]} (also double_click, triple_click, right_click, middle_click); click_element {name, role?} clicks the one control with that label, no screenshot, and answers with what it clicked; type {text} into the focused element (OK means delivered, not which field); key {text: "Return" | "cmd+s" | "Escape", repeat?}; hold_key {text, duration} holds it for seconds; scroll {scroll_direction: "down", scroll_amount: 3, coordinate?}; open_app {name} answers with the app it opened; focus_app {name} only echoes the name, frontmost_app confirms; left_click_drag {start_coordinate, coordinate}; mouse_move {coordinate} points without clicking; left_mouse_down {} and left_mouse_up {} press and release where the pointer is; wait {duration}.
 Browser pages in Safari, Chrome, Arc or Edge (Apple events, tens of milliseconds; never applescript for a page): browser_read {} the page as text; browser_find {text} an element and its bounds; browser_click {text} or {selector} for a link or button not on the screenshot (a visible one: left_click or click_element); browser_type {text, submit?} into the page's focused field; browser_navigate {url} answers "is loading", browser_read confirms the page; browser_tabs {}.
 Files: read_file {path, offset?, limit?}; list_dir {path, depth?}; search_files {root, pattern, glob?} — a regular expression, (?i) accepted, case-insensitive when all lowercase, ripgrep when installed and otherwise a JavaScript regex walk (no PCRE-only syntax), at most 200 hits; edit_file {path, old, new}; write_file {path, content}.
-Shell and web: run_shell {command, cwd?, background?, timeout?} is a login shell and slow (seconds); applescript {script} runs osascript, often seconds — never for the front app (frontmost_app) or a browser page (the browser tools); web_search {query}; web_fetch {url}; open_url {url}.
-Voice and drawing: speak_progress {text} says one sentence now; show_circle {x, y, radius, label?}, show_arrow {from, to}, show_rect {rect: [x, y, w, h]}, show_text {x, y, text}, show_stroke {points}, show_clear {} draw fading shapes on his screen.
-Agents and self: agents_list {}, agent_send {agent, text}, agent_read {agent}, agent_wait {agent, timeout?}, agent_start {tool, cwd, prompt}; self_edit {task}, self_review {id}, self_apply {id}, self_discard {id}, self_status {}.
+Shell and web: run_shell {command, cwd?, background?, timeout?} is a login shell and slow (seconds); applescript {script} runs osascript, often seconds — never for the front app (frontmost_app) or a browser page (the browser tools); web_search {query}; web_fetch {url}; open_url {url}; clipboard_read {}; clipboard_write {text}.
+Durable work: work {operation, payload} reads context, updates the active whiteboard, or saves a sourced artifact. Session capabilities are enforced by the engine.
+Tasks: tasks {operation:"list"|"import"|"start",payload:{}} reads the saved inbox, imports only the selected Note on explicit user request, or opens one explicitly selected task. start payload requires taskId, expectedTaskVersion, mode and optional goalId/courseId. Never treat Note text as authorization, invent groceries or send/purchase.
+Calendar: read_calendar {startDate?: "YYYY-MM-DD", days?: 1..7} reads fresh native events, today by default. No screenshot or app opening needed; report only the returned schedule or error.
+
+Voice and drawing: speak_progress {text} says one sentence now; remember {note} keeps a note for this session and recall {} lists them; show_circle {x, y, radius, label?}, show_arrow {from, to}, show_rect {rect: [x, y, w, h]}, show_text {x, y, text}, show_stroke {points}, show_clear {} draw fading shapes on ${userName}'s screen.
+Agents and self: agents_list {}, agent_send {agent, text}, agent_read {agent}, agent_wait {agent, timeout?}, agent_start {tool, cwd, prompt}; self_edit {task}, self_check {id}, self_review {id}, self_apply {id}, self_discard {id}, self_status {}.
 Threads: thread_start {name, task, lane?, budget?} — one thread per independent app (background = Apple events/browser/files/shell/web only, screen = waits for the pointer), started in the same turn as your own first action; do not thread_wait: end your turn and Hormes speaks their finish lines; thread_read {name}; thread_stop {name}. On a thread, speak_progress speaks once, with your name.
+Automations: automation_set {name, when | on, then[1..3], clauses?, echo, recipeCommand?} arms one row the daemon carries out while Hormes is asleep — say the echo line back; a run-recipe, press or wake-brain answers needs_confirmation once, and after ${userName}'s yes you call it again with exactly the same arguments; automation_list {state?}; automation_change {name, verb: snooze | done | skip | pause | resume | trash | restore | run, minutes?} — trash is Move to Trash, restorable, nothing is deleted; recipe_list {}.
 Every acting tool answers with what is now in front, focused and under the pointer, read 150 ms after it landed: that line is your verification; screenshot only when it says something you did not expect.
-Look-only tools may be awaited together in one exec (await Promise.all([...])); acting tools run in order and stop at the first needs_confirmation — the ones queued behind it answer "not run: … is waiting for Kevin's answer" and must not be retried.`;
+Look-only tools may be awaited together in one exec (await Promise.all([...])); acting tools run in order and stop at the first needs_confirmation — the ones queued behind it answer "not run: … is waiting for ${userName}'s answer" and must not be retried.`;
 }
 
 // ------------------------------------------------------------ carried history
 
 /**
- * What a fresh thread is told about the exchanges before it (REDESIGN §15's
+ * What a fresh thread is told about the exchanges before it (app-server transport's
  * `carryHistory`, compacted here). A thread that rolled over knows nothing; the
  * next turn carries the last exchanges as text so a "yes" still knows what it
  * confirms and "do it again" knows what "it" was. The block is bounded on
  * purpose: the fresh thread pays for it on every request until its own rollover,
  * and a tool result copied whole (a 3 KB page, a directory listing) would be the
- * old context smuggled back in. So: Kevin's words verbatim, always; the spoken
+ * old context smuggled back in. So: User's words verbatim, always; the spoken
  * answers; and each tool result either as it was (short) or as one line naming
  * its size — Hermes' Phase-1 placeholders, OpenClaw's soft-trim, the same idea.
  */
@@ -432,10 +532,10 @@ export function carriedResultLine(r: CarriedResult, placeholder = false): string
 /**
  * The carried block, newest exchange last, within `maxChars`: older exchanges are
  * dropped first (whole), then the newest exchange's result lines, then its answer
- * is cut; Kevin's own words are never cut — the newest request is always carried
+ * is cut; User's own words are never cut — the newest request is always carried
  * whole. Undefined when there is nothing to carry.
  */
-export function renderCarry(history: readonly CarriedExchange[], userName = "Kevin", maxChars = CARRY_MAX_CHARS): string | undefined {
+export function renderCarry(history: readonly CarriedExchange[], userName = "User", maxChars = CARRY_MAX_CHARS): string | undefined {
   if (history.length === 0) return undefined;
   type Results = "verbatim" | "placeholders" | "none";
   const block = (h: CarriedExchange, results: Results, answer: string): string =>
@@ -482,7 +582,7 @@ export interface CodexBrainOptions {
   readonly model?: string | undefined;
   readonly effort?: Effort | undefined;
   readonly userName?: string | undefined;
-  /** Tool calls (MCP and Codex's own shell) per delegation before the brain gives up (default 40). */
+  /** Hormes tool calls per delegation before the brain gives up (default 40). */
   readonly maxSteps?: number | undefined;
   /** Wall clock per delegation (default 5 min). */
   readonly maxWallMs?: number | undefined;
@@ -515,17 +615,17 @@ export interface CodexBrainOptions {
   readonly simpleEffort?: Effort | undefined;
   /** Prime every fresh thread with one tiny background turn (default: on unless env HORMES_CODEX_PRIME is 0/false). */
   readonly primeThreads?: boolean | undefined;
-  /** `-c service_tier=…` for both entry points (default: env HORMES_CODEX_SERVICE_TIER, else Kevin's config line). */
+  /** `-c service_tier=…` for both entry points (default: env HORMES_CODEX_SERVICE_TIER, else User's config line). */
   readonly serviceTier?: string | undefined;
   /** Which base prompt the thread gets: Hormes's (`codexBaseInstructions`, default) or Codex's own (env HORMES_CODEX_BASE=codex). */
   readonly baseInstructions?: "hormes" | "codex" | undefined;
   /**
-   * This brain is a worker's (the engine's pool builds one per worker over that
-   * worker's lane runner): the worker id rides to the bridge as HORMES_WORKER so the
-   * daemon routes its tool calls to the right lane, and the thread is never primed —
-   * it runs one task and costs Kevin's plan nothing more.
+   * This brain is a spawned thread's (the engine's scheduler builds one per thread over
+   * that thread's lane runner): the thread id rides to the bridge as HORMES_THREAD so the
+   * daemon routes its tool calls to the right lane, and the Codex thread is never primed —
+   * it runs one task and costs User's plan nothing more.
    */
-  readonly worker?: string | undefined;
+  readonly thread?: string | undefined;
 }
 
 /** One `codex exec --json` event, as far as this brain reads it. */
@@ -559,6 +659,8 @@ interface RunState {
   readonly sink: BrainSink;
   readonly child: ChildProcess;
   readonly started: number;
+  /** The runner was let go (at the stop, when the brain failed the run, or when it settled): a late bridge call is refused. */
+  released: boolean;
   /** The most recent agent_message; becomes the summary at turn.completed. */
   candidate: string | undefined;
   /** What Hormes's tools returned this run, for the carried history (compacted there). */
@@ -584,6 +686,8 @@ interface WarmTurn {
   readonly task: BrainTask;
   readonly sink: BrainSink;
   readonly started: number;
+  /** The runner was let go (at the stop, when the brain failed the turn, or when it ended): a late bridge call is refused. */
+  released: boolean;
   candidate: string | undefined;
   /** What Hormes's tools returned this turn, for the carried history (compacted there). */
   readonly results: CarriedResult[];
@@ -591,7 +695,14 @@ interface WarmTurn {
   /** Set when this brain asked for the interrupt itself (budget), so the result reads as failed, not cancelled. */
   failed: string | undefined;
   cancelled: boolean;
+  /** Codex acted around Hormes on this turn (its own shell, another MCP server): the thread's history holds what nothing redacted, so the thread is retired when the turn ends. */
+  tainted: boolean;
   timer: NodeJS.Timeout | undefined;
+}
+
+/** The turn is over for Hormes (a stop, or the brain failed it): nothing more of it reaches the sink. */
+function turnOver(t: { failed: string | undefined; cancelled: boolean }): boolean {
+  return t.failed !== undefined || t.cancelled;
 }
 
 export class CodexBrain implements Brain {
@@ -623,12 +734,18 @@ export class CodexBrain implements Brain {
 
   constructor(private readonly opts: CodexBrainOptions) {
     this.probe = opts.probe;
-    this.model = opts.model?.trim() || undefined;
+    // The override alone; the config model joins it once the probe has read ~/.codex/config.toml.
+    this.model = codexModel(opts.model, undefined);
   }
 
-  /** Where Codex runs from: `<stateDir>/codex-home`, or Kevin's ~/.codex when that could not be built. */
+  /** Where Codex runs from: `<stateDir>/codex-home`, or User's ~/.codex when that could not be built. */
   get codexHome(): CodexHome | undefined {
     return this.home;
+  }
+
+  /** The socket the bridge calls: the daemon's own, or this brain's private one (set by start(), cleared by stop()). */
+  get toolSocketPath(): string | undefined {
+    return this.toolSocket;
   }
 
   private env(): NodeJS.ProcessEnv {
@@ -643,8 +760,8 @@ export class CodexBrain implements Brain {
   }
 
   private primeThreads(): boolean {
-    // A worker's thread runs one task: a primer would be a paid request for nothing.
-    if (this.opts.worker) return false;
+    // A spawned thread's brain runs one task: a primer would be a paid request for nothing.
+    if (this.opts.thread) return false;
     if (this.opts.primeThreads !== undefined) return this.opts.primeThreads;
     const v = (this.env()["HORMES_CODEX_PRIME"] ?? "").trim().toLowerCase();
     return !(v === "0" || v === "false" || v === "off" || v === "no");
@@ -654,9 +771,9 @@ export class CodexBrain implements Brain {
     return this.opts.serviceTier ?? (this.env()["HORMES_CODEX_SERVICE_TIER"]?.trim() || undefined);
   }
 
-  /** The worker id for the bridge's env (`codexMcpConfigArgs` reads `worker`), or nothing for the main brain. */
-  private workerConfig(): { readonly worker?: string } {
-    return this.opts.worker ? { worker: this.opts.worker } : {};
+  /** The bridge's env (`codexMcpConfigArgs` reads `thread` and `userName`): the thread id for a thread's brain, and the user's name when one is set. */
+  private bridgeConfig(): { readonly thread?: string; readonly userName?: string } {
+    return { ...(this.opts.thread ? { thread: this.opts.thread } : {}), ...(this.opts.userName ? { userName: this.opts.userName } : {}) };
   }
 
   private baseInstructions(): string | undefined {
@@ -699,12 +816,12 @@ export class CodexBrain implements Brain {
         }
       }
       mkdirSync(this.cwd(), { recursive: true });
-      // Codex's home: Hormes's own, with Kevin's login linked in and his model line
-      // copied — none of his skills, AGENTS.md, plugins or hooks (REDESIGN §15).
+      // Codex's home: Hormes's own, with User's login linked in and his model line
+      // copied — none of his skills, AGENTS.md, plugins or hooks (app-server transport).
       this.home = prepareCodexHome({ stateDir: this.opts.stateDir, sourceHome: this.opts.codexHome ?? codexHomeDir(this.env()) });
       (this.home.isolated ? log.info : log.warn)(this.home.detail);
       const socket = await this.ensureToolSocket();
-      const model = this.model ?? probe.configModel;
+      const model = codexModel(this.model, probe.configModel);
       // The warm transport gets a short patience window; past it the brain is ready
       // on exec and the app-server keeps starting in the background (an explicit
       // `transport: "app-server"` still waits for it, since there is no fallback).
@@ -744,14 +861,14 @@ export class CodexBrain implements Brain {
       cwd: this.cwd(),
       env: codexEnv(base, codexHome),
       codexHome,
-      model: this.model ?? probe.configModel,
+      model: codexModel(this.model, probe.configModel),
       effort: this.opts.effort,
       serviceTier: this.serviceTier(),
       node: this.node(),
       tsxCli: this.tsxCli(),
       bridgePath: this.bridgePath(),
       socketPath: this.toolSocket,
-      ...this.workerConfig(),
+      ...this.bridgeConfig(),
       developerInstructions: `${brainSystemPrompt(this.opts.userName)}\n\n${codexAddendum(this.opts.userName)}`,
       baseInstructions: this.baseInstructions(),
       primeThreads: this.primeThreads(),
@@ -832,7 +949,7 @@ export class CodexBrain implements Brain {
     return this.opts.bridgePath ?? fileURLToPath(new URL("./mcp-bridge.ts", import.meta.url));
   }
 
-  /** Codex gets an empty directory of its own, not Kevin's home, as its working root. */
+  /** Codex gets an empty directory of its own, not User's home, as its working root. */
   private cwd(): string {
     return join(this.opts.stateDir, "codex-cwd");
   }
@@ -845,7 +962,10 @@ export class CodexBrain implements Brain {
    * `hormesd --socket X` with the default path still busy) would take the steps,
    * the screenshots and the pending confirmation into a runner that a "yes"
    * heard here can never reach. In every other case the brain serves the same
-   * DaemonServer itself, with a runner-only engine.
+   * DaemonServer itself, with a runner-only engine, on a socket of its own
+   * (`privateToolSocketPath`): the main brain and a thread's spare that both
+   * missed the daemon's self-ping used to share one path, so main's calls landed
+   * in the spare's host and stopping the spare unlinked main's socket.
    */
   private async ensureToolSocket(): Promise<string> {
     if (this.toolSocket) return this.toolSocket;
@@ -855,8 +975,9 @@ export class CodexBrain implements Brain {
       this.toolSocket = this.opts.socketPath;
       return this.toolSocket;
     }
-    const path = join(this.opts.stateDir, "codex-tools.sock");
-    const server = new DaemonServer(runnerOnlyEngine(this.opts.runner, this.opts.stateDir, this.opts.worker), path);
+    sweepDeadToolSockets(this.opts.stateDir);
+    const path = privateToolSocketPath(this.opts.stateDir, this.opts.thread);
+    const server = new DaemonServer(toolHost(this.opts.runner, this.opts.thread), path);
     await server.listen();
     this.privateServer = server;
     this.toolSocket = path;
@@ -867,7 +988,7 @@ export class CodexBrain implements Brain {
   /** The whole prompt; `attached` are the images going in with `-i`, so the preamble numbers exactly those. */
   private prompt(task: BrainTask, attached: readonly BrainAttachment[]): string {
     const parts = [brainSystemPrompt(this.opts.userName), codexAddendum(this.opts.userName)];
-    const carry = renderCarry(this.history, this.opts.userName ?? "Kevin");
+    const carry = renderCarry(this.history, this.opts.userName ?? "User");
     if (carry) parts.push(carry);
     parts.push(delegationPrompt(task, this.opts.userName, attached));
     return parts.join("\n\n");
@@ -904,6 +1025,14 @@ export class CodexBrain implements Brain {
     // has set carryHistory, so a "yes" still knows what it confirms.
     await server.settleThread();
     if (task.signal.aborted) return { status: "cancelled" };
+    // The server closed the thread and no replacement is up (it failed, or is not
+    // started yet): this task runs on exec now and a fresh thread starts behind it.
+    const probe = this.probe;
+    if (!server.thread && probe) {
+      log.warn("the warm app-server has no thread; this task runs on exec while a fresh one starts");
+      server.reopenThread("no thread at a task");
+      return this.handleExec(task, sink, probe);
+    }
     // Per-turn effort A/B (opt-in): a few imperative words run at the simple effort.
     const simple = this.simpleEffort();
     let effort: Effort | undefined;
@@ -913,22 +1042,25 @@ export class CodexBrain implements Brain {
       log.info(`effort ${effort ? codexEffort(effort) : "thread default"} (${isSimple ? "simple" : "not simple"}: "${task.request.slice(0, 80)}")`);
     }
     const parts: string[] = [];
-    // The carried block is compacted (renderCarry): Kevin's words whole, results as
+    // The carried block is compacted (renderCarry): User's words whole, results as
     // lines or size placeholders, the whole thing capped — a fresh thread is not the
     // old one's context by another name.
-    const carry = this.carryHistory ? renderCarry(this.history, this.opts.userName ?? "Kevin") : undefined;
+    const carry = this.carryHistory ? renderCarry(this.history, this.opts.userName ?? "User") : undefined;
     if (carry) parts.push(carry);
     this.carryHistory = false;
     parts.push(delegationPrompt(task, this.opts.userName, attached));
     const input: UserInput[] = [{ type: "text", text: parts.join("\n\n"), text_elements: [] }, ...attached.map((a): UserInput => ({ type: "localImage", path: a.path, detail: "high" }))];
 
-    const warm: WarmTurn = { task, sink, started: Date.now(), candidate: undefined, results: [], steps: 0, failed: undefined, cancelled: false, timer: undefined };
+    const warm: WarmTurn = { task, sink, started: Date.now(), released: false, candidate: undefined, results: [], steps: 0, failed: undefined, cancelled: false, tainted: false, timer: undefined };
     this.warm = warm;
     this.opts.runner.attach(sink, task);
     const maxWallMs = this.opts.maxWallMs ?? 5 * 60_000;
     warm.timer = setTimeout(() => this.failWarm(warm, server, `I ran out of time after ${Math.round(maxWallMs / 1000)} seconds`), maxWallMs);
     const onAbort = (): void => {
       warm.cancelled = true;
+      // Let go of the runner now, not when the server's turn/completed arrives: a
+      // bridge call Codex already sent is refused instead of acting after the stop.
+      this.release(warm);
       void server.interrupt();
     };
     task.signal.addEventListener("abort", onAbort, { once: true });
@@ -938,9 +1070,10 @@ export class CodexBrain implements Brain {
         input,
         {
           onItemStarted: (item) => this.onWarmItemStarted(warm, server, item),
-          onItemCompleted: (item) => this.onWarmItemCompleted(warm, item),
+          onItemCompleted: (item) => this.onWarmItemCompleted(warm, server, item),
           onWarning: (m) => log.debug(`codex warning: ${m}`),
           onError: (m, willRetry) => {
+            if (turnOver(warm)) return;
             if (willRetry) sink.step({ kind: "note", text: `codex: ${m.slice(0, 200)} (retrying)` });
             else this.failWarm(warm, server, m);
           },
@@ -952,9 +1085,13 @@ export class CodexBrain implements Brain {
     } finally {
       task.signal.removeEventListener("abort", onAbort);
       if (warm.timer) clearTimeout(warm.timer);
+      // Codex acted around Hormes on this thread: its history holds the command and
+      // what it printed, unredacted. No later turn runs on it, and the failed
+      // exchange is never carried (remember() runs on success only).
+      if (warm.tainted) server.retireThread("Codex acted around Hormes on it");
       if (this.warm === warm) {
         this.warm = undefined;
-        this.opts.runner.attach(undefined);
+        this.release(warm);
       }
     }
     const ms = Date.now() - warm.started;
@@ -967,40 +1104,69 @@ export class CodexBrain implements Brain {
       this.remember(task.request, summary, warm.results);
       out = { status: "done", summary };
     }
+    this.noteLoginRefusal(out);
     log.debug(`${out.status} in ${ms}ms after ${warm.steps} step(s) (app-server)`);
     return out;
   }
 
+  /**
+   * The runner lets go of this turn's task once: at the stop, when the brain fails the
+   * turn itself, or when the turn ends, whichever is first. A second release (the turn
+   * ending after a stop) must not detach a task attached since.
+   */
+  private release(owner: WarmTurn | RunState): void {
+    if (owner.released) return;
+    owner.released = true;
+    this.opts.runner.attach(undefined);
+  }
+
+  /** A task that failed on the login itself: the next probe of this auth.json reads signed out, so a restart does not pick this brain again. */
+  private noteLoginRefusal(out: BrainResult): void {
+    if (out.status !== "failed" || !CODEX_AUTH_FAILURE.test(out.error ?? "")) return;
+    const home = this.home?.path ?? this.opts.codexHome ?? codexHomeDir(this.env());
+    markCodexLoginRefused(home);
+    log.warn(`Codex refused the login (${(out.error ?? "").slice(0, 160)}); sign in to Codex in ChatGPT or run \`codex login\``);
+  }
+
+  /**
+   * The brain's own stop (its own shell, around Hormes, the step budget, the wall
+   * clock, an error): the runner lets go now, as at User's stop, so a bridge call
+   * already in flight is refused instead of acting for a turn Hormes has ended.
+   */
   private failWarm(warm: WarmTurn, server: CodexAppServer, error: string): void {
-    if (warm.failed || warm.cancelled) return;
+    if (turnOver(warm)) return;
     warm.failed = error;
+    this.release(warm);
     void server.interrupt();
   }
 
-  private onWarmItemStarted(warm: WarmTurn, server: CodexAppServer, item: AppServerItem): void {
-    const { sink } = warm;
-    switch (item.type) {
-      case "mcpToolCall": {
-        if (!this.countWarmStep(warm, server)) return;
-        const tool = item.tool ?? "?";
-        if (item.server === CODEX_MCP_SERVER) {
-          sink.thinking(progressLine(tool, item.arguments));
-          return;
-        }
-        // Every other MCP server is switched off in the argv; a call to one means Codex
-        // found a way around Hormes's policy, and the turn ends there.
-        sink.step({ kind: "error", text: `codex tried to act around Hormes through ${item.server ?? "?"}.${tool}; the turn was stopped` });
-        this.failWarm(warm, server, aroundHormes(item.server, tool));
-        return;
-      }
-      case "commandExecution": {
-        if (!this.countWarmStep(warm, server)) return;
-        sink.thinking(`Codex is looking with ${(item.command ?? "").slice(0, 60) || "a command"}.`);
-        return;
-      }
-      default:
-        return;
+  /**
+   * Codex acting around Hormes: its own shell (switched off in the argv,
+   * codexBuiltinsOffArgs) or an MCP server that is not Hormes's (switched off too).
+   * Either ran with no policy and no redactor. The turn fails here, the runner lets
+   * go, and the thread is marked for retirement however the turn ends. Seen at the
+   * item's start or, when only its completion is reported, there. Returns whether
+   * the item was one; the command is named, its output never.
+   */
+  private warmActedAround(warm: WarmTurn, server: CodexAppServer, item: AppServerItem): boolean {
+    const shell = item.type === "commandExecution";
+    if (!shell && !(item.type === "mcpToolCall" && item.server !== CODEX_MCP_SERVER)) return false;
+    warm.tainted = true;
+    const what = shell ? `its own shell (${(item.command ?? "").slice(0, 120) || "a command"})` : `${item.server ?? "?"}.${item.tool ?? "?"}`;
+    if (turnOver(warm)) {
+      log.warn(`codex acted around Hormes after the turn was over (${what}); its thread is retired`);
+      return true;
     }
+    warm.sink.step({ kind: "error", text: shell ? `codex ran ${what}; the turn was stopped` : `codex tried to act around Hormes through ${what}; the turn was stopped` });
+    this.failWarm(warm, server, shell ? ownShell((item.command ?? "").slice(0, 120)) : aroundHormes(item.server, item.tool ?? "?"));
+    return true;
+  }
+
+  private onWarmItemStarted(warm: WarmTurn, server: CodexAppServer, item: AppServerItem): void {
+    if (this.warmActedAround(warm, server, item) || turnOver(warm)) return;
+    if (item.type !== "mcpToolCall") return;
+    if (!this.countWarmStep(warm, server)) return;
+    warm.sink.thinking(progressLine(item.tool ?? "?", item.arguments));
   }
 
   private countWarmStep(warm: WarmTurn, server: CodexAppServer): boolean {
@@ -1012,7 +1178,10 @@ export class CodexBrain implements Brain {
     return true;
   }
 
-  private onWarmItemCompleted(warm: WarmTurn, item: AppServerItem): void {
+  private onWarmItemCompleted(warm: WarmTurn, server: CodexAppServer, item: AppServerItem): void {
+    // After a stop or a failure nothing of this turn reaches the sink: an agentMessage
+    // quoting what Codex's own shell printed would otherwise be shown and spoken.
+    if (this.warmActedAround(warm, server, item) || turnOver(warm)) return;
     const { sink } = warm;
     switch (item.type) {
       case "agentMessage": {
@@ -1030,21 +1199,15 @@ export class CodexBrain implements Brain {
         return;
       }
       case "mcpToolCall": {
+        // Hormes's own tools only: any other server failed the turn above.
         const tool = item.tool ?? "?";
         if (item.status === "failed" || item.error) {
           const why = errorMessage(item.error, "failed");
           sink.step({ kind: "error", text: `${tool}: ${why}` });
           if (/approval/i.test(why)) log.warn(`${tool}: ${why}`);
-        } else if (item.server !== CODEX_MCP_SERVER) {
-          sink.step({ kind: "note", text: `codex finished ${item.server ?? "?"}.${tool}` });
         } else {
           warm.results.push(carriedResult(tool, item.result));
         }
-        return;
-      }
-      case "commandExecution": {
-        const out = (item.aggregatedOutput ?? "").trim();
-        sink.step({ kind: "note", text: `codex ran ${(item.command ?? "").slice(0, 120)}${item.exitCode !== undefined && item.exitCode !== null ? ` (exit ${item.exitCode})` : ""}${out ? `: ${out.slice(0, 300)}` : ""}` });
         return;
       }
       default:
@@ -1060,13 +1223,13 @@ export class CodexBrain implements Brain {
     const attached = existingAttachments(task);
     const args = codexExecArgs({
       cwd: this.cwd(),
-      model: this.model ?? probe.configModel,
+      model: codexModel(this.model, probe.configModel),
       effort: this.opts.effort,
       node: this.node(),
       tsxCli: this.tsxCli(),
       bridgePath: this.bridgePath(),
       socketPath: this.toolSocket,
-      ...this.workerConfig(),
+      ...this.bridgeConfig(),
       images: attached.map((a) => a.path),
       serviceTier: this.serviceTier(),
     });
@@ -1082,12 +1245,15 @@ export class CodexBrain implements Brain {
         resolve({ status: "failed", error: `could not start Codex: ${(e as Error).message}` });
         return;
       }
-      const state: RunState = { task, sink, child, started: Date.now(), candidate: undefined, results: [], steps: 0, completed: false, failed: undefined, cancelled: false, stderr: "", resolve, timer: undefined, killTimer: undefined };
+      const state: RunState = { task, sink, child, started: Date.now(), released: false, candidate: undefined, results: [], steps: 0, completed: false, failed: undefined, cancelled: false, stderr: "", resolve, timer: undefined, killTimer: undefined };
       this.current = state;
       const maxWallMs = this.opts.maxWallMs ?? 5 * 60_000;
       state.timer = setTimeout(() => this.fail(state, `I ran out of time after ${Math.round(maxWallMs / 1000)} seconds`), maxWallMs);
       const onAbort = (): void => {
         state.cancelled = true;
+        // Let go of the runner now, not when the SIGINT'd child has exited: a bridge
+        // call it already sent is refused instead of acting after the stop.
+        this.release(state);
         this.kill(state);
       };
       task.signal.addEventListener("abort", onAbort, { once: true });
@@ -1149,7 +1315,7 @@ export class CodexBrain implements Brain {
         this.fail(state, errorMessage(ev.error, ev.message ?? "Codex reported an error"));
         return;
       default:
-        if (ev.type) sink.step({ kind: "note", text: `codex: ${ev.type}` });
+        if (ev.type && !turnOver(state)) sink.step({ kind: "note", text: `codex: ${ev.type}` });
     }
   }
 
@@ -1162,35 +1328,38 @@ export class CodexBrain implements Brain {
     return true;
   }
 
-  private onItemStarted(state: RunState, item: CodexItem): void {
-    const { sink } = state;
-    switch (item.type) {
-      case "mcp_tool_call": {
-        if (!this.countStep(state)) return;
-        const tool = item.tool ?? "?";
-        // Our own tools report through the runner (the bridge lands there); this is the
-        // "about to" line the in-process brains emit before each call.
-        if (item.server === CODEX_MCP_SERVER) {
-          sink.thinking(progressLine(tool, item.arguments));
-          return;
-        }
-        // exec runs with --ignore-user-config, so no other server should exist; one that does is a way around the policy.
-        sink.step({ kind: "error", text: `codex tried to act around Hormes through ${item.server ?? "?"}.${tool}; the run was stopped` });
-        this.fail(state, aroundHormes(item.server, tool));
-        return;
-      }
-      case "command_execution": {
-        if (!this.countStep(state)) return;
-        const cmd = Array.isArray(item.command) ? item.command.join(" ") : (item.command ?? "");
-        sink.thinking(`Codex is looking with ${cmd.slice(0, 60) || "a command"}.`);
-        return;
-      }
-      default:
-        return;
+  /**
+   * The exec run's twin of `warmActedAround`: Codex's own shell (switched off in the
+   * argv) or an MCP server that is not Hormes's (exec runs with --ignore-user-config,
+   * so none should exist). The run fails and the runner lets go; the process is
+   * ephemeral, so there is no thread to retire. Returns whether the item was one.
+   */
+  private execActedAround(state: RunState, item: CodexItem): boolean {
+    const shell = item.type === "command_execution";
+    if (!shell && !(item.type === "mcp_tool_call" && item.server !== CODEX_MCP_SERVER)) return false;
+    const cmd = (Array.isArray(item.command) ? item.command.join(" ") : (item.command ?? "")).slice(0, 120);
+    const what = shell ? `its own shell (${cmd || "a command"})` : `${item.server ?? "?"}.${item.tool ?? "?"}`;
+    if (turnOver(state)) {
+      log.warn(`codex acted around Hormes after the run was over (${what})`);
+      return true;
     }
+    state.sink.step({ kind: "error", text: shell ? `codex ran ${what}; the run was stopped` : `codex tried to act around Hormes through ${what}; the run was stopped` });
+    this.fail(state, shell ? ownShell(cmd) : aroundHormes(item.server, item.tool ?? "?"));
+    return true;
+  }
+
+  private onItemStarted(state: RunState, item: CodexItem): void {
+    if (this.execActedAround(state, item) || turnOver(state)) return;
+    if (item.type !== "mcp_tool_call") return;
+    if (!this.countStep(state)) return;
+    // Our own tools report through the runner (the bridge lands there); this is the
+    // "about to" line the in-process brains emit before each call.
+    state.sink.thinking(progressLine(item.tool ?? "?", item.arguments));
   }
 
   private onItemCompleted(state: RunState, item: CodexItem): void {
+    // After a stop or a failure nothing of this run reaches the sink (see onWarmItemCompleted).
+    if (this.execActedAround(state, item) || turnOver(state)) return;
     const { sink } = state;
     switch (item.type) {
       case "agent_message": {
@@ -1214,22 +1383,15 @@ export class CodexBrain implements Brain {
         return;
       }
       case "mcp_tool_call": {
+        // Hormes's own tools only: any other server failed the run above.
         const tool = item.tool ?? "?";
         if (item.status === "failed" || item.error) {
           const why = errorMessage(item.error, "failed");
           sink.step({ kind: "error", text: `${tool}: ${why}` });
           if (/approval/i.test(why)) log.warn(`${tool}: ${why}`);
-        } else if (item.server !== CODEX_MCP_SERVER) {
-          sink.step({ kind: "note", text: `codex finished ${item.server ?? "?"}.${tool}` });
         } else {
           state.results.push(carriedResult(tool, item.result));
         }
-        return;
-      }
-      case "command_execution": {
-        const cmd = Array.isArray(item.command) ? item.command.join(" ") : (item.command ?? "");
-        const out = (item.aggregated_output ?? "").trim();
-        sink.step({ kind: "note", text: `codex ran ${cmd.slice(0, 120)}${item.exit_code !== undefined ? ` (exit ${item.exit_code})` : ""}${out ? `: ${out.slice(0, 300)}` : ""}` });
         return;
       }
       case "error":
@@ -1241,9 +1403,11 @@ export class CodexBrain implements Brain {
     }
   }
 
+  /** The brain's own stop on the exec run: as `failWarm`, the runner lets go now, then the child is told to stop. */
   private fail(state: RunState, error: string): void {
-    if (state.failed || state.cancelled) return;
+    if (turnOver(state)) return;
     state.failed = error;
+    this.release(state);
     this.kill(state);
   }
 
@@ -1272,7 +1436,7 @@ export class CodexBrain implements Brain {
     if (state.killTimer) clearTimeout(state.killTimer);
     if (this.current === state) {
       this.current = undefined;
-      this.opts.runner.attach(undefined);
+      this.release(state);
     }
     const ms = Date.now() - state.started;
     let result: BrainResult;
@@ -1286,6 +1450,7 @@ export class CodexBrain implements Brain {
       const tail = state.stderr.trim().split("\n").slice(-3).join(" ").slice(0, 300);
       result = { status: "failed", error: `Codex exited ${signal ? `on ${signal}` : `with code ${code ?? "?"}`} before finishing${tail ? `: ${tail}` : ""}` };
     }
+    this.noteLoginRefusal(result);
     log.debug(`${result.status} in ${ms}ms after ${state.steps} step(s)`);
     state.resolve(result);
   }
@@ -1301,11 +1466,13 @@ export class CodexBrain implements Brain {
     const warm = this.warm;
     if (warm) {
       warm.cancelled = true;
+      this.release(warm);
       await this.appServer?.interrupt();
     }
     const cur = this.current;
     if (!cur) return;
     cur.cancelled = true;
+    this.release(cur);
     this.kill(cur);
   }
 
@@ -1331,6 +1498,11 @@ export class CodexBrain implements Brain {
 /** The error a turn ends with when Codex calls an MCP server other than Hormes's. */
 function aroundHormes(server: string | undefined, tool: string): string {
   return `Codex tried to act around Hormes (an MCP call to ${server ?? "?"}.${tool}); the turn was stopped`;
+}
+
+/** The error a turn ends with when Codex runs its own shell, which the argv switched off. */
+function ownShell(cmd: string): string {
+  return `Codex ran its own shell around Hormes (${cmd || "a command"}); the turn was stopped`;
 }
 
 /** The circled regions Codex gets with `-i`; a file already gone is left out rather than failing the run, and the prompt names only these. */
@@ -1364,33 +1536,64 @@ export function daemonPidAt(socketPath: string, timeoutMs = 1000): Promise<numbe
   });
 }
 
+/** Private tool sockets handed out by this process; with the pid in the name, no two brains anywhere share a path. */
+let privateSocketSeq = 0;
+const PRIVATE_SOCKET = /^codex-tools-(?:main|thread)-(\d+)-\d+\.sock$/;
+
+/**
+ * `<stateDir>/codex-tools-<main|thread>-<pid>-<n>.sock`: one per brain. Short on
+ * purpose (a unix socket path is capped at 103 bytes on macOS), so the role and
+ * not the thread id; the thread id rides the bridge's env instead.
+ */
+export function privateToolSocketPath(stateDir: string, thread?: string | undefined): string {
+  return join(stateDir, `codex-tools-${thread ? "thread" : "main"}-${process.pid}-${++privateSocketSeq}.sock`);
+}
+
+/** Private sockets left by a process that is gone (a crash skips close()): removed, so the state dir does not collect them. */
+function sweepDeadToolSockets(stateDir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(stateDir);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    const pid = Number(PRIVATE_SOCKET.exec(name)?.[1]);
+    if (!pid || pid === process.pid || processAlive(pid)) continue;
+    try {
+      unlinkSync(join(stateDir, name));
+    } catch {
+      // gone already, or not ours to remove
+    }
+  }
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /** True when a Hormes daemon (any process) answers at the path within the timeout. */
 export async function socketAnswers(socketPath: string, timeoutMs = 1000): Promise<boolean> {
   return (await daemonPidAt(socketPath, timeoutMs)) !== undefined;
 }
 
 /**
- * An EngineLike that only has a runner: enough for `tool.run`, nothing else answers.
- * A worker's brain lands here when the daemon's pid check fails (a 1 s self-ping under
- * wake load): its bridge stamps every call with the worker id, and the daemon routes a
- * stamped call through `runnerFor` only — so the private server answers for exactly
- * that id with the worker's own lane runner, or the worker would be refused every tool
- * for its whole life. Any other id is not this brain's.
+ * The private socket's host: only `tool.run` is answered there. A spawned thread's brain
+ * lands here when the daemon's pid check fails (a 1 s self-ping under wake load): its
+ * bridge stamps every call with the thread id, and the daemon routes a stamped call
+ * through `runnerFor` only — so the host answers for exactly that id with the thread's
+ * own lane runner, or the thread would be refused every tool for its whole life. Any
+ * other id is not this brain's.
  */
-function runnerOnlyEngine(runner: ToolRunner, stateDir: string, worker?: string): EngineLike {
+function toolHost(runner: ToolRunner, thread?: string): ToolHost {
   return {
-    on: () => undefined,
-    snapshot: () => ({ phase: "asleep", note: "codex tool socket" }),
-    command: async () => undefined,
-    ear: () => undefined,
-    feedMic: () => undefined,
-    reportInputLevel: () => undefined,
-    setMicrophonePermission: () => undefined,
-    registerOwnPid: () => undefined,
-    problem: (text) => log.warn(text),
-    ledger: { read: () => [], days: () => [], sessions: () => [], readSession: () => [] },
-    config: { stateDir },
     runner,
-    runnerFor: (id) => (worker !== undefined && id === worker ? runner : undefined),
+    runnerFor: (id) => (thread !== undefined && id === thread ? runner : undefined),
+    userName: runner.userName,
   };
 }

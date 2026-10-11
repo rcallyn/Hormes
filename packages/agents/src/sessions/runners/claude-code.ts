@@ -1,3 +1,4 @@
+import { CodingProfileStore, type CodingProfile, type BoundedCoding } from "../../claude-code/coding-profile.ts";
 import { stat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { AgentStatus } from "@hormes/protocol";
@@ -11,14 +12,15 @@ import type { Continuation, ContinueOptions, ContinueOutcome, DescribeContext, O
  *
  * This is the driver the connector always had, moved behind the runner interface
  * unchanged: the same ownership refusals, the same session options, the same
- * permission callback (the connector's ask-Kevin loop plugs in through
+ * permission callback (the connector's ask-User loop plugs in through
  * `ContinueOptions.canUseTool`).
  */
 
 export interface ClaudeCodeRunnerOptions {
+  readonly codingProfiles?: CodingProfileStore;
   readonly sdk?: SdkLike;
   readonly permissionMode?: string;
-  /** Keep ANTHROPIC_API_KEY away from the CLI so it uses Kevin's login. Default true. */
+  /** Keep ANTHROPIC_API_KEY away from the CLI so it uses User's login. Default true. */
   readonly dropApiKey?: boolean;
   readonly env?: NodeJS.ProcessEnv;
   readonly home?: string;
@@ -26,13 +28,23 @@ export interface ClaudeCodeRunnerOptions {
   readonly systemDirs?: readonly string[];
   /** Sessions are named for the Console; the connector supplies its own naming. */
   readonly nameOf?: (s: DiscoveredSession) => string;
+  /** The user's name as the refusals say it (the engine's effective name; "User" when none is wired). */
+  readonly userName?: (() => string) | undefined;
+  /** The connector's clock: a run's last activity is read on it, as the connector's stall checks are (BL-13). Default Date.now. */
+  readonly now?: () => number;
 }
 
 export class ClaudeCodeRunner implements SessionRunner {
   readonly tool = "claude" as const;
   private sdkPromise: Promise<SdkLike> | undefined;
 
-  constructor(private readonly opts: ClaudeCodeRunnerOptions = {}) {}
+  private readonly codingProfiles: CodingProfileStore;
+  constructor(private readonly opts: ClaudeCodeRunnerOptions = {}) { this.codingProfiles = opts.codingProfiles ?? new CodingProfileStore(); }
+
+  /** The user's name as every line here says it. */
+  private get userName(): string {
+    return this.opts.userName?.() || "User";
+  }
 
   private sdk(): Promise<SdkLike> {
     if (this.opts.sdk) return Promise.resolve(this.opts.sdk);
@@ -61,7 +73,7 @@ export class ClaudeCodeRunner implements SessionRunner {
   async canContinue(s: DiscoveredSession, snap: OwnershipSnapshot): Promise<Continuation> {
     if (snap.live.length > 0) {
       const where = snap.live.some((p) => p.interactive) ? "a terminal" : "Claude Desktop";
-      return { ok: false, reason: `that session is open in ${where}; ask Kevin to type it there or start a Hormes session in that folder` };
+      return { ok: false, reason: `that session is open in ${where}; ask ${this.userName} to type it there or start a Hormes session in that folder` };
     }
     if (snap.degraded) {
       // No owner found, but the search was incomplete. Resuming would append to a transcript
@@ -97,6 +109,7 @@ export class ClaudeCodeRunner implements SessionRunner {
   }
 
   private open(sdk: SdkLike, target: { cwd: string; resume?: string; name: string }, sink: RunSink, opts: ContinueOptions): ClaudeRunHandle {
+    const bounded = this.codingProfiles.open(target.cwd, opts.codingProfile, target.resume);
     const session: ClaudeSession = new ClaudeSession({
       sdk,
       cwd: target.cwd,
@@ -105,9 +118,19 @@ export class ClaudeCodeRunner implements SessionRunner {
       permissionMode: this.opts.permissionMode ?? "acceptEdits",
       env: claudeEnv(this.opts.env ?? process.env, { dropApiKey: this.opts.dropApiKey ?? true }),
       includePartialMessages: false,
+      ...(this.opts.now ? { now: this.opts.now } : {}),
       ...(opts.canUseTool ? { canUseTool: (toolName: string, input: Record<string, unknown>): Promise<PermissionDecision> => opts.canUseTool!(toolName, input, session) } : {}),
+      ...(bounded ? bounded.options(claudeEnv(this.opts.env ?? process.env, { dropApiKey: true })) : {}),
+      ...(bounded ? { toolGuard: (tool: string, input: Record<string, unknown>): PermissionDecision => {
+        if (!session.sessionId) return { behavior: "deny", message: "Bounded session identity is not available" };
+        bounded.bind(session.sessionId);
+        return bounded.guard(tool, input);
+      } } : {}),
     });
-    const handle = new ClaudeRunHandle(session);
+    if (bounded) session.on("init", (id: string) => {
+      try { bounded.bind(id); } catch { void session.close(); }
+    });
+    const handle = new ClaudeRunHandle(session, () => this.userName, bounded);
     const emit = (e: RunEvent): void => sink(e, handle);
     session.on("status", (status, detail) => emit({ type: "status", status, detail }));
     // The session id arrives with init; a new thread is filed by the connector on this event.
@@ -149,11 +172,17 @@ async function checkCwd(cwd: string | undefined): Promise<{ error?: string }> {
 }
 
 class ClaudeRunHandle implements RunHandle {
+  get codingProfile(): CodingProfile | undefined { return this.bounded?.profile; }
   readonly tool = "claude" as const;
   /** Resolves once the CLI reports its session id (the SDK's init message); rejects if the session ends first. */
   readonly ready: Promise<void>;
 
-  constructor(readonly session: ClaudeSession) {
+  constructor(
+    readonly session: ClaudeSession,
+    /** The user's name, for the message a no carries. */
+    private readonly who: () => string = () => "User",
+    private readonly bounded?: BoundedCoding,
+  ) {
     this.ready = new Promise<void>((resolve, reject) => {
       if (session.sessionId) {
         resolve();
@@ -204,7 +233,7 @@ class ClaudeRunHandle implements RunHandle {
   }
 
   resolvePermission(allow: boolean): boolean {
-    return this.session.resolvePermission(allow);
+    return this.session.resolvePermission(allow, `denied by ${this.who()}`);
   }
 
   interrupt(): Promise<void> {

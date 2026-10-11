@@ -5,6 +5,7 @@ import { basename, delimiter, dirname, join } from "node:path";
 import { LineSplitter, REPO_ROOT, classifyAction, logger, newId } from "@hormes/core";
 import { ClaudeSession, claudeEnv, loadSdk, type PermissionDecision, type SdkLike } from "@hormes/agents";
 import { codexConfigModel, codexEnv, codexHomeDir, codexSignedIn, findCodexBinary } from "./codex.ts";
+import { codexModel } from "./models.ts";
 import { describeShellResult, runShell, type ShellRunResult } from "./shell.ts";
 
 /**
@@ -16,17 +17,17 @@ import { describeShellResult, runShell, type ShellRunResult } from "./shell.ts";
  *                (install when the lockfile changed, typecheck, tests, swift build
  *                when the Mac app changed); a spoken summary comes back with the id.
  *   self_review  the diff against main.
- *   self_apply   after Kevin's yes to that exact question: fast-forward into main,
+ *   self_apply   after User's yes to that exact question: fast-forward into main,
  *                install if needed, remove the worktree, and the caller restarts the
  *                daemon (engine code) or rebuilds the app (apps/mac).
  *   self_discard remove the worktree and branch.
  *
  * Nothing here touches the running checkout until apply, and apply refuses when
- * the checks were red (unless Kevin said to apply anyway) or when the change
+ * the checks were red (unless User said to apply anyway) or when the change
  * touches one of Hormes's own safety rails that his request did not name. The
  * rails are listed in RAILS; a security-critical file is a rail as a whole (a
  * hunk regex is easy to dodge), and only a file that is mostly ordinary code is
- * judged by the lines that changed. The request the guard reads is Kevin's own
+ * judged by the lines that changed. The request the guard reads is User's own
  * words — the runner strips Hormes's lines before they get here.
  */
 
@@ -113,6 +114,8 @@ export interface SelfEditOptions {
   /** Test seam: the check commands for a worktree; the default is pnpm's. */
   readonly checks?: ((ctx: CheckContext) => CheckCommand[]) | undefined;
   readonly now?: (() => number) | undefined;
+  /** What the agent prompt, the summary and the apply refusals call the person Hormes works for, read live; default "User". */
+  readonly userName?: (() => string) | undefined;
 }
 
 function isExecutable(p: string): boolean {
@@ -144,9 +147,9 @@ export function findClaudeBinary(explicit: string | undefined, env: NodeJS.Proce
 }
 
 /** What the coding agent is told besides the task. */
-export function selfEditPrompt(task: string, dir: string): string {
+export function selfEditPrompt(task: string, dir: string, userName = "User"): string {
   return [
-    `You are making one change to Hormes, Kevin's voice-first Mac assistant, in a git worktree at ${dir} (branch of main). Kevin asked, out loud: "${task}"`,
+    `You are making one change to Hormes, ${userName}'s voice-first Mac assistant, in a git worktree at ${dir} (branch of main). ${userName} asked, out loud: "${task}"`,
     "Rules: follow AGENTS.md in the repo root. Keep `pnpm run check` green (typecheck, tests, doctor). Do not touch ~/.hormes/env, the never-list in packages/core/src/policy.ts, the wake gate (apps/mac/Sources/Hormes/Wake), or the confirmation handshake (ConfirmationState in packages/hands) unless the task names them; do not re-point their exports through another file either. Do not commit; Hormes commits for you. Do not push. No new dependencies without a reason in your summary.",
     "When you are done, explain in a few plain sentences what you changed and why, naming the files. If the task cannot be done safely, say so and change nothing.",
   ].join("\n\n");
@@ -157,7 +160,7 @@ interface Rail {
   readonly file: RegExp;
   /** When set, the rail is touched only if a changed line (or hunk header) matches. */
   readonly hunk?: RegExp | undefined;
-  /** Words in Kevin's request that count as naming the rail. */
+  /** Words in User's request that count as naming the rail. */
   readonly keywords: readonly string[];
 }
 
@@ -168,18 +171,32 @@ export const RAILS: readonly Rail[] = [
   { name: "the policy (packages/core/src/policy.ts)", file: /^packages\/core\/src\/policy\.ts$/, keywords: ["policy", "never list", "never-list", "destructive"] },
   { name: "the core exports (packages/core/src/index.ts, or a new module next to the policy)", file: /^packages\/core\/src\/(index\.ts|(?!__tests__\/)[^/]+\.ts)$/, keywords: ["policy", "core exports", "core index", "index.ts", "core module"] },
   { name: "the brain's standing orders (brainSystemPrompt in brain.ts)", file: /^packages\/brain\/src\/brain\.ts$/, keywords: ["system prompt", "standing orders", "brain prompt", "brainsystemprompt", "prompt", "brain.ts"] },
+  { name: "the Gemini voice delegation transport (packages/live/src/gemini-session.ts)", file: /^packages\/live\/src\/gemini-session\.ts$/, keywords: ["gemini voice", "gemini-session.ts", "voice transport"] },
   { name: "the voice instructions (packages/live/src/instructions.ts)", file: /^packages\/live\/src\/instructions\.ts$/, keywords: ["instructions", "voice prompt", "live prompt", "personality", "capabilities"] },
-  { name: "the confirmation handshake (ConfirmationState / YES_PATTERN)", file: /^packages\/hands\/src\/toolset\.ts$/, hunk: /ConfirmationState|YES_PATTERN|sameTarget|\.consume\(|\.arm\(|confirmations|verdict|refuse|needs-confirmation|policy|gate\(/, keywords: ["confirmation", "handshake", "yes pattern", "yes_pattern", "confirmationstate", "toolset.ts"] },
+  { name: "the confirmation handshake (ConfirmationState / YES_PATTERN)", file: /^packages\/hands\/src\/toolset\.ts$/, keywords: ["confirmation", "handshake", "yes pattern", "yes_pattern", "confirmationstate", "toolset.ts"] },
+  // Where a yes is heard and where a lane's yes is routed (W1-6, RAIL-12): each decides whether an action runs on a plain yes.
+  { name: "the spoken yes (packages/brain/src/delegator.ts)", file: /^packages\/brain\/src\/delegator\.ts$/, keywords: ["delegator", "spoken yes", "confirmation", "handshake", "yes pattern"] },
+  { name: "the lanes' confirmation desk (packages/hands/src/lanes.ts)", file: /^packages\/hands\/src\/lanes\.ts$/, keywords: ["lanes", "confirmation desk", "desk", "confirmation", "handshake"] },
+  { name: "the browser gate (packages/brain/src/browser.ts)", file: /^packages\/brain\/src\/browser\.ts$/, keywords: ["browser gate", "browser tools", "browser.ts"] },
+  { name: "the thread lanes (packages/engine/src/threads/runner.ts)", file: /^packages\/engine\/src\/threads\/runner\.ts$/, keywords: ["thread runner", "lane runner", "background lane", "thread lanes", "needsfocus"] },
+  { name: "the thread confirmation lines (packages/engine/src/threads/lines.ts)", file: /^packages\/engine\/src\/threads\/lines\.ts$/, keywords: ["thread lines", "confirmation resume", "confirmation", "handshake"] },
+  { name: "the typed yes (sayText in packages/engine/src/engine.ts)", file: /^packages\/engine\/src\/engine\.ts$/, keywords: ["engine.ts", "engine", "typed yes", "saytext", "say-text", "confirmation", "handshake", "owner approval"] },
   { name: "the wake gate (apps/mac/Sources/Hormes/Wake)", file: /^apps\/mac\/Sources\/Hormes\/Wake\//, keywords: ["wake"] },
   { name: "app signing (scripts/build-mac.ts)", file: /^scripts\/build-mac\.ts$/, hunk: /codesign|identity|sign|entitlements/i, keywords: ["signing", "codesign", "build-mac", "build mac", "identity"] },
   { name: "the self-edit loop (packages/brain/src/selfedit.ts)", file: /^packages\/brain\/src\/selfedit\.ts$/, keywords: ["self-edit", "self edit", "selfedit", "self_apply", "self_edit", "rail"] },
   { name: "the tool gate (packages/brain/src/runner.ts)", file: /^packages\/brain\/src\/runner\.ts$/, keywords: ["runner", "tool gate", "gate", "runner.ts"] },
   { name: "the secret scrubbing and redaction (packages/brain/src/shell.ts)", file: /^packages\/brain\/src\/shell\.ts$/, keywords: ["shell.ts", "scrub", "redact", "secret"] },
+  { name: "the shell isolation (packages/brain/src/sandbox.ts)", file: /^packages\/brain\/src\/sandbox\.ts$/, keywords: ["sandbox.ts", "shell isolation", "shell sandbox"] },
+  { name: "the device-owner approval (packages/hands/native/OwnerApproval.swift)", file: /^packages\/hands\/native\/OwnerApproval\.swift$/, keywords: ["ownerapproval.swift", "owner approval", "authentication"] },
+  { name: "the native operation dispatch (packages/hands/native/main.swift)", file: /^packages\/hands\/native\/main\.swift$/, keywords: ["main.swift", "native dispatch", "owner approval", "authentication"] },
+  { name: "the approval protocol (packages/protocol/src/index.ts)", file: /^packages\/protocol\/src\/index\.ts$/, keywords: ["protocol", "owner approval", "secret_keys", "secret keys"] },
+  { name: "the work state and capability coordinator (packages/engine/src/work)", file: /^packages\/engine\/src\/work\/(store|coordinator)\.ts$/, keywords: ["work state", "work coordinator", "store.ts", "coordinator.ts"] },
+  { name: "the spoken learning checks (packages/engine/src/work/spoken-answer.ts)", file: /^packages\/engine\/src\/work\/spoken-answer\.ts$/, keywords: ["spoken learning checks", "spoken answers", "spoken-answer.ts", "voice checker"] },
+  { name: "the proactive detector (packages/engine/src/proactive.ts)", file: /^packages\/engine\/src\/proactive\.ts$/, keywords: ["proactive.ts", "proactive", "suggestions"] },
   { name: "the file tools' symlink handling (packages/brain/src/files.ts)", file: /^packages\/brain\/src\/files\.ts$/, keywords: ["files.ts", "file tools", "symlink", "realpath"] },
   { name: "the brain exports (packages/brain/src/index.ts)", file: /^packages\/brain\/src\/index\.ts$/, keywords: ["brain exports", "brain index", "index.ts"] },
   { name: "the Claude Code permission gate (packages/brain/src/claude.ts)", file: /^packages\/brain\/src\/claude\.ts$/, hunk: /permission|canUseTool|behavior|disallowedTools|allowedTools|permissionMode/, keywords: ["claude.ts", "permission", "claude brain", "claude code brain"] },
   { name: "the Codex sandbox and addendum (packages/brain/src/codex.ts)", file: /^packages\/brain\/src\/codex\.ts$/, hunk: /read-only|sandbox|codexAddendum|--ignore-user-config|approval|workspace-write|danger-full-access/, keywords: ["codex.ts", "codex sandbox", "codex addendum", "codex brain"] },
-  { name: "the secret key list (SECRET_KEYS in packages/protocol)", file: /^packages\/protocol\/src\/index\.ts$/, hunk: /SECRET_KEYS|SecretKey/, keywords: ["secret_keys", "secret keys", "protocol"] },
 ];
 
 /** True for a file the rails treat as a whole, false for one judged by its changed lines. */
@@ -214,7 +231,7 @@ function namesWord(text: string, word: string): boolean {
 }
 
 /**
- * Every touched rail must be named in Kevin's words (a keyword or the file's
+ * Every touched rail must be named in User's words (a keyword or the file's
  * basename). The text is his request and his own utterances, never the dialogue
  * the model produced: the runner strips Hormes's lines before calling this.
  */
@@ -230,7 +247,7 @@ export function railsNamed(rails: readonly string[], request: string): { ok: boo
 }
 
 /**
- * Kevin asking for a red change to land: "apply it anyway", "merge it regardless",
+ * User asking for a red change to land: "apply it anyway", "merge it regardless",
  * "apply even though the tests fail", "ignore the red checks". A bare "anyway" or a
  * question containing the word does not count; the intent to apply has to be near it.
  */
@@ -253,15 +270,25 @@ export const DEFAULT_CHECKS = (ctx: CheckContext): CheckCommand[] => {
   if (hasLock && (ctx.lockfileChanged || !existsSync(join(ctx.dir, "node_modules")))) out.push({ name: "install", argv: [pnpm, "install", "--frozen-lockfile", "--prefer-offline"], timeoutMs: 5 * 60_000 });
   out.push({ name: "typecheck", argv: [pnpm, "run", "typecheck"], timeoutMs: 5 * 60_000 });
   out.push({ name: "test", argv: [pnpm, "run", "test"], timeoutMs: 8 * 60_000 });
-  if (ctx.changed.some((f) => f.startsWith("apps/mac/"))) out.push({ name: "swift build", argv: ["swift", "build", "--package-path", "apps/mac"], timeoutMs: 10 * 60_000 });
+  if (ctx.changed.some((f) => f.startsWith("apps/mac/") || f.startsWith("packages/protocol/") || f === "scripts/build-mac.ts")) out.push({ name: "swift build", argv: ["swift", "build", "--package-path", "apps/mac"], timeoutMs: 10 * 60_000 });
+  if (ctx.changed.some((f) => f.startsWith("packages/hands/native/") || f.startsWith("packages/protocol/") || f === "scripts/build-hands.ts" || f === "scripts/build-mac.ts")) out.push({ name: "hands build", argv: [pnpm, "run", "build:hands"], timeoutMs: 10 * 60_000 });
+  if (ctx.lockfileChanged || ctx.changed.some((f) => f.startsWith("apps/workspace/") || f.startsWith("packages/protocol/") || f === "packages/engine/src/work/canvas-plan.ts" || f === "scripts/build-mac.ts")) {
+    out.push({ name: "workspace typecheck", argv: [pnpm, "--filter", "@hormes/workspace", "typecheck"], timeoutMs: 5 * 60_000 });
+    out.push({ name: "workspace build", argv: [pnpm, "--filter", "@hormes/workspace", "build"], timeoutMs: 5 * 60_000 });
+  }
+
   return out;
 };
 
 /** The line of a failed check worth reading out: the first error-looking one, else the last. */
 export function firstFailureLine(output: string): string | undefined {
-  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean);
-  const hit = lines.find((l) => /(^|\s)(error|✖|✘|✗|not ok|FAIL|failed|Error:|TS\d{4}:|AssertionError|ELIFECYCLE)(\s|:|\b)/.test(l) && !/^ℹ/.test(l));
-  return (hit ?? lines[lines.length - 1])?.slice(0, 200);
+  // A passing test whose NAME says "failed" ("✔ … a failed queue is refused") is not a failure:
+  // passing lines and the runner's ℹ summary never qualify. Hard markers first (a failing test,
+  // an assertion, pnpm's ELIFECYCLE, a compiler code), the loose words only when nothing harder is there.
+  const lines = output.split("\n").map((l) => l.trim()).filter(Boolean).filter((l) => !/^[✔✓]/.test(l) && !/^ℹ/.test(l));
+  const hard = lines.find((l) => /(^|\s)(✖|✘|✗|not ok|AssertionError|TS\d{4}:|Error:)(\s|:|\b)/.test(l));
+  const loose = hard ?? lines.find((l) => /(^|\s)(error|FAIL|failed)(\s|:|\b)/.test(l));
+  return (loose ?? lines[lines.length - 1])?.slice(0, 200);
 }
 
 function gitExec(repo: string, args: readonly string[], opts: { readonly signal?: AbortSignal | undefined; readonly timeoutMs?: number | undefined } = {}): Promise<string> {
@@ -284,6 +311,11 @@ export class SelfEditManager {
     this.now = opts.now ?? Date.now;
     this.repoRoot = opts.repoRoot ?? REPO_ROOT;
     this.worktreesDir = opts.worktreesDir;
+  }
+
+  /** The user's name as the prompt, the summary and the refusals say it; "User" when none is wired. */
+  private get userName(): string {
+    return this.opts.userName?.() || "User";
   }
 
   // ---------------------------------------------------------------- records
@@ -403,7 +435,7 @@ export class SelfEditManager {
 
   /**
    * The whole loop up to the summary. `progress` gets spoken-friendly lines as
-   * the agent and the checks work; `signal` (Kevin's stop) kills the child.
+   * the agent and the checks work; `signal` (User's stop) kills the child.
    */
   async edit(task: string, opts: { readonly signal?: AbortSignal | undefined; readonly progress?: ((line: string) => void) | undefined } = {}): Promise<{ record: SelfEditRecord; summary: string }> {
     const progress = opts.progress ?? (() => undefined);
@@ -453,7 +485,7 @@ export class SelfEditManager {
     const checks: SelfEditCheck[] = [];
     let green = true;
     for (const cmd of commands) {
-      if (opts.signal?.aborted) break;
+      if (opts.signal?.aborted) { checks.push({ name: cmd.name, ok: false, ms: 0, skipped: "cancelled" }); green = false; break; }
       const remaining = deadline - this.now();
       if (remaining <= 0) {
         checks.push({ name: cmd.name, ok: false, ms: 0, skipped: "out of time" });
@@ -471,6 +503,7 @@ export class SelfEditManager {
         break; // a failed install makes typecheck meaningless; a failed typecheck makes tests noise
       }
     }
+    green = green && commands.length > 0 && checks.length === commands.length && checks.every((check) => check.ok);
     rec = this.save({ ...rec, files, diffStat: stat, head, checks, green, rails, status: "checked", updatedAt: this.now() });
     return { record: rec, summary: this.summary(rec) };
   }
@@ -488,7 +521,7 @@ export class SelfEditManager {
       const bad = rec.checks.find((c) => !c.ok);
       parts.push(`Checks red: ${bad?.name ?? "?"} failed${bad?.firstFailure ? ` — ${bad.firstFailure}` : bad?.skipped ? ` (${bad.skipped})` : ""}.`);
     }
-    if (rec.rails.length) parts.push(`This change touches Hormes's own safety rails: ${rec.rails.join("; ")}. Applying it needs Kevin to name that rail himself.`);
+    if (rec.rails.length) parts.push(`This change touches Hormes's own safety rails: ${rec.rails.join("; ")}. Applying it needs ${this.userName} to name that rail.`);
     parts.push(`Say the word to apply ${rec.id}, or ask what changed.`);
     return parts.join(" ");
   }
@@ -496,7 +529,7 @@ export class SelfEditManager {
   // ----------------------------------------------------------------- agent
 
   private async runAgent(rec: SelfEditRecord, budgetMs: number, signal: AbortSignal | undefined, progress: (line: string) => void): Promise<{ kind: SelfEditAgent; ok: boolean; summary: string }> {
-    const prompt = selfEditPrompt(rec.task, rec.dir);
+    const prompt = selfEditPrompt(rec.task, rec.dir, this.userName);
     const env = this.opts.env ?? process.env;
     const why: string[] = [];
     if (this.opts.codexBin !== false) {
@@ -530,7 +563,7 @@ export class SelfEditManager {
   }
 
   private runCodex(bin: string, codexHome: string, dir: string, prompt: string, budgetMs: number, signal: AbortSignal | undefined, progress: (line: string) => void): Promise<{ ok: boolean; summary: string }> {
-    const model = this.opts.model?.trim() || codexConfigModel(codexHome);
+    const model = codexModel(this.opts.model, codexConfigModel(codexHome));
     const args = ["exec", "--json", "-s", "workspace-write", "--skip-git-repo-check", "--ignore-user-config", ...(model ? ["-m", model] : []), "-C", dir, "-"];
     const env = codexEnv(this.opts.env ?? process.env, codexHome);
     return new Promise((resolve) => {
@@ -710,11 +743,11 @@ export class SelfEditManager {
     if (rec.files.length === 0) return `self-edit ${rec.id} made no changes; nothing to apply`;
     if (rec.green !== true && !saysApplyAnyway(request)) {
       const bad = rec.checks.find((c) => !c.ok);
-      return `the checks were red (${bad ? `${bad.name}: ${bad.firstFailure ?? bad.skipped ?? "failed"}` : "not run"}); Kevin has to say to apply it anyway`;
+      return `the checks were red (${bad ? `${bad.name}: ${bad.firstFailure ?? bad.skipped ?? "failed"}` : "not run"}); ${this.userName} has to say to apply it anyway`;
     }
     if (rec.rails.length > 0) {
       const named = railsNamed(rec.rails, request);
-      if (!named.ok) return `this change touches Hormes's own safety rails (${named.missing.join("; ")}) and Kevin's request did not name them; he has to say which rail he means`;
+      if (!named.ok) return `this change touches Hormes's own safety rails (${named.missing.join("; ")}) and ${this.userName}'s request did not name them; ${this.userName} has to say which rail`;
     }
     return undefined;
   }
@@ -754,7 +787,7 @@ export class SelfEditManager {
     await this.removeWorktree(rec, true);
     const applied = this.save({ ...rec, status: "applied", head: after.slice(0, 7), updatedAt: this.now() });
     const restart = changed.some((f) => f.startsWith("packages/") || f.startsWith("scripts/") || f === "package.json" || f === "pnpm-lock.yaml" || f === "tsconfig.json");
-    const buildMac = changed.some((f) => f.startsWith("apps/mac/"));
+    const buildMac = changed.some((f) => f.startsWith("apps/mac/") || f.startsWith("apps/workspace/") || f.startsWith("packages/protocol/") || f === "packages/engine/src/work/canvas-plan.ts" || f === "scripts/build-mac.ts" || f === "pnpm-lock.yaml");
     const last: LastApply = { id, at: this.now(), files: changed, restart, builtMac: buildMac, head: after.slice(0, 7) };
     writeFileSync(join(this.worktreesDir, "last-apply.json"), JSON.stringify(last, null, 2));
     return { record: applied, restart, buildMac, lockfileChanged };

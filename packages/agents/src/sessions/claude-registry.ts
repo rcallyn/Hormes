@@ -6,7 +6,7 @@ import { isRecord, parseTimestamp, str } from "./store.ts";
  * Claude Code's registry of running sessions: ~/.claude/sessions/<pid>.json, one file
  * per live process, written by the CLI itself (2.1.x):
  *
- *   {"pid":4555,"sessionId":"6b7a12a4-…","cwd":"/Users/kevinliu/…","startedAt":1789078969434,
+ *   {"pid":4555,"sessionId":"6b7a12a4-…","cwd":"/Users/user/…","startedAt":1789078969434,
  *    "procStart":"Thu Sep 10 22:22:49 2026","version":"2.1.260","kind":"interactive",
  *    "entrypoint":"claude-desktop"|"cli","name":"scratch-…-77",...}
  *

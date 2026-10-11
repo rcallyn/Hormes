@@ -19,7 +19,7 @@ const log = logger("agents.codex");
  *
  *  - A live process holds its rollout or writer lock open (Codex Desktop's app-server, a
  *    `codex resume <id>` in a terminal): `codex queue --thread <id> --message <text>` files
- *    the text for that thread, exactly as if Kevin typed it there. Nothing of ours runs.
+ *    the text for that thread, exactly as if User typed it there. Nothing of ours runs.
  *  - Nobody holds it: `codex exec resume <id> <text> --json` continues the saved thread
  *    headlessly; the rollout on disk grows, so the rail shows the new turn. A writer lock
  *    with no process behind it is a leftover from a crash: the CLI takes stale locks itself
@@ -32,7 +32,7 @@ const log = logger("agents.codex");
  * rollout exists ("Queued message <uuid> for thread <id>." on stdout), daemon or no daemon;
  * it exits 1 only when the rollout is missing. A queue nobody drains would look delivered,
  * so the choice above is made from the process snapshot alone, never from the queue's exit.
- * Sub-agent and automation rollouts are refused outright: they are not threads Kevin sat in.
+ * Sub-agent and automation rollouts are refused outright: they are not threads User sat in.
  *
  * New threads are `codex exec --json -C <cwd> <prompt>`: persisted (no --ephemeral), so
  * they show up in ~/.codex/sessions like any other.
@@ -72,7 +72,7 @@ export interface CodexRunnerOptions {
   readonly systemDirs?: readonly string[];
   /**
    * With a ChatGPT login, keep OPENAI_API_KEY (Hormes's own, for the voice) out of the
-   * child's environment so Codex bills Kevin's plan, not the key. Default true.
+   * child's environment so Codex bills User's plan, not the key. Default true.
    */
   readonly dropApiKey?: boolean;
   /** Wall clock per turn before the child is interrupted. Default 15 min. */

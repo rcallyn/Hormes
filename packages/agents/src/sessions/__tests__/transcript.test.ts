@@ -19,7 +19,7 @@ import { MAX_PAGE_BYTES, TranscriptSource, clip, formatBytes, outputText, pretty
 
 // ------------------------------------------------------------------ fixtures ---
 // The same anonymised transcripts the listing tests use (fixtures/claude, fixtures/codex),
-// extended with the tool shapes of Kevin's files: Claude Code 2.1.260 tool_use blocks and
+// extended with the tool shapes of User's files: Claude Code 2.1.260 tool_use blocks and
 // tool_result lines (array content, is_error), codex 0.153 custom_tool_call/_output,
 // function_call (arguments as a JSON string, call_id) and function_call_output (the exec
 // tool's JSON body), a reasoning summary. Big files for paging are generated here.
@@ -28,7 +28,7 @@ const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
 const S1 = "11111111-1111-4111-8111-111111111111";
 const C1 = "01a0aaaa-0000-7000-8000-000000000001";
 const C2 = "01a0bbbb-0000-7000-8000-000000000002";
-const S1_PATH = join(FIXTURES, "claude", "-Users-kevinliu-demo-app", `${S1}.jsonl`);
+const S1_PATH = join(FIXTURES, "claude", "-Users-user-demo-app", `${S1}.jsonl`);
 const C1_PATH = join(FIXTURES, "codex", "sessions", "2026", "09", "01", `rollout-2026-09-01T09-00-00-${C1}.jsonl`);
 const C2_PATH = join(FIXTURES, "codex", "archived_sessions", `rollout-2026-08-30T12-00-00-${C2}.jsonl`);
 const T = (iso: string): number => Date.parse(iso);
@@ -257,7 +257,7 @@ test("paging: bounded — no page reaches further back than maxBytes from ITS cu
     const older = await source.page({ limit: 60, before: page.messages[5]!.id });
     assert.ok(older.total >= page.total, "a later read never lowers the total");
 
-    // The production bound: a slice that keeps doubling reaches 2^31 bytes on Kevin's 2 GB+ rollouts, and fs.read aborts the process there.
+    // The production bound: a slice that keeps doubling reaches 2^31 bytes on User's 2 GB+ rollouts, and fs.read aborts the process there.
     assert.equal(MAX_PAGE_BYTES, 256 * 1024 * 1024);
     assert.ok(READ_CHUNK_BYTES < 2 ** 31 && MAX_PAGE_BYTES < 2 ** 31);
   } finally {
@@ -419,7 +419,7 @@ test("TranscriptSource: a page, then live deltas — new turns, a tool call agai
     assert.deepEqual(deltas[1]?.messages.map((m) => [m.id, m.tool?.status, m.tool?.output]), [["toolu_9", "done", "all green"]], "same id, now with its output");
     assert.equal(deltas[1]?.total, 3, "an update is not a new message");
 
-    // Two lines in one write: one burst, two messages (a merged reply and Kevin's next turn).
+    // Two lines in one write: one burst, two messages (a merged reply and User's next turn).
     appendFileSync(path, `${[claudeLines.block("a3", "msg_2", { type: "text", text: "Tests pass." }, "2026-09-01T10:00:04.000Z"), claudeLines.user("u2", "ship it", "2026-09-01T10:00:05.000Z")].join("\n")}\n`);
     await until(() => deltas.flatMap((d) => d.messages).some((m) => m.id === "u2"), 3_000, "the next turn");
     const tailMessages = deltas.slice(2).flatMap((d) => d.messages);
@@ -478,7 +478,7 @@ test("SessionsConnector: list() names the tool and message count; transcript() p
     const s1 = list.find((a) => a.id === `sessions:claude:${S1}`);
     const c1 = list.find((a) => a.id === `sessions:codex:${C1}`);
     assert.equal(s1?.tool, "claude");
-    assert.equal(s1?.messageCount, 3, "the listing's count: Kevin's turns and assistant replies");
+    assert.equal(s1?.messageCount, 3, "the listing's count: User's turns and assistant replies");
     assert.equal(c1?.tool, "codex");
     assert.equal(c1?.messageCount, 3);
 
@@ -498,7 +498,7 @@ test("SessionsConnector: list() names the tool and message count; transcript() p
     const deltas: TranscriptDelta[] = [];
     const stop = c.watch(`sessions:claude:${S1}`, (d) => deltas.push(d));
     await sleep(80); // the watch resolves the session and opens the tail
-    const path = join(claudeRoot, "-Users-kevinliu-demo-app", `${S1}.jsonl`);
+    const path = join(claudeRoot, "-Users-user-demo-app", `${S1}.jsonl`);
     appendFileSync(path, `${claudeLines.user("u4", "also the logout path", "2026-09-01T10:02:00.000Z")}\n`);
     await until(() => deltas.length === 1, 3_000, "the new turn");
     assert.deepEqual(deltas[0]?.messages.map((m) => [m.id, m.text]), [["u4", "also the logout path"]]);
@@ -543,7 +543,7 @@ test("ClaudeCodeConnector: tool is claude; transcript() and watch() read the CLI
     const claudeRoot = join(t.dir, "projects");
     mkdirSync(claudeRoot);
     const c = new ClaudeCodeConnector({ sdk: fakeSdk(sid), claudeRoot, tailPollMs: 20, tailCoalesceMs: 10 });
-    const info = await c.start({ cwd: t.dir, name: "worker" });
+    const info = await c.start({ cwd: t.dir, name: "helper" });
     assert.equal(info.tool, "claude");
     await until(() => deltasReady(c, info.id), 2_000, "the session id from init");
     assert.deepEqual(await c.transcript(info.id), { messages: [], total: 0, complete: true }, "no file yet");
@@ -551,7 +551,7 @@ test("ClaudeCodeConnector: tool is claude; transcript() and watch() read the CLI
     const stop = c.watch(info.id, (d) => deltas.push(d));
     await sleep(60);
     // The CLI writes the session under its project slug; here it is copied from the fixture under the reported id.
-    const dir = join(claudeRoot, "-tmp-worker");
+    const dir = join(claudeRoot, "-tmp-helper");
     mkdirSync(dir);
     const path = join(dir, `${sid}.jsonl`);
     writeFileSync(path, readFileSync(S1_PATH));
@@ -576,7 +576,7 @@ test("ClaudeCodeConnector: the file is found where the CLI writes it with one st
     const claudeRoot = join(t.dir, "projects");
     mkdirSync(claudeRoot);
     const c = new ClaudeCodeConnector({ sdk: fakeSdk(sid), claudeRoot, tailPollMs: 20, tailCoalesceMs: 10 });
-    const info = await c.start({ cwd: t.dir, name: "worker" });
+    const info = await c.start({ cwd: t.dir, name: "helper" });
     await until(() => deltasReady(c, info.id), 2_000, "the session id from init");
     assert.deepEqual(await c.transcript(info.id), { messages: [], total: 0, complete: true }, "no file yet: the Console shows an empty conversation");
 
@@ -714,8 +714,8 @@ test("helpers: clip, prettyInput, outputText, splitLines", () => {
   assert.deepEqual(lines, [{ text: "ab", offset: 100 }, { text: "cd", offset: 103 }]);
   assert.deepEqual(rest && { offset: rest.offset, text: rest.bytes.toString() }, { offset: 108, text: "ef" });
   assert.equal(splitLines(Buffer.from("x\n"), 0).rest, undefined);
-  assert.equal(projectSlug("/Users/kevinliu/gt/gt-cloud"), "-Users-kevinliu-gt-gt-cloud");
-  assert.equal(projectSlug("/Users/kevinliu/.claude/x_y.z"), "-Users-kevinliu--claude-x-y-z", "every non-alphanumeric becomes a dash, as the CLI does");
+  assert.equal(projectSlug("/Users/user/gt/gt-cloud"), "-Users-user-gt-gt-cloud");
+  assert.equal(projectSlug("/Users/user/.claude/x_y.z"), "-Users-user--claude-x-y-z", "every non-alphanumeric becomes a dash, as the CLI does");
   assert.equal(formatBytes(64 * 1024), "64 KB");
   assert.equal(formatBytes(256 * 1024 * 1024), "256 MB");
   assert.equal(formatBytes(2.3 * 1024 * 1024 * 1024), "2.3 GB");

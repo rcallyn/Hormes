@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // A stand-in for the Codex CLI (codex-cli 0.153.4) for the sessions tests. Speaks the
-// `codex exec --json` event shapes recorded on Kevin's machine (see codex-exec-events.jsonl
+// `codex exec --json` event shapes recorded on User's machine (see codex-exec-events.jsonl
 // and codex-exec-reconnect-events.jsonl), answers `--version` and `queue` the way the real
 // one does, and — when CODEX_HOME is set — writes the rollout lines a real run would, so the
 // CodexStore lists what it did. Behaviour knobs:
