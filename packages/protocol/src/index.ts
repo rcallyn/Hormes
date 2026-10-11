@@ -19,7 +19,7 @@
  * model is attending. "speaking"/"thinking"/"acting" are what Hormes is doing
  * right now; "asleep" means no Live session is open (and nothing is billed).
  */
-export const PHASES = ["asleep", "connecting", "listening", "speaking", "thinking", "acting", "muted", "error"] as const;
+export const PHASES = ["asleep", "connecting", "listening", "speaking", "thinking", "acting", "muted", "error", "paused"] as const;
 export type Phase = (typeof PHASES)[number];
 
 // ------------------------------------------------------------- transcript ---
@@ -61,13 +61,127 @@ export interface DelegationStep {
   readonly tool?: ToolStep;
   /** Path under the state dir; the Console loads it as an image. */
   readonly screenshotPath?: string;
+  /** The worker's name when one of the delegation's workers ran this step (absent: the main brain). */
+  readonly worker?: string;
 }
+
+// ---- workers: a second pair of hands inside one delegation -----------------
+//
+// A Worker is not an Agent (agents are Kevin's coding sessions). The main brain spawns a
+// worker with `worker_start` when Kevin asks for two independent things at once ("tell
+// Ben on Slack I'm late and play Focus on Spotify"). A worker is its own brain over the
+// same tools and policy, in one of two lanes: `background` never touches the pointer,
+// keyboard or frontmost app (Apple events, browser, files, shell, web only); `screen`
+// waits its turn for the one screen lease. Workers never narrate: the voice speaks one
+// short line when the split happens and one when each worker finishes. Every stop verb
+// (interrupt, Stop, Pause, sleep) cancels every worker. At most WORKER_MAX at once.
+export type WorkerLane = "background" | "screen";
+export type WorkerStatus = "starting" | "working" | "waiting-screen" | "awaiting-confirmation" | "done" | "failed" | "cancelled";
+export interface Worker {
+  /** Unguessable ("w_…"); also the lane id a worker's tool calls carry on the wire. */
+  readonly id: string;
+  /** Spoken as-is ("Spotify"); ≤ 16 chars, unique within its delegation. */
+  readonly name: string;
+  /** The parent delegation. */
+  readonly delegationId: string;
+  /** The main brain's brief, redacted. */
+  readonly task: string;
+  readonly lane: WorkerLane;
+  readonly status: WorkerStatus;
+  /** Last line or failure reason, ≤ 200 chars. */
+  readonly detail?: string;
+  readonly startedAt: number;
+  readonly doneAt?: number;
+  readonly steps: number;
+}
+/** Workers alive at once, per delegation and in total. */
+export const WORKER_MAX = 2;
+/** How long a finished worker stays in the snapshot for the Console before it is dropped. */
+export const WORKER_LINGER_MS = 30_000;
+
+// ---- memory: what Hormes knows about Kevin across sessions ------------------
+//
+// A dedicated module (@hormes/memory) keeps an append-only record of one-sentence
+// items ("Kevin prefers …"), extracted from closed conversations, deduplicated by
+// embedding similarity, scored by recency, importance and use, and injected into
+// prompts under a hard token budget. Forget is a state; nothing is ever deleted.
+export type MemoryKind = "preference" | "fact" | "episode" | "procedure" | "contact" | "place";
+export type MemoryState = "live" | "forgotten" | "merged" | "archived";
+export type MemoryOrigin = "extracted" | "kevin" | "tool";
+export interface MemorySource {
+  readonly sessionId?: string;
+  readonly at: number;
+  readonly type: "heard" | "said" | "request" | "summary" | "kevin" | "tool";
+}
+export interface MemoryItem {
+  readonly id: string;
+  readonly kind: MemoryKind;
+  /** One sentence, third person, redacted. */
+  readonly text: string;
+  readonly subjects: readonly string[];
+  readonly confidence: number;
+  readonly importance: number;
+  readonly createdAt: number;
+  readonly lastSeenAt: number;
+  readonly seenCount: number;
+  readonly sources: readonly MemorySource[];
+  readonly state: MemoryState;
+  /** When merged: the item that carries it now. */
+  readonly mergedInto?: string;
+  /** Items this one replaced (a contradiction resolved the newer way). */
+  readonly supersedes?: readonly string[];
+  readonly origin: MemoryOrigin;
+}
+export interface MemorySummary {
+  readonly enabled: boolean;
+  readonly count: number;
+  readonly forgotten: number;
+  readonly archived: number;
+  /** How items are matched: OpenAI embeddings (a key is present) or keywords. */
+  readonly embeddings: "openai" | "keyword";
+  /** Conversations waiting for a quiet moment to be read. */
+  readonly pending: number;
+  readonly lastRunAt?: number;
+  readonly lastRun?: { readonly extractor: "responses" | "rules"; readonly added: number; readonly updated: number; readonly noop: number; readonly refused: number; readonly ms: number };
+  /** Tokens the last prompts spent on memory. */
+  readonly budgetUsed?: { readonly brain: number; readonly voice: number };
+  /** Items the last delegation was given (the Now rail's "used this turn"). */
+  readonly lastUsedIds?: readonly string[];
+}
+/** Hard caps on what memory may cost a prompt. */
+export const BRAIN_MEMORY_TOKENS = 250;
+export const VOICE_MEMORY_TOKENS = 120;
+
+/**
+ * Why Hormes went to sleep. `said`: a spoken cue ("go to sleep", "goodnight", "that's
+ * all"); `idle`: the idle timer; `pause-decayed`: an unresumed pause; `brain-changed`: the
+ * brain was swapped; `dock`: the blob was dropped into the notch; `command`: the app's
+ * sleep command; `stop`: the transport's Stop (the `stop` row is the record, the `sleep`
+ * row names the cause); `shutdown`: the engine is exiting.
+ */
+export type SleepCause = "said" | "idle" | "pause-decayed" | "brain-changed" | "dock" | "command" | "stop" | "shutdown";
 
 export interface DelegationTimings {
   readonly delegatedAt: number;
   readonly firstThinkingAt?: number;
   readonly firstCommentaryAt?: number;
   readonly doneAt?: number;
+  /**
+   * Wall clock when Kevin's triggering utterance ended: the last of his transcript
+   * items that ended before Live's delegation event, its session-timeline `endMs`
+   * placed on the clock of `session.started`. Absent when no utterance preceded the
+   * delegation or the session's start is not known. `delegatedAt − speechEndAt` is
+   * Live's own transcription and decision time; `firstActionAt − speechEndAt` is what
+   * Kevin waits for (docs/LATENCY.md).
+   */
+  readonly speechEndAt?: number;
+  /**
+   * Wall clock of the first acting tool that returned ok — a click, a type, a key, a
+   * scroll, an app opened or focused, an AppleScript, a shell command, a file write,
+   * a browser action. A look-only tool, a failed action and a confirmation question
+   * do not stamp it.
+   */
+  readonly firstActionAt?: number;
 }
 
 export interface Delegation {
@@ -89,17 +203,91 @@ export interface Delegation {
 /** "sessions" is the read-only discovery of agent sessions on disk and in processes (Claude Code, Codex, …). */
 export type AgentKind = "claude-code" | "sessions";
 
-export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown" | "offline";
+/**
+ * `working` needs a live owner AND a turn-bearing write inside its lease; `ended` is a
+ * session whose process is gone (any age); `unknown` is degraded evidence only (ps/lsof
+ * failed); `offline` is a run-driven session whose runner has gone.
+ */
+export type AgentStatus = "idle" | "working" | "blocked" | "done" | "ended" | "unknown" | "offline";
+/** One word on why the status is what it is; the rail shows it instead of a relative time. */
+export type AgentHint = "archived" | "blocked" | "running" | "quiet" | "ended" | "unseen" | "resumed";
+
+/** The CLI or app behind a session — drives the icon and brand colour in the UI. */
+export type AgentTool = "claude" | "codex" | "cursor" | "gemini" | "opencode" | "amp" | "droid" | "hermes" | "pi" | "other";
 
 export interface AgentInfo {
   /** Stable, connector-scoped: "sessions:claude:<uuid>", "sessions:codex:<id>", "claude-code:<sessionId>". */
   readonly id: string;
   readonly kind: AgentKind;
+  /** Which agent this is (Codex, Claude Code, Cursor…); absent = the connector's default. */
+  readonly tool?: AgentTool;
   readonly name: string;
   readonly status: AgentStatus;
   readonly detail?: string;
   readonly cwd?: string;
   readonly updatedAt: number;
+  /** Total messages in the conversation, when known. */
+  readonly messageCount?: number;
+  readonly hint?: AgentHint;
+}
+
+// ------------------------------------------------------- conversations ---
+
+export type AgentRole = "user" | "assistant" | "tool" | "system";
+
+export interface AgentToolCall {
+  readonly name: string;
+  /** Pretty-printed input, truncated by the connector. */
+  readonly input?: string;
+  readonly output?: string;
+  /** `interrupted`: the session ended while this call was still running. */
+  readonly status: "running" | "done" | "error" | "interrupted";
+}
+
+/** One turn of an agent's conversation, normalised across Codex / Claude Code / others. */
+export interface AgentMessage {
+  /** Stable within the session (the tool's own message/item id when it has one). */
+  readonly id: string;
+  readonly role: AgentRole;
+  readonly text: string;
+  readonly at: number;
+  readonly tool?: AgentToolCall;
+  /** Reasoning / thinking text rather than a reply. */
+  readonly thinking?: boolean;
+}
+
+/**
+ * A window of an agent's conversation. The engine sends `replace` with the newest
+ * page when a session is opened (and on `agent.history`, prepending older
+ * messages), then `append` deltas while it is open and the file grows.
+ */
+export interface AgentTranscript {
+  readonly agentId: string;
+  readonly messages: readonly AgentMessage[];
+  /** Total messages known in the session (for "showing 40 of 1 200"). */
+  readonly total: number;
+  /** True when `messages` starts at the very first message. */
+  readonly complete: boolean;
+  /** True while the engine is tailing the session file for new turns. */
+  readonly live: boolean;
+  /** Byte range of the session file these messages came from; `agent.history` pages before `startOffset`. */
+  readonly cursor?: { readonly startOffset: number; readonly endOffset: number };
+}
+
+// ------------------------------------------------------------- marks ---
+
+/** Something Kevin circled on screen for Hormes: a region, its stroke, and its screenshot. */
+export interface ScreenMark {
+  readonly id: string;
+  readonly rect: Rect;
+  readonly path?: readonly Point[];
+  readonly at: number;
+  /** Relative to the state dir, like screenshot steps. */
+  readonly screenshotPath?: string;
+  /** Handed to a brain already (kept a while for the Console, then dropped). */
+  readonly consumed: boolean;
+  /** What the stroke surrounded, when the accessibility tree or window list could say. `rect` is snapped to it. */
+  readonly element?: { readonly role?: string; readonly title?: string; readonly app?: string };
 }
 
 export interface ConnectorHealth {
@@ -166,6 +354,22 @@ export interface Settings {
   /** Where the Orb sits, saved across launches. */
   readonly orbPosition?: { readonly x: number; readonly y: number };
   readonly wake: WakeSettings;
+  /** Act on unambiguous spoken commands without the model (the 250 ms path). */
+  readonly reflexes: boolean;
+  /** Where the blob lives: floating where it last worked, or tucked in the MacBook notch. */
+  readonly orbHome: "free" | "notch";
+  /** Days a ledger day file stays live before the sweep MOVES it to <stateDir>/trash (0 = never). Pinned chains keep their days. */
+  readonly ledgerRetentionDays: number;
+  /** Days a day's screenshots stay live before the sweep moves them to the trash (0 = never). */
+  readonly shotsRetentionDays: number;
+  /** Let the brain split independent work across workers (a second pair of hands). */
+  readonly workers: boolean;
+  /** The language the voice speaks, whatever it hears (BCP-47; "en"). */
+  readonly language: string;
+  /** How the English is spoken; rendered as one line of the session's instructions. */
+  readonly accent: Accent;
+  /** Durable memory of Kevin across sessions (extraction, retrieval, the Memory rail). */
+  readonly memory: boolean;
 }
 
 export const DEFAULT_WAKE: WakeSettings = {
@@ -183,6 +387,14 @@ export const DEFAULT_SETTINGS: Settings = {
   autoWake: true,
   wake: DEFAULT_WAKE,
   onboarded: false,
+  reflexes: true,
+  orbHome: "notch",
+  ledgerRetentionDays: 0,
+  shotsRetentionDays: 14,
+  workers: true,
+  language: "en",
+  accent: "american",
+  memory: true,
 };
 
 /**
@@ -209,10 +421,51 @@ export type SecretKey = (typeof SECRET_KEYS)[number];
 
 export type Grant = "granted" | "denied" | "unknown";
 
+/**
+ * Every macOS permission Hormes asks for. The first four are what the voice and the
+ * hands need to work at all; the rest let the brain reach what Kevin asks about
+ * (his files, his apps, his contacts and calendar, the network) without a wall.
+ * TCC keys every grant on the app bundle (the daemon and the hands helper are its
+ * children), so the app is the one that asks and the one that reads.
+ */
+export const PERMISSION_KINDS = [
+  "microphone", "speechRecognition", "screenRecording", "accessibility",
+  "inputMonitoring", "automation", "fullDiskAccess", "notifications", "camera",
+  "contacts", "calendars", "reminders", "localNetwork",
+  "filesDesktop", "filesDocuments", "filesDownloads",
+] as const;
+export type PermissionKind = (typeof PERMISSION_KINDS)[number];
+
+/**
+ * How a permission is obtained: `prompt` — an API shows the system dialog once;
+ * `settings` — only System Settings grants it (Hormes deep-links to the pane and
+ * watches for the change); `perApp` — Automation: one prompt per target app, shown
+ * when that app is running and first asked.
+ */
+export type PermissionAsk = "prompt" | "settings" | "perApp";
+
+export interface PermissionInfo {
+  readonly kind: PermissionKind;
+  readonly grant: Grant;
+  readonly ask: PermissionAsk;
+  /** Without it the voice or the hands do not work (vs. a capability the brain can do without). */
+  readonly required: boolean;
+  /** Short name for a row. */
+  readonly label: string;
+  /** One line: what stops working without it. */
+  readonly why: string;
+  /** Automation: the target apps granted / denied; files: the folder; anything a row should show. */
+  readonly detail?: string;
+  /** Wall-clock ms of the last read. */
+  readonly checkedAt?: number;
+}
+
 export interface Permissions {
   readonly microphone: Grant;
   readonly screenRecording: Grant;
   readonly accessibility: Grant;
+  /** The whole list, as the app last read it (the process TCC keys on); absent from older apps. */
+  readonly all?: readonly PermissionInfo[];
 }
 
 // --------------------------------------------------------------- snapshot ---
@@ -224,8 +477,20 @@ export interface AudioLevels {
   readonly output: number;
 }
 
+export type Accent = "american" | "british" | "none";
+export const ACCENTS: readonly Accent[] = ["american", "british", "none"];
+/** GPT-Live-1's built-in voices (mirror of `BuiltInVoice` in @hormes/live; a type-level test keeps them equal). All speak English. */
+export const VOICES = [
+  "alloy", "ash", "ballad", "beacon", "bossa", "cedar", "cinder", "coral", "delta", "echo", "gleam",
+  "marin", "meridian", "quartz", "ripple", "sage", "shimmer", "stone", "tempo", "verse", "vesper", "willow",
+] as const;
+export type Voice = (typeof VOICES)[number];
+
 export interface SessionInfo {
   readonly id: string;
+  /** The voice and accent this session was opened with (a change is heard at the next wake). */
+  readonly voice?: string;
+  readonly accent?: Accent;
   readonly startedAt: number;
   readonly expiresAt: number;
   /** Cumulative billed seconds, from session.usage.updated. */
@@ -247,7 +512,102 @@ export interface Snapshot {
   readonly brainReady: boolean;
   readonly handsReady: boolean;
   readonly setup: SetupStatus;
+  /** Regions Kevin circled, newest last; the next delegation sees the unconsumed ones. */
+  readonly marks: readonly ScreenMark[];
+  /**
+   * Present while paused: a pause closes the Live session (the meter stops) and holds
+   * the conversation; `sleepsAt` is when an unresumed pause decays to sleep.
+   */
+  readonly pause?: PauseInfo;
+  /** Live seconds billed today — closed sessions from the ledger plus the open one — for the meter. */
+  readonly usageToday?: UsageToday;
+  /**
+   * The problems, typed: what kind, one line, and the one action that fixes it. `problems`
+   * (plain text) stays for older surfaces; this list is the same problems with their remedy.
+   */
+  readonly problemsTyped?: readonly Problem[];
+  /** What the trash holds, for the Console ("3 days · 129 MB"; Reveal in Finder). */
+  readonly trash?: TrashInfo;
+  /** Agents Kevin hid from the rail (agent.hidden rows). */
+  readonly hiddenAgents?: readonly string[];
+  /** The delegation's workers: running ones and those finished within WORKER_LINGER_MS. */
+  readonly workers?: readonly Worker[];
+  /** What Hormes remembers about Kevin: counts, mode, the last run, what the last turn used. */
+  readonly memory?: MemorySummary;
 }
+
+/** `dock`: Hormes twice in the Dock (a recent tile next to the pin, or two pins); the engine's read-only audit raises it, Fix the Dock repairs it. */
+export type ProblemKind =
+  | "permission.accessibility" | "permission.screenRecording" | "permission.microphone" | "permission.fullDiskAccess" | "permission.other"
+  | "brain.unavailable" | "brain.probe" | "voice.limit" | "voice.connection" | "voice.key" | "hands.helper" | "disk.low" | "dock" | "daemon" | "crash" | "other";
+
+export interface ProblemRemedy {
+  /** Button text: "Open pane", "Request", "Retry", "Reveal", "Restart daemon", "Fix the Dock". */
+  readonly label: string;
+  /** What the button does: an EngineCommand the surface sends, or a URL/path the surface opens. */
+  readonly command?: EngineCommand;
+  readonly open?: string;
+}
+
+export interface Problem {
+  readonly kind: ProblemKind;
+  readonly text: string;
+  readonly remedy?: ProblemRemedy;
+  /** Wall-clock ms first seen. */
+  readonly since: number;
+}
+
+export interface TrashInfo {
+  readonly path: string;
+  readonly days: number;
+  readonly bytes: number;
+}
+
+export interface PauseInfo {
+  readonly at: number;
+  /** The session that was closed by the pause; a resume's new session says `resumedFrom` it. */
+  readonly sessionId: string;
+  readonly usageSeconds: number;
+  readonly sleepsAt: number;
+}
+
+export interface UsageToday {
+  readonly seconds: number;
+  readonly sessions: number;
+}
+
+/** GPT-Live-1 list price (docs/REDESIGN.md §1), for the meter. Billed per second. */
+export const LIVE_PRICE_PER_MINUTE_USD = 0.05;
+
+/**
+ * One of Hormes's own Live sessions as the ledger recorded it — the Console's
+ * "Hormes" section. A resume opens a new session continuing the paused one;
+ * `resumedFrom` links the chain into one conversation.
+ */
+export interface HormesSessionSummary {
+  readonly id: string;
+  /** Ledger day (file), YYYY-MM-DD local. */
+  readonly day: string;
+  readonly startedAt: number;
+  /** Absent while the session is still open. */
+  readonly closedAt?: number;
+  readonly reason?: string;
+  readonly usageSeconds: number;
+  readonly heard: number;
+  readonly said: number;
+  readonly delegations: number;
+  /** The first thing Kevin said in it, trimmed; "" when nothing was heard. */
+  readonly title: string;
+  readonly resumedFrom?: string;
+  /** Conversation (chain) state from the tombstone rows; absent = active. */
+  readonly state?: ConversationState;
+  /** Kevin's own name for the conversation ("" or absent = the auto title). */
+  readonly name?: string;
+  readonly pinned?: boolean;
+  readonly trashedAt?: number;
+}
+
+export type ConversationState = "active" | "archived" | "trashed";
 
 // --------------------------------------------------------- shell messages ---
 
@@ -257,7 +617,9 @@ export type EngineEvent =
   | { readonly type: "levels"; readonly levels: AudioLevels }
   | { readonly type: "toast"; readonly text: string; readonly tone: "info" | "warn" | "error" }
   /** Drop whatever is queued for the speaker (stop, cancel, sleep). */
-  | { readonly type: "speaker-flush" };
+  | { readonly type: "speaker-flush" }
+  /** A page of an opened agent's conversation (`replace`), or new turns while it is open (`append`). */
+  | { readonly type: "agent.transcript"; readonly transcript: AgentTranscript; readonly mode: "replace" | "append" | "prepend" };
 
 /**
  * A settings change. `null` clears an optional field (JSON has no way to send
@@ -268,10 +630,47 @@ export type SettingsPatch = { readonly [K in keyof Settings]?: Settings[K] | nul
 /** Surface → engine. */
 export type EngineCommand =
   | { readonly type: "wake" }
-  | { readonly type: "sleep" }
+  /** Sleep: return to the notch and close the session. `cause` says why (absent = `command`); `phrase` is the cue Kevin said. */
+  | { readonly type: "sleep"; readonly cause?: SleepCause; readonly phrase?: string }
   | { readonly type: "mute" }
   | { readonly type: "unmute" }
+  /**
+   * Stop: the transport's stop. Interrupt everything (work, speech, hands), close the
+   * Live session so the meter stops, and sleep. Also from paused. Never a no-op: with
+   * nothing open it still kills background jobs.
+   */
   | { readonly type: "stop" }
+  /**
+   * Go: the transport's one button. Asleep → wake (opens the paid session); paused →
+   * resume (a new session that carries the paused one's context); awake → nothing.
+   */
+  | { readonly type: "go" }
+  /**
+   * Interrupt: cancel the current work and speech but stay awake and listening — what a
+   * spoken "stop" / "cancel" / "never mind" means. The pre-transport `stop`.
+   */
+  | { readonly type: "interrupt"; readonly how?: "pressed" | "said" }
+  // ---- conversation cleanup (the Console's; never a brain tool). Every one is undoable.
+  | { readonly type: "conversation.trash"; readonly chainId: string }
+  | { readonly type: "conversation.restore"; readonly chainId: string }
+  | { readonly type: "conversation.archive"; readonly chainId: string }
+  | { readonly type: "conversation.rename"; readonly chainId: string; readonly name: string }
+  | { readonly type: "conversation.pin"; readonly chainId: string; readonly pinned: boolean }
+  /** Start a fresh conversation: the open session is closed like a stop; the next Go starts a new chain. */
+  | { readonly type: "conversation.new" }
+  /** Hide the Now stream's items so far (undo with now.restore); the ledger keeps them. */
+  | { readonly type: "now.clear" }
+  | { readonly type: "now.restore" }
+  /** Move a whole day (ledger file and/or shots) to the trash, or back. */
+  | { readonly type: "ledger.trash-day"; readonly day: string; readonly what: "ledger" | "shots" | "both" }
+  | { readonly type: "ledger.restore-day"; readonly day: string }
+  /** Run the retention sweep now (what it would move is logged first). */
+  | { readonly type: "ledger.sweep" }
+  | { readonly type: "agent.hide"; readonly agentId: string; readonly hidden: boolean }
+  /** Stop one worker (the Console's Stop on its row); the others and the session carry on. */
+  | { readonly type: "worker.stop"; readonly workerId: string }
+  /** A remedy button pressed on a typed problem; the engine re-checks and clears it when fixed. */
+  | { readonly type: "problem.retry"; readonly kind: ProblemKind }
   | { readonly type: "say-text"; readonly text: string }
   | { readonly type: "set-settings"; readonly patch: SettingsPatch }
   | { readonly type: "clear-problems" }
@@ -279,11 +678,35 @@ export type EngineCommand =
   | { readonly type: "agent.refresh" }
   | { readonly type: "open-console" }
   | { readonly type: "open-ledger" }
-  | { readonly type: "request-permission"; readonly which: keyof Permissions }
+  /** Ask for one permission (the app shows the prompt or opens the pane), or "all": the sweep, every prompt in turn. */
+  | { readonly type: "request-permission"; readonly which: PermissionKind | "all" }
   /** Write secrets to ~/.hormes/env (null removes), reload, restart the brain. */
   | { readonly type: "config.set-secrets"; readonly secrets: Partial<Record<SecretKey, string | null>> }
   /** Check the OpenAI key and the brain; results land in snapshot.setup. */
-  | { readonly type: "config.probe" };
+  | { readonly type: "config.probe" }
+  /** Follow an agent's conversation: newest page now, live turns until closed. */
+  /** `viewer` names the pane that opened it (the daemon prefixes its client id) so opens are per pane and a dead client's tails close. */
+  | { readonly type: "agent.open"; readonly agentId: string; readonly viewer?: string }
+  | { readonly type: "agent.close"; readonly agentId: string; readonly viewer?: string }
+  /** Kevin pressed Switch now after picking a voice or accent: pause, then resume with the new voice (never while work runs). */
+  | { readonly type: "voice.reopen" }
+  // ---- memory (the Console's Memory rail and the CLI). Forget is a state, never a deletion.
+  | { readonly type: "memory.forget"; readonly id: string }
+  | { readonly type: "memory.restore"; readonly id: string }
+  | { readonly type: "memory.edit"; readonly id: string; readonly text: string; readonly kind?: MemoryKind }
+  | { readonly type: "memory.add"; readonly text: string; readonly kind?: MemoryKind }
+  /** Run extraction over what is new now (the quiet-tick run, on demand). */
+  | { readonly type: "memory.run" }
+  /** Older turns before message `before`. */
+  | { readonly type: "agent.history"; readonly agentId: string; readonly before: string }
+  /** Kevin circled a region of the screen for Hormes (global points; `path` is his stroke). */
+  | { readonly type: "mark.add"; readonly rect: Rect; readonly path?: readonly Point[] }
+  | { readonly type: "mark.clear" }
+  /** Exit the daemon with code 75 so the app respawns it on the new code (after a self-edit passed its checks). */
+  | { readonly type: "daemon.restart" }
+  /** Keep the session open but go silent: mic muted, output dropped, no delegations. */
+  | { readonly type: "pause" }
+  | { readonly type: "resume" };
 
 // ---------------------------------------------------------------- overlay ---
 
@@ -300,11 +723,31 @@ export interface Point {
 }
 
 /** Engine → annotation layer. Global points. */
+/** Colour family of an annotation: accent (Hormes pointing), ok/warn (feedback), mark (Kevin's own circles). */
+export type OverlayTone = "accent" | "ok" | "warn" | "mark";
+
 export type OverlayCommand =
   | { readonly cmd: "point"; readonly x: number; readonly y: number; readonly label?: string; readonly ttlMs?: number }
   | { readonly cmd: "highlight"; readonly rect: Rect; readonly label?: string; readonly ttlMs?: number }
   | { readonly cmd: "path"; readonly from: Point; readonly to: Point; readonly ttlMs?: number }
   | { readonly cmd: "click-pulse"; readonly x: number; readonly y: number }
+  /** Teaching shapes: drawn on the click-through layer, fading after ttlMs (default 6 s). */
+  | { readonly cmd: "circle"; readonly x: number; readonly y: number; readonly radius: number; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
+  | { readonly cmd: "arrow"; readonly from: Point; readonly to: Point; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
+  | { readonly cmd: "rect"; readonly rect: Rect; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
+  | { readonly cmd: "text"; readonly x: number; readonly y: number; readonly text: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
+  /** A freehand stroke (Kevin's circle echoed back, or a brain drawing). */
+  | { readonly cmd: "stroke"; readonly points: readonly Point[]; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
+  /** The blob flies to a point and hovers there for dwellMs (default 2 s) before drifting home. */
+  | { readonly cmd: "orb.fly"; readonly x: number; readonly y: number; readonly dwellMs?: number; readonly reason?: string }
+  /**
+   * The blob draws: it flies to the first point, becomes a cursor, and drags the
+   * stroke along the points (closing it when `closed`), then goes home. The stroke
+   * stays on the layer for ttlMs. This is how Hormes points at things and how it
+   * outlines what Kevin circled — a hand-drawn line, not a stamped shape.
+   */
+  | { readonly cmd: "orb.trace"; readonly points: readonly Point[]; readonly closed?: boolean; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone; readonly reason?: string }
+  | { readonly cmd: "orb.home" }
   | { readonly cmd: "clear" };
 
 // ----------------------------------------------------------------- ledger ---
@@ -314,15 +757,49 @@ export type OverlayCommand =
  * over this. `at` is wall-clock ms.
  */
 export type LedgerRow =
-  | { readonly at: number; readonly type: "session.started"; readonly sessionId: string; readonly voice: string }
+  | { readonly at: number; readonly type: "session.started"; readonly sessionId: string; readonly voice: string; readonly resumedFrom?: string; readonly language?: string; readonly accent?: Accent }
   | { readonly at: number; readonly type: "session.closed"; readonly sessionId: string; readonly reason: string; readonly usageSeconds: number }
+  /** A pause closed `sessionId` to stop the meter; the conversation is held. */
+  | { readonly at: number; readonly type: "pause"; readonly sessionId: string; readonly usageSeconds: number }
+  /** A resume opened `sessionId` continuing `resumedFrom` after `pausedMs`. */
+  | { readonly at: number; readonly type: "resume"; readonly sessionId: string; readonly resumedFrom: string; readonly pausedMs: number }
+  /** The transport's stop (pressed) or a spoken interrupt (said); `cancelled` is the delegation it cut. */
+  | { readonly at: number; readonly type: "stop"; readonly how: "pressed" | "said"; readonly cancelled?: string }
   | { readonly at: number; readonly type: "heard"; readonly item: TranscriptItem }
   | { readonly at: number; readonly type: "said"; readonly item: TranscriptItem }
   | { readonly at: number; readonly type: "delegation.created"; readonly delegation: Delegation }
   | { readonly at: number; readonly type: "delegation.step"; readonly delegationId: string; readonly step: DelegationStep }
   | { readonly at: number; readonly type: "delegation.finished"; readonly delegationId: string; readonly status: DelegationStatus; readonly timings: DelegationTimings; readonly summary?: string }
   | { readonly at: number; readonly type: "problem"; readonly text: string }
-  | { readonly at: number; readonly type: "agent"; readonly agent: AgentInfo };
+  | { readonly at: number; readonly type: "agent"; readonly agent: AgentInfo }
+  /** A worker started or changed status (one row per change; `worker` is the whole record at that moment). */
+  | { readonly at: number; readonly type: "worker"; readonly worker: Worker }
+  /** Hormes went to sleep: why, the cue if spoken, the session it closed, whether the voice said its one-word farewell. Written before the close. */
+  | { readonly at: number; readonly type: "sleep"; readonly cause: SleepCause; readonly phrase?: string; readonly sessionId?: string; readonly farewell?: boolean }
+  // ---- memory audit rows: ids only (an item's text lives in the memory store, so a forgotten item's words never sit in a day file).
+  | { readonly at: number; readonly type: "memory.added"; readonly id: string; readonly kind: MemoryKind; readonly origin: MemoryOrigin }
+  | { readonly at: number; readonly type: "memory.updated"; readonly id: string }
+  | { readonly at: number; readonly type: "memory.forgotten"; readonly id: string; readonly by: "kevin" | "reflex" | "cli" }
+  | { readonly at: number; readonly type: "memory.restored"; readonly id: string }
+  | { readonly at: number; readonly type: "memory.run"; readonly sessionId?: string; readonly extractor: "responses" | "rules"; readonly added: number; readonly updated: number; readonly noop: number; readonly refused: number; readonly ms: number }
+  // ---- conversation cleanup: tombstone rows appended to TODAY's file; the bytes of the
+  // conversation stay where they were written. `chainId` is any session id of the chain
+  // (the walk resolves it to the root); the last row by `at` wins; `restored` undoes both
+  // `trashed` and `archived`. Nothing is ever deleted: whole day files MOVE to
+  // <stateDir>/trash by rename(2) (`ledger.moved`), and move back on restore.
+  | { readonly at: number; readonly type: "conversation.trashed"; readonly chainId: string; readonly by: "kevin" | "retention" }
+  | { readonly at: number; readonly type: "conversation.restored"; readonly chainId: string }
+  | { readonly at: number; readonly type: "conversation.archived"; readonly chainId: string }
+  | { readonly at: number; readonly type: "conversation.renamed"; readonly chainId: string; readonly name: string }
+  | { readonly at: number; readonly type: "conversation.pinned"; readonly chainId: string; readonly pinned: boolean }
+  /** Kevin cleared the Now stream: items at or before `at` of `sessionId` are hidden from the live view (the ledger keeps them). */
+  | { readonly at: number; readonly type: "now.cleared"; readonly sessionId: string }
+  | { readonly at: number; readonly type: "now.restored"; readonly sessionId: string }
+  /** A whole day's ledger file or shots folder moved between the live dirs and <stateDir>/trash (never unlinked). */
+  | { readonly at: number; readonly type: "ledger.moved"; readonly day: string; readonly what: "ledger" | "shots"; readonly to: "trash" | "live"; readonly path: string; readonly by: "kevin" | "retention" }
+  | { readonly at: number; readonly type: "agent.hidden"; readonly agentId: string; readonly hidden: boolean }
+  /** A confirmation Kevin gave that stays good for the rest of the conversation (same app, same action class); `until` is wall-clock ms. */
+  | { readonly at: number; readonly type: "grant"; readonly chainId: string; readonly app: string; readonly actionClass: string; readonly until: number };
 
 // ------------------------------------------------------------ type guards ---
 
@@ -331,8 +808,11 @@ export function isPhase(value: unknown): value is Phase {
 }
 
 const ENGINE_COMMAND_TYPES: ReadonlySet<string> = new Set([
-  "wake", "sleep", "mute", "unmute", "stop", "say-text", "set-settings", "clear-problems",
-  "agent.send", "agent.refresh", "open-console", "open-ledger", "request-permission", "config.set-secrets", "config.probe",
+  "wake", "sleep", "mute", "unmute", "stop", "go", "interrupt", "say-text", "set-settings", "clear-problems",
+  "agent.send", "agent.refresh", "open-console", "open-ledger", "request-permission", "config.set-secrets", "config.probe", "agent.open", "agent.close", "agent.history", "mark.add", "mark.clear", "daemon.restart", "pause", "resume",
+  "conversation.trash", "conversation.restore", "conversation.archive", "conversation.rename", "conversation.pin", "conversation.new", "now.clear", "now.restore", "ledger.trash-day", "ledger.restore-day", "ledger.sweep", "agent.hide", "problem.retry",
+  "worker.stop",
+  "voice.reopen", "memory.forget", "memory.restore", "memory.edit", "memory.add", "memory.run",
 ]);
 
 export function isEngineCommand(value: unknown): value is EngineCommand {

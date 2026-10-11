@@ -25,7 +25,7 @@ const sources = new Map<string, KeySource>();
  */
 const OWNED_KEYS: ReadonlySet<string> = new Set([
   "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY", "HORMES_BRAIN_BASE_URL",
-  "HORMES_BRAIN", "HORMES_BRAIN_MODEL", "HORMES_VOICE", "HORMES_LIVE_MODEL",
+  "HORMES_BRAIN", "HORMES_BRAIN_MODEL", "HORMES_VOICE", "HORMES_LIVE_MODEL", "HORMES_MEMORY_MODEL",
 ]);
 
 /** Minimal dotenv: KEY=VALUE lines, no interpolation. */
@@ -160,6 +160,12 @@ export interface HormesConfig {
   /** Codex CLI override; otherwise PATH, then the copy bundled in ChatGPT.app / Codex.app. */
   readonly codexBin: string | undefined;
   readonly handsBin: string;
+  /**
+   * The Responses model the memory extractor calls (Kevin's OpenAI key; dollars, never
+   * the ChatGPT plan). Undefined = the memory package's default, a mini-class id the
+   * doctor picks once from a free `GET /v1/models`. Memory never uses Codex.
+   */
+  readonly memoryModel: string | undefined;
 }
 
 const BRAINS: readonly BrainKind[] = BRAIN_KINDS;
@@ -189,5 +195,6 @@ export function readConfig(): HormesConfig {
     logLevel: level === "debug" || level === "warn" || level === "error" ? level : "info",
     claudeBin: env["HORMES_CLAUDE_BIN"] || undefined,
     handsBin: env["HORMES_HANDS_BIN"] || join(REPO_ROOT, "build", "hormes-hands"),
+    memoryModel: env["HORMES_MEMORY_MODEL"] || undefined,
   };
 }
