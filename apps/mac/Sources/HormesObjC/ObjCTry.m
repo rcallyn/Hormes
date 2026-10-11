@@ -18,7 +18,7 @@ static NSError *JHErrorFromException(NSException *exception) {
     return [NSError errorWithDomain:JHObjCExceptionErrorDomain code:1 userInfo:info];
 }
 
-BOOL HMSTry(void (NS_NOESCAPE ^block)(void), NSError * _Nullable __autoreleasing * _Nullable error) {
+BOOL JHTry(void (NS_NOESCAPE ^block)(void), NSError * _Nullable __autoreleasing * _Nullable error) {
     @try {
         block();
         return YES;

@@ -44,16 +44,38 @@ when it exits unexpectedly. Its stdout/stderr go to `~/.hormes/daemon.log`
 (rotated at 5 MB). The status-bar tooltip and the Console show the daemon state
 (`running pid N`, `restarting in 4 s: exit 1`, …).
 
-Hotkeys (Carbon, no Accessibility grant needed): ⌥⇧J console, ⌥⇧M mute,
-⌥⎋ stop, ⌥⇧Space wake/sleep.
+Hotkeys (Carbon, no Accessibility grant needed). Go / Pause and Stop are one
+transport (`AppState.transportToggle` / `transportStop`, Model/AppState.swift's
+Transport region) shared by the capsule, the notch island, the Console composer,
+the status and Dock menus, the hotkeys and the `hormes://` URLs; pause and stop
+both close the Live session so the meter stops, a pause keeps the conversation and
+Go resumes it with that context.
+
+| | |
+|---|---|
+| `⌥⇧J` | open the Console |
+| `⌥⇧M` | mute / unmute |
+| `⌥⎋` | stop — interrupt everything, close the session (the meter stops), sleep |
+| `⌥⇧Space` | go / pause — go wakes, or resumes a pause with its context; pause closes the session (the meter stops) and keeps the conversation |
+| `⌥⇧C` | circle something on screen for Hormes |
+| `⌥⇧P` | alias of `⌥⇧Space` (go / pause) |
+
+In the Console: `⌘P` go / pause, `⌘.` stop. URLs: `hormes://go`, `hormes://pause`,
+`hormes://stop` (`wake`, `resume`, `sleep` are aliases). While paused the mic is off
+and the wake gate listens: the word resumes without Touch ID or the passphrase — the
+pause was authenticated when its session opened and decays to asleep on its own.
 
 ## Package
 
 ```sh
-pnpm build:mac          # → build/Hormes.app
-cp -R build/Hormes.app /Applications/
+pnpm build:mac          # builds, signs, installs /Applications/Hormes.app; build/Hormes.app is a symlink to it
 open -a Hormes
 ```
+
+There is exactly one launchable Hormes on the Mac — `/Applications/Hormes.app`
+— so the Dock, LaunchServices' recents and TCC never see two identities. The
+preview harnesses (`Scripts/*-preview.sh`) run as accessory processes and never
+appear in the Dock.
 
 `scripts/build-mac.ts` rebuilds `hormes-hands` whenever `packages/hands/native`
 is newer than `build/hormes-hands` (the bundle freezes a copy), builds the icon if
@@ -74,7 +96,7 @@ The engine runs from the checkout through tsx, so changing Hormes's behaviour is
 editing this checkout (or, once v2 is committed, pulling it); changes under
 `apps/mac` or `packages/hands/native` need a repackage. This app is the only face:
 the Electron shell it replaced was retired on 2026-09-10 to
-`legacy/shell-electron-v2` and is not built.
+git history (before `1ff11e2`) and is not built.
 
 ## Setup (`Sources/Hormes/UI/Onboarding`)
 
@@ -85,7 +107,7 @@ Steps: **welcome** (daemon connected?), **voice** (`OPENAI_API_KEY` →
 probes; the result is `snapshot.setup.openaiKey`), **brain** (kind, model, base URL
 for `openai-compatible`; `ANTHROPIC_API_KEY` / `HORMES_BRAIN_API_KEY` →
 `config.set-secrets`, then `config.probe` → `snapshot.setup.brain` /
-`brainDetail`), **permissions** (PermissionsKit status + Settings deep links),
+`brainDetail`), **permissions** (all sixteen kinds, "Ask for everything", per-row Request / Open Settings),
 **wake** (phrases, authentication, passphrase), **agents** (the sessions found),
 **done** (`set-settings {onboarded: true}`). Secrets go to `~/.hormes/env` (mode
 0600) on the daemon side; the snapshot only ever carries presence
@@ -108,13 +130,81 @@ macOS keys privacy grants (microphone, screen recording, accessibility) to the
   identity keeps those grants across rebuilds; an ad-hoc signature changes every
   build and TCC forgets.
 
-The app itself requests only the microphone and reports it to the daemon; it
-re-checks the grant every time it becomes active, so enabling the mic in System
-Settings takes effect without a relaunch, and the Console's microphone "Request"
-is handled in-process (TCC prompt when undetermined, the Privacy › Microphone pane
-when denied). Screen recording and accessibility are probed by the hands helper (the
-engine reports them in the snapshot); the Console's buttons deep-link to the right
-Settings pane via `x-apple.systempreferences:com.apple.preference.security?Privacy_*`.
+**Every permission, read live, asked for in one sweep, shown everywhere.** Kevin:
+"give it all permissions and make it ask for all permissions". Nothing can grant a TCC
+permission programmatically — no API, `tccutil` only resets, MDM is not an option — so
+the app does the most that exists: it reads all sixteen kinds of the contract
+(`PermissionKind`: microphone, speech recognition, screen recording, accessibility,
+input monitoring, automation, full disk access, notifications, camera, contacts,
+calendars, reminders, local network, and the Desktop / Documents / Downloads folders)
+without ever prompting, asks for every one that has a prompt in order and one dialog at
+a time, and for the rest deep-links to the exact System Settings pane and watches for
+the change. `Sources/Hormes/Permissions/`: `Permissions.swift` (PermissionsKit — the
+metadata: label, why, required, ask; the read-only readers; the panes),
+`PermissionsRequests.swift` (one awaited request per kind), `PermissionsSweep.swift`
+(PermissionsCenter — the list, the poll, the sweep, the dry run, the reporting). The
+readers: AVCaptureDevice / SFSpeechRecognizer / CNContactStore / EKEventStore
+authorization statuses; screen recording, accessibility, input monitoring and full disk
+access through the fresh `hormes-hands --permissions` process — the four it prints —
+(fallbacks in this process: `CGPreflightScreenCaptureAccess`, `AXIsProcessTrusted`,
+`IOHIDCheckAccess(listenEvent)`, which alone still tells "not asked" from "denied", and
+opening `~/Library/Application Support/com.apple.TCC/TCC.db`, EPERM = denied); Automation
+through `AEDeterminePermissionToAutomateTarget(askUserIfNeeded: false)` per target (System
+Events, Finder, Safari, Chrome, Terminal, Mail, Messages, Notes, Calendar, Reminders,
+Music, plus a curated set of other browsers, terminals and editors while they run — never
+whatever else happens to be scriptable, since every target is one consent dialog in the
+sweep; granted when every running target is granted, denied when any is, unknown
+otherwise, the detail naming them); notifications through `UNUserNotificationCenter`
+(bundle only); local network and the
+three folders report unknown until the sweep has asked, because their first real touch
+*is* the prompt (afterwards a short `NWBrowser` / `opendir` reads the answer). Required:
+microphone, speech recognition, screen recording, accessibility, input monitoring,
+automation, full disk access; the rest are capabilities.
+
+**The sweep** ("Ask for everything" — the Setup Permissions step's head button (a ghost:
+the footer's Continue is the step's one filled button), the Console's Permissions
+section, the status menu's "Ask for everything…", and the engine command
+`request-permission {which: "all"}`, which the AppDelegate answers in-process like every
+kind but accessibility and screen recording): required kinds first, then the rest;
+granted ones skipped; each prompt awaited before the next ("6 of 16 · asking for
+Automation…" as a live line); Automation one running target at a time (System Events may
+be launched, it is invisible; nothing else is ever launched for it). Screen Recording,
+Accessibility and Input Monitoring are the exception that cannot be awaited: their
+prompt APIs (`CGRequestScreenCaptureAccess`, `AXIsProcessTrustedWithOptions(prompt)`,
+`IOHIDRequestAccess`) return at once while tccd shows the dialog, and the dialog's answer
+is nothing the app can read but the grant itself — so the sweep fires the prompt (it
+creates the System Settings row and shows the dialog once, with its own Open System
+Settings button) and then *waits* (stage `waiting`: "3 of 16 · Screen Recording · allow
+it, or switch Hormes on in …" with Open Settings / Next / Cancel) for the grant to land,
+for Next (skip) or for Cancel — never the next dialog on top of this one; a kind whose
+dialog was already shown on an earlier ask (an "asked" mark per kind in UserDefaults)
+gets its pane opened right away as well. When only settings-only kinds and denied prompt
+kinds remain, a walk through the panes one at a time with Next (`Privacy_AllFiles`,
+`Privacy_Camera`, `Privacy_Automation`, …; Notifications is its own pane, not under
+Privacy), kinds that share a pane in one step (the three folders under Files and
+Folders), Full Disk Access also revealing `/Applications/Hormes.app` in Finder so it
+can be dragged in; a poll every 1.5 s (for 90 s, and for as long as a step waits) and
+on activation catches the switch and moves the step on when all its kinds are granted;
+at the end a summary ("14 of 16 granted · Full Disk Access needs System Settings"). A
+read that began before a prompt's answer landed cannot undo it: the list merges per kind
+by `checkedAt`. `HORMES_PERMISSIONS_DRY_RUN=1` logs every ask, every wait and every pane
+instead of doing it; `HORMES_PERMISSIONS_DRY_RUN_DENY=screenRecording,filesDesktop,…`
+(dry run only) reports those kinds as denied so the wait and the grouped-pane steps show
+on a Mac that has granted them. Reporting: after every read that changed anything the
+app sends `permission {which,state,detail}` per changed kind and `permissions {all}` with
+the whole list (`EngineClient.sendPermission` / `sendPermissions`), so
+`snapshot.permissions.all` carries it to the Console rail (required rows + an "n of 16
+granted" disclosure), `hormes status` and the doctor; `AppState`'s permissions region
+holds the published list and the sweep progress for the Setup step and the status menu
+("Permissions: n missing" opens Setup on that step). `Scripts/permissions-probe.sh`
+prints the readers' answers for the shell's own process and a dry-run sweep — never a
+prompt. Preview: `Scripts/onboarding-preview.sh permissions`
+(`PREVIEW_SWEEP=asking|waiting|settings|folders|done`; `all` also shoots the step at
+620x1500 as `preview-onboarding-permissions-all.png`, every row in one picture).
+
+The launch path still asks for the microphone first (`refreshMicrophoneGrant`), re-checks
+it on every activation, and answers the Console's microphone "Request" in-process; the
+speech prompt follows it once for the wake word.
 
 **Grants change while the app runs, and no relaunch is needed.** A running process
 may keep the TCC answer it got at launch (Screen Recording notoriously does), so
@@ -130,9 +220,37 @@ identity) the row still shows "Hormes" switched on but no longer applies; remove
 it with the − button, press Request (which creates a row for the current
 signature), and switch the new row on.
 
-`entitlements.plist` carries only `device.audio-input` and `automation.apple-events`.
-No hardened-runtime exceptions: spawning node and the helper is unaffected by the
-hardened runtime, which governs only what loads into the app's own process.
+`entitlements.plist` carries `device.audio-input`, `device.camera`,
+`automation.apple-events`, `personal-information.addressbook` and
+`personal-information.calendars` (EventKit: Reminders ride on it; the hardened runtime
+has no reminders key). Screen recording, accessibility, input monitoring, speech, full
+disk access, notifications, local network and the folders are TCC-only and need no
+entitlement. `Info.plist` carries a usage string for every prompt the app fires
+(microphone, speech, Apple events, camera, contacts, calendars and reminders — full
+access and legacy keys — local network with `NSBonjourServices`, the three folders,
+network and removable volumes). No hardened-runtime exceptions: spawning node and the
+helper is unaffected by the hardened runtime, which governs only what loads into the
+app's own process; the helper is signed without entitlements and still reads
+accessibility and screen recording, which are TCC checks on the responsible process.
+
+## Stepping into sessions, circling the screen, watching it fly
+
+- **Sessions** in the Console's left rail carry the mark and colour of the agent
+  that owns them (Claude Code, Codex, Cursor, Gemini…). Click one to step into
+  the conversation: every turn, tool call and fold of reasoning, growing live
+  while the agent works (the engine tails the session file), with a composer
+  that talks to that agent and Allow / Deny for a resumed session's questions.
+- **⌥⇧C** (or the menu-bar *Circle Something…*) enters mark mode: the overlay
+  takes one stroke, Kevin circles anything, the engine screenshots that region
+  and hands it to the brain with the next task; Live is told he circled
+  something. Escape cancels; the mode times out after 20 s.
+- **Flight and drawing.** When the brain acts, the blob flies to the target,
+  hovers while the hands work, and drifts home; the overlay pulses clicks,
+  traces drags and frames regions being read. Brains have `show_circle`,
+  `show_arrow`, `show_rect`, `show_text`, `show_stroke` and `show_clear` to
+  teach on the click-through layer; shapes fade after a few seconds.
+
+The contract for all of it is in `docs/REDESIGN.md` §9.
 
 ## Wake word (`Sources/Hormes/Wake`)
 
@@ -190,7 +308,9 @@ an optional field, so "system default microphone" is `{ micDeviceId: null }`.
 App → daemon JSON: `hello {pid,version,audio:true}` (first; `audio:true` subscribes
 to speaker frames, `pid` excludes the app's windows from screenshots),
 `command {command:<EngineCommand>}`, `mic-level {level}`,
-`permission {which:"microphone",state}`, `ledger.read {id,date}`, `ledger.days {id}`.
+`permission {which,state,detail?}` (one kind as the app read it), `permissions {all}`
+(every `PermissionInfo` after a read that changed something), `ledger.read {id,date}`,
+`ledger.days {id}`.
 
 Snapshots are coalesced to ≤ 30/s before they reach `AppState`. Ledger requests
 resolve through ids with a 5 s timeout.
@@ -209,8 +329,48 @@ Speaker frames are converted to Float32 and scheduled on an `AVAudioPlayerNode`;
 `flush` stops the player and drops the backlog. Audio runs only while a session is
 open and the mic is granted.
 
-A start that fails outright is retried with backoff (2 s → 30 s) for as long as
-audio is wanted, device changes restart the graph, and a failure is surfaced as a
+**Nothing on the audio path may abort the process.** AVFoundation reports graph
+mistakes as Objective-C exceptions, which Swift cannot catch: `installTap` with a
+format the node no longer has ("Failed to create tap due to format mismatch"), a
+connection at a rate the hardware no longer runs, a player started on an engine that
+just stopped itself. Uncaught, one takes the app down — five of the eight crashes of
+2026-09-11 were the wake listener's tap, each a moment after the input device changed
+(the format it had read was stale until the engine was reset). Two rules follow:
+
+- Taps are installed with `format: nil` (the node's own output format at that moment,
+  so nothing can mismatch) and the callback converts from `buffer.format`, rebuilding
+  its `AVAudioConverter` when that changes — never from a format read before start.
+- Every AVFoundation call that can raise (`installTap`, `connect`, `prepare`/`start`,
+  `setVoiceProcessingEnabled`, `reset`, `removeTap`, the player's `play`/`stop`/
+  `scheduleBuffer`) runs inside `objcTry` (`Audio/ObjCTry.swift`), a Swift wrapper over
+  the `HormesObjC` target's `JHTry` (`@try/@catch`, `Sources/HormesObjC`). A raise
+  comes out as `ObjCException` (name, reason, top of the ObjC stack) and is logged and
+  retried like any other failed start.
+
+A start that fails — outright or by a caught raise — is retried on the ladder
+0.5, 1, 2, 5, 10, 30 s (`AudioBackoff`) for as long as audio is wanted; the first two
+retries are quiet, from the third on the line carries the "audio failed" prefix that
+becomes a toast, so a headset switch does not flash an error. The wake listener runs
+the same quick ladder for four attempts and then reports `startFailed`, at which point
+`WakeGate` takes over with its own 2 → 30 s backoff (it stops the listener while it
+waits, so the two loops never race). On `AVAudioEngineConfigurationChange` both engines
+stop, `reset()`, re-query the input format and log `before → after` (NSLog, prefixes
+`Audio:` / `WakeListener:`; the tap's first buffer logs its real format once per start),
+then rebuild after a short settle. Every level that leaves the audio code — the mic RMS
+on the wire, the ear's RMS and noise floor, the per-channel energies — goes through
+`clampLevel`: finite and 0…1, an empty buffer is 0, never 0/0.
+
+`Scripts/objc-try-probe.sh` proves the shim without the app or a TCC prompt: a
+mixer → output connection at 0 Hz and a channel-mismatched `scheduleBuffer` raise and
+are caught; when the running process already holds the microphone grant it also
+installs a tap on the *input* node with a format the device does not run and prints
+the caught "Failed to create tap due to format mismatch" (the exact raise that crashed
+the app — on a player node AVFoundation applies the format instead), shows the same
+tap with `format: nil` not raising, then starts the voice `AudioEngine`, simulates a
+configuration change and shows the formats before → after and the restart.
+`Scripts/ear-probe.sh` compiles the shim in.
+
+Device changes restart the graph, and a persistent failure is surfaced as a
 toast rather than a silent "listening". `Settings.micDeviceId` (a Core Audio device
 UID or numeric AudioDeviceID) is honoured only on the no-echo-cancellation path:
 the voice-processing unit drives input and output from one device property, so with
@@ -224,9 +384,9 @@ Sources/Hormes/App          main, AppDelegate, StatusItem, Hotkeys, Menus
 Sources/Hormes/Daemon       RepoLocator, DaemonProcess, Wire, EngineClient
 Sources/Hormes/Audio        AudioEngine
 Sources/Hormes/Wake         WakeGate, WakeWordListener, LocalAuth, LocalSpeaker
-Sources/Hormes/Permissions  PermissionsKit
+Sources/Hormes/Permissions  PermissionsKit (readers, panes), PermissionsRequests (one awaited prompt per kind), PermissionsCenter (the list, the sweep, the dry run)
 Sources/Hormes/Model        Protocol.swift, AppState.swift (the contract; do not edit casually)
 Sources/Hormes/UI           Orb, Overlay, Console, Onboarding
 Resources                    Info.plist, entitlements.plist, preview-*.png (harness screenshots)
-Scripts                      orb-preview.sh, console-preview.sh, onboarding-preview.sh, *PreviewMain.swift (+ mock/ fixtures the previews resolve)
+Scripts                      orb-preview.sh, console-preview.sh (scenarios incl. `hormes`, `hormes-log`, `paused`), onboarding-preview.sh, permissions-probe.sh (read-only readers + dry-run sweep), *PreviewMain.swift (+ mock/ fixtures the previews resolve)
 ```
