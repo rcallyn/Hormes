@@ -53,7 +53,7 @@ enum SingleInstance {
     /// How long a launch waits for an unclaimed twin to finish quitting (its teardown caps the daemon's stop at 5 s).
     static let waitSeconds: TimeInterval = 8
     /// Posted by a launch that hands off, with the state dir's path as the object; the one instance answers like a Dock click.
-    static let handOffNotification = Notification.Name("com.hormes.app.handoff")
+    static let handOffNotification = Notification.Name("com.kevinliu.hormes.handoff")
 
     /// The rule, pure. `waited`: the unclaimed twins have been waited for once already.
     static func decide(me: pid_t, executable: String?, claim: Claim, twins: [Twin], waited: Bool) -> Decision {

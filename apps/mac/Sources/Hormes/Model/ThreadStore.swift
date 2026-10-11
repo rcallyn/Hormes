@@ -7,7 +7,7 @@ import Foundation
 /// delta on the delegation card it names, patched in place through a delegationId → position
 /// map, so a busy thread's 20 steps a second cost 20 dictionary hits and never a rebuild.
 ///
-/// Bounded: `cap` (AppState.maxTranscriptMessages, 400) plus what User loaded with "Load
+/// Bounded: `cap` (AppState.maxTranscriptMessages, 400) plus what Kevin loaded with "Load
 /// earlier" (`prependedCount`); the oldest go from the front, their seqs enter a ring
 /// (`TrimmedSeqs`) so a re-sent entry older than the fold never lands as the newest row.
 public struct ThreadStore: Equatable {
@@ -77,7 +77,7 @@ public struct ThreadStore: Equatable {
     }
 
     /// An older page (`thread.history`): what we do not hold, in the page's own order, in
-    /// front of what we do. User asked for it, so it is held whole and the cap grows by it.
+    /// front of what we do. Kevin asked for it, so it is held whole and the cap grows by it.
     /// `complete` comes from the page (the last one reaches the thread's first entry).
     ///
     /// A page boundary can fall between a card and its steps: the steps landed first (the
@@ -124,7 +124,7 @@ public struct ThreadStore: Equatable {
         base -= fresh.count
         entries.insert(contentsOf: fresh, at: 0)
         if dropped > 0 {
-            // Rows left the middle: every held position moved. Once per page User asked for.
+            // Rows left the middle: every held position moved. Once per page Kevin asked for.
             reindex()
         } else {
             for (i, e) in fresh.enumerated() {
@@ -298,7 +298,7 @@ extension AppState {
         case "status":
             if let s = e.status { t.status = s }
             if let d = e.detail { t.detail = d }
-            if t.status != .waitingUser { t.question = nil }
+            if t.status != .waitingKevin { t.question = nil }
         case "step":
             if let n = e.steps { t.steps = n }
             if let tool = e.tool { t.detail = e.ok == false ? "\(tool) · failed" : tool }
@@ -307,7 +307,7 @@ extension AppState {
             t.turns += 1
         case "question":
             t.question = e.question
-            t.status = .waitingUser
+            t.status = .waitingKevin
         case "said":
             if let text = e.text { t.detail = text }
         case "at":
@@ -460,7 +460,7 @@ extension AppState {
         }
     }
 
-    /// The rail's order: waiting on User first (the one thing only he can move), then the busy
+    /// The rail's order: waiting on Kevin first (the one thing only he can move), then the busy
     /// ones, then the idle main, then the finished — each by when they began, newest first.
     public nonisolated static func railOrder(_ threads: [WorkThread]) -> [WorkThread] {
         threads.sorted { a, b in
@@ -471,7 +471,7 @@ extension AppState {
 
     public nonisolated static func railRank(_ s: ThreadStatus) -> Int {
         switch s {
-        case .waitingUser: return 0
+        case .waitingKevin: return 0
         case .queued, .starting, .thinking, .acting, .waitingScreen, .paused: return 1
         case .idle: return 2
         case .done, .failed, .stopped: return 3

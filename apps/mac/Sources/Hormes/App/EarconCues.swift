@@ -42,7 +42,7 @@ enum EarconCues {
         AppState.voiceAudioRuns(in: to) && !AppState.voiceAudioRuns(in: from)
     }
 
-    /// The problem kinds that need User and sound outside a session. `automation.*` stay silent (he was
+    /// The problem kinds that need Kevin and sound outside a session. `automation.*` stay silent (he was
     /// away; the island has them), and so does everything amber that can wait.
     static func problemSounds(_ kind: String) -> Bool {
         if kind.hasPrefix("voice.") { return true }

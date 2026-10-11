@@ -11,7 +11,7 @@ import os
 // Kevin noticed. This file is the net under whatever goes wrong next:
 //
 //   1. An uncaught-exception handler and POSIX signal handlers (SIGABRT, SIGSEGV, SIGBUS,
-//      SIGILL, SIGFPE, SIGTRAP) write `<state dir>/crashes/<time>.txt`: the reason, a
+//      SIGILL, SIGFPE, SIGTRAP) write `<state dir>/crashes/<time>-<pid>.txt`: the reason, a
 //      symbolicated backtrace, version and commit, uptime, the phase, the last 40 lines of
 //      the app's own log ring and the daemon's pid — then chain to the previous handler, so
 //      the system's .ips is still written and `lastExceptionBacktrace` is untouched.
@@ -103,19 +103,19 @@ private enum L: Int, CaseIterable {
         case .seconds: return " s\n"
         case .phase: return "phase: "
         case .daemonPid: return "daemon pid: "
-        case .daemonNone: return "daemon pid: none (not spawned by this app)\n"
+        case .daemonNone: return "daemon pid: none (no daemon spawned or attached)\n"
         case .relaunchYes: return "relaunch: yes ("
         case .relaunchYesMid: return " of "
         case .relaunchYesEnd: return " in the last 10 min)\n"
-        case .relaunchNo: return "relaunch: no — "
-        case .relaunchNoEnd: return " crashes in 10 minutes; staying down until Kevin opens Hormes himself\n"
-        case .relaunchDisabled: return "relaunch: no — HORMES_NO_RELAUNCH=1\n"
+        case .relaunchNo: return "relaunch: no ("
+        case .relaunchNoEnd: return " crashes in 10 minutes; staying down until you open Hormes yourself)\n"
+        case .relaunchDisabled: return "relaunch: no (HORMES_NO_RELAUNCH=1)\n"
         case .backtrace: return "\nbacktrace:\n"
         case .logHead: return "\nlog (last lines, oldest first):\n"
         case .logEmpty: return "(nothing logged yet)\n"
         case .thenSignal: return "\nthen: signal "
-        case .thenSignalEnd: return " — the runtime's abort after the exception above\n"
-        case .survived: return "\nsurvived: the runtime did not abort — AppKit reported the exception and the app kept running; no relaunch, the guard is re-armed\n"
+        case .thenSignalEnd: return ", the runtime's abort after the exception above\n"
+        case .survived: return "\nsurvived: the runtime did not abort (AppKit reported the exception and the app kept running); no relaunch, the guard is re-armed\n"
         case .nl: return "\n"
         case .colon: return ": "
         case .paren: return " ("
@@ -233,11 +233,16 @@ private func cgStamp(into buf: UnsafeMutablePointer<CChar>, epoch: Int) -> Int {
     return p
 }
 
-/// Open `<crashes>/<stamp>.txt` for this crash and write the head of the report.
+/// Open `<crashes>/<stamp>-<pid>.txt` for this crash and write the head of the report. The pid
+/// keeps two crashes in one second apart: the files are the relaunch counter, and two crashes
+/// sharing one name (O_EXCL fails, the second appends) counted as one, so a crash loop
+/// faster than a second got past the cap.
 private func cgOpenReport(now: Int) {
     guard cgDirFd >= 0, let name = cgNameBuf else { return }
     let n = cgStamp(into: name, epoch: now)
-    name[n] = 46; name[n + 1] = 116; name[n + 2] = 120; name[n + 3] = 116; name[n + 4] = 0 // ".txt"
+    name[n] = 45 // '-'
+    let m = cgPutInt(name, n + 1, Int(getpid()))
+    name[m] = 46; name[m + 1] = 116; name[m + 2] = 120; name[m + 3] = 116; name[m + 4] = 0 // ".txt"
     var fd = openat(cgDirFd, name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0o644)
     if fd < 0 { fd = openat(cgDirFd, name, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0o644) }
     cgReportFd = fd
@@ -463,7 +468,7 @@ enum CrashGuard {
         // reports), SA_SIGINFO for the fault address, the previous actions kept for chaining.
         var alt = stack_t()
         alt.ss_size = 256 * 1024
-        alt.ss_sp = malloc(alt.ss_size)
+        alt.ss_sp = malloc(Int(alt.ss_size)) // size_t is UInt in the macOS 14 SDK, Int in 15
         alt.ss_flags = 0
         if alt.ss_sp != nil { sigaltstack(&alt, nil) }
         cgDefaultAction = UnsafeMutablePointer<sigaction>.allocate(capacity: 1)
@@ -493,7 +498,8 @@ enum CrashGuard {
         cgPhase = Phase.allCases.firstIndex(of: phase) ?? 0
     }
 
-    /// The daemon this app spawned (nil once it has exited or when attached to someone else's).
+    /// The daemon's own pid: the one this app spawned (node itself, no wrapper), or the listener
+    /// on the socket when the app attached to a daemon it did not start; nil once it has exited.
     static func setDaemonPid(_ pid: Int32?) {
         cgDaemonPid = pid ?? 0
     }
@@ -524,15 +530,6 @@ enum CrashGuard {
         cgRingHead = (cgRingHead + 1) % cgSlots
         cgRingCount = min(cgRingCount + 1, cgSlots)
         os_unfair_lock_unlock(lock)
-    }
-
-    /// The last lines, oldest first (for tests and the Console).
-    static func recentLines() -> [String] {
-        guard let ring = cgRing, let lock = cgRingLock else { return [] }
-        os_unfair_lock_lock(lock)
-        defer { os_unfair_lock_unlock(lock) }
-        let start = cgRingCount < cgSlots ? 0 : cgRingHead
-        return (0..<cgRingCount).map { String(cString: ring + ((start + $0) % cgSlots) * cgSlotBytes) }
     }
 
     // MARK: the crash test knob
@@ -612,6 +609,9 @@ enum CrashGuard {
     /// 60 s: the crash reporter holds an aborting process for seconds while it writes the
     /// .ips — then `open -a` the bundle, or exec's the dev binary when not running from
     /// one. A pid still alive after the wait (AppKit swallowed the exception) means no launch.
+    /// Never a second Hormes: `open -a` (never `-n`) activates a running instance instead, and
+    /// whatever starts runs SingleInstance first — a Hormes Kevin opened in the meantime holds the
+    /// state dir's claim, so the relaunch hands off to it and exits before NSApplication.
     private static func prepareRelaunch() {
         let bundle = Bundle.main.bundleURL
         let fromBundle = bundle.pathExtension == "app"

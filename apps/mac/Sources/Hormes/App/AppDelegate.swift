@@ -1,11 +1,14 @@
 import AppKit
 import Combine
+import ServiceManagement
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
 
     private var orb: OrbPanelController!
+    /// The satellites: one small blob per live spawned thread, beside the main orb.
+    private var fleet: BlobFleet!
     private var overlay: OverlayManager!
     private var console: ConsoleWindowController!
     private var onboarding: OnboardingWindowController!
@@ -19,11 +22,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menus: Menus!
     private var hotkeys: Hotkeys!
     private var permissions: PermissionsCenter!
+    /// The automations' app half (design11): the signals the daemon cannot see, and the banner with Snooze · Done.
+    private var signals: SignalObserver!
+    private var notifications: Notifications!
+    /// `Settings.automations.openAtLogin` as last seen from a real snapshot: the SMAppService call is made on a flip, never on arrival.
+    private var openAtLoginSeen: Bool?
     private var cancellables = Set<AnyCancellable>()
 
     private var micGrant: Grant = .unknown
     private var audioActive = false
+    /// design12: the last audio read-back sent to the daemon, and the ≤ 1 Hz coalescing behind it.
+    private var audioFrameLast: AudioStateInfo?
+    private var audioFrameSentAt: CFAbsoluteTime = 0
+    private var audioFramePending = false
+    /// The playout windows of the frames since the last one sent (voice PLAN §3): the next frame out carries them all.
+    private var audioFrameWindows = PlayoutWindowFold()
+    /// The engine's last read-back as the island needs it (the guard's edge, who shares the mic).
+    private var audioGuardHeld = false
+    private var audioSharedWith: String?
     private var speechRequested = false
+    /// Setup has run (the first real snapshot said `onboarded`, or the flip at Setup › Done):
+    /// the launch path may put up the Microphone and Speech Recognition dialogs itself.
+    /// Before that — a fresh Mac, Setup still to open — launch and activation only READ the
+    /// two grants, so no system dialog lands before a Hormes window; Setup › Permissions asks
+    /// for them in order with the wizard's words on screen, and the flip runs the usual ask.
+    private var launchPromptsAllowed = false
     /// Phase and connection as last *published*. `@Published` emits in `willSet`, so
     /// inside a sink `state.phase` / `state.connected` still hold the previous value;
     /// these are fed from the sink payloads and are what the audio decision reads.
@@ -31,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var connectedSeen = false
     /// The previous run's crash report, when fresh (CrashGuard.install), until it is shown.
     private var crashNotice: CrashGuard.Notice?
+    /// The palette's problem sound: new kinds only, not in the first 15 s, once per kind per 10 min.
+    private var problemGate = EarconCues.ProblemGate(launchedAt: CFAbsoluteTimeGetCurrent())
+    /// A phase edge's sound that waits (the night tuck); any later edge cancels it.
+    private var pendingCue: DispatchWorkItem?
+    /// `local.say` frames that landed while connecting, until the phase settles (EarconCues.LocalSayHold).
+    private var localSayHold = EarconCues.LocalSayHold()
 
     /// `CFBundleShortVersionString`, or "dev" for a `swift build` binary.
     static let appVersion: String = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "dev"
@@ -49,16 +78,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         appLog("launch: Hormes \(AppDelegate.appVersion) pid \(ProcessInfo.processInfo.processIdentifier)")
         installDockIcon()
+        // The dither tiles (wipes, meter edges) for this display's scale, off the main thread, before the first surface asks.
+        Dither.prewarm(scale: NSScreen.main?.backingScaleFactor ?? 2)
 
         orb = OrbPanelController(state: state)
+        // The fleet: one satellite blob per live spawned thread, driven by AppState's
+        // thread table (`thread.event` deltas + `snapshot.threads`, in arrival order) and
+        // the tagged flies; a satellite's click opens its thread in the Console.
+        fleet = BlobFleet(state: state, orb: orb)
+        fleet.observe(threads: Publishers.CombineLatest(state.$threads, state.$threadOrder)
+            .map { (threads: [String: WorkThread], order: [String]) -> [WorkThread] in order.compactMap { threads[$0] } }
+            .removeDuplicates()
+            .eraseToAnyPublisher())
+        fleet.onOpenThread = { [weak self] id in self?.state.openThreadHandler(id) }
         overlay = OverlayManager(state: state)
         console = ConsoleWindowController(state: state)
+        // A thread's pane, from a satellite's click (or anything else that asks AppState).
+        state.openThreadHandler = { [weak self] id in
+            guard let self else { return }
+            self.console.openThread(id)
+            NSApp.activate(ignoringOtherApps: true)
+        }
         onboarding = OnboardingWindowController(state: state)
         state.openOnboardingHandler = { [weak self] in self?.onboarding.show() }
         state.openPermissionsSetupHandler = { [weak self] in self?.onboarding.show(at: .permissions) }
         state.beginMarkModeHandler = { [weak self] in self?.overlay.beginMarkMode() }
+        // A second launch for this state dir handed off to us and exited (SingleInstance): answer
+        // the way a click on the Dock tile does (applicationShouldHandleReopen).
+        SingleInstance.observeHandOffs(stateDir: AppDelegate.stateDir()) { [weak self] in
+            appLog("one Hormes: a second launch handed off; coming forward")
+            self?.console.show()
+            NSApp.activate(ignoringOtherApps: true)
+        }
 
         let socketPath = AppDelegate.socketPath()
+
+        // The palette (Audio/Earcons.swift, docs/AUDIO.md § The sounds): the files, prepared now; the one gate
+        // reads the phase this delegate last saw (no sound while the session's microphone runs).
+        installEarcons()
 
         // The wake word gate: on-device listening while asleep, authentication, then `wake`.
         wake = WakeGate(state: state)
@@ -69,6 +126,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         client.audio = audio
         audio.onMicChunk = { [client] pcm in client?.sendMic(pcm) }
         audio.onMicLevel = { [client] level in client?.sendMicLevel(level) }
+        // design12: the graph read back (on the audio queue) → main: AppState, the daemon's frame, the island's mute box.
+        audio.onAudioState = { [weak self] readback in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.audioStateChanged(readback) } }
+        }
         audio.onStatus = { [weak self] text in
             appLog("audio: \(text)")
             // A dead mic is not a log line: say so where Kevin looks.
@@ -90,7 +151,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // every prompt and the "ask for everything" sweep happen here; the daemon only
         // hears the results (`permission` / `permissions` frames → snapshot.permissions).
         permissions = PermissionsCenter(state: state)
-        permissions.onOne = { [weak self] kind, grant, detail in self?.client.sendPermission(which: kind.rawValue, state: grant, detail: detail) }
+        permissions.onOne = { [weak self] kind, grant, detail in
+            guard let self else { return }
+            self.client.sendPermission(which: kind.rawValue, state: grant, detail: detail)
+            // A grant Setup's sweep (or a Request row) just made for the two kinds the launch
+            // path owns: adopt it without a second dialog, so the gate — and Setup › Wake's
+            // heard box — can listen before Done is pressed. Reads only; nothing re-asks.
+            if kind == .microphone, grant == .granted, self.micGrant != .granted { self.refreshMicrophoneGrant(openSettingsIfDenied: false, prompt: false) }
+            if kind == .speechRecognition, grant == .granted, !self.wake.speechAuthorized { self.adoptSpeechAuthorization() }
+        }
         permissions.onList = { [weak self] all in self?.client.sendPermissions(all: all) }
 
         // AppState handlers: UI code only ever talks to AppState. A few commands are
@@ -115,14 +184,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // the daemon's own flush arrives — speech dies at the press.
                 self.audio.flush()
                 self.client.send(cmd)
+            case .automationSnooze(let id, let minutes):
+                // A ring's press, from the island, the banner, the menu or ⌃⌥S: what a crash report should know.
+                CrashGuard.remember("automation → snooze \(id) \(minutes) min")
+                self.client.send(cmd)
+                // The ring fades over 120 ms; the snooze sound only when this row's ring sounded (inside its linger).
+                if Earcons.shared.fadeRings(for: id) { Earcons.shared.play(.snooze) }
+            case .automationDone(let id):
+                CrashGuard.remember("automation → done \(id)")
+                self.client.send(cmd)
+                // Done: the ring stops, and that silence is the answer.
+                Earcons.shared.fadeRings(for: id)
             default:
                 self.client.send(cmd)
             }
         }
-        state.ledgerDaysHandler = { [weak self] in await self?.client.ledgerDays() ?? [] }
+        // The signals the app observes for the daemon's watchers ride the socket as `system.signal` — data, never a command.
+        state.signalHandler = { [weak self] signal in self?.client.sendSignal(signal) }
+        // A fire while asleep: the ring and the fixed line through the gate's speaker, and the banner with Snooze ·
+        // Done. Never while the session's microphone runs. Connecting, it is held until the phase settles: played if
+        // that is quiet (the handshake failed or was stopped), dropped if a session opened (the engine hands a fire's
+        // lines to the opening session and rings them only when none opens; this covers a frame that overtook the
+        // phase's snapshot). A frame that overtook the connecting snapshot itself rings, and the edge fades it.
+        client.onLocalSay = { [weak self] msg in
+            guard let self else { return }
+            switch self.localSayHold.arrive(msg, phase: self.phaseSeen, now: CFAbsoluteTimeGetCurrent()) {
+            case .play: self.localSay(msg)
+            case .hold: appLog("local.say \(msg.automationId): held while connecting")
+            case .drop: break
+            }
+        }
+        client.onNotify = { [weak self] msg in self?.notifications.post(msg) }
+        // The Ledger tab's list with every day's totals (LM-6); nil when nothing answered, and the Console asks again.
+        state.ledgerDaysHandler = { [weak self] in await self?.client.ledgerDaysAnswer() }
         state.ledgerReadHandler = { [weak self] day in await self?.client.ledgerRows(day: day) ?? [] }
+        // The rail's search: full text over the live ledger through the daemon, one page per call (titles only without it).
+        state.ledgerSearchHandler = { [weak self] query, limit, before in await self?.client.ledgerSearchPage(query: query, limit: limit, before: before) }
         state.installHormesSessions(list: { [weak self] in await self?.client.hormesSessions() ?? [] },
-                                     rows: { [weak self] id in await self?.client.hormesSessionRows(id) ?? [] })
+                                     rows: { [weak self] id in await self?.client.hormesSessionRows(id) ?? [] },
+                                     chain: { [weak self] rootId in await self?.client.hormesChainRows(rootId) })
+        // Memory: the rail's list and search read the store through the daemon (never the snapshot).
+        state.memoryListHandler = { [weak self] memoryState, limit in await self?.client.memoryList(state: memoryState, limit: limit) }
+        state.memorySearchHandler = { [weak self] query, limit in await self?.client.memorySearch(query: query, limit: limit) }
         state.openConsoleHandler = { [weak self] in self?.console.show() }
 
         // A (re)started daemon knows nothing about us: re-send what it must know.
@@ -131,6 +234,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if self.micGrant != .unknown { self.client.sendPermission(which: "microphone", state: self.micGrant) }
             // The list, once it has been read (placeholders would tell the daemon "unknown").
             if self.permissions.hasRead { self.client.sendPermissions(all: self.permissions.list) }
+            // Its open conversations too: a fresh engine follows nothing until a pane asks again.
+            // The first connect counts as well, on purpose: a pane Kevin opened while the daemon
+            // was still spawning queued its `agent.open` in EngineClient's outbox, which drops a
+            // command older than 5 s — a slow cold start would leave that pane unfollowed. A
+            // second open for the same viewer is idempotent at the engine.
+            self.console.reconnected()
+            // design12: the audio frame too. A restarted daemon starts with `audioState` empty, and
+            // while asleep nothing in the read-back changes, so no new frame would ever come —
+            // `pnpm hormes status` would say `no app connected` until the next wake.
+            self.audioFrameLast = nil
+            if let info = self.state.audioState { self.sendAudioFrame(info) }
         }
 
         // The daemon: start or attach, then connect.
@@ -158,13 +272,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             crashNotice = nil
         }
 
-        // Setup wizard on first run (once the daemon has told us the settings). The
-        // payload carries the value; the snapshot itself is still the old one in here.
+        // Setup wizard on first run (once the daemon has told us the settings: the empty
+        // snapshot's defaults are skipped, and so is the client's own `daemon` row laid over
+        // them while nothing answers: only a snapshot that arrives connected is the daemon's),
+        // and the launch path's permission asks, which wait for that same answer. The payload
+        // carries the value; the snapshot itself is still the old one in here.
         state.$snapshot
-            .map { (s: Snapshot) -> Bool? in s.settings.onboarded }
+            .filter { [weak self] (s: Snapshot) -> Bool in s != .empty && MainActor.assumeIsolated { self?.state.connected ?? false } }
+            .map { (s: Snapshot) -> Bool in s.settings.onboarded }
             .removeDuplicates()
-            .sink { [weak self] (onboarded: Bool?) in MainActor.assumeIsolated { self?.checkFirstRun(onboarded: onboarded) } }
+            .sink { [weak self] (onboarded: Bool) in MainActor.assumeIsolated { self?.onboardedPublished(onboarded) } }
             .store(in: &cancellables)
+        // A daemon that never answers on a Mac that is not set up yet (a fresh install whose
+        // daemon dies at start): Setup's Welcome opens anyway, after `noSnapshotSetupAfter`,
+        // and says what the daemon is doing and the last telling line of daemon.log.
+        DispatchQueue.main.asyncAfter(deadline: .now() + AppDelegate.noSnapshotSetupAfter) { [weak self] in
+            MainActor.assumeIsolated { self?.noSnapshotYet() }
+        }
 
         // Surface.
         let actions = makeActions()
@@ -175,6 +299,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeys.register()
         orb.show()
         overlay.start()
+
+        // The automations' banner: the category with Snooze N · Done, the delegate; a press lands on the same row as
+        // the island's presses. Bundle-only — a `swift build` binary skips it.
+        notifications = Notifications()
+        notifications.install(snoozeMinutes: state.snapshot.settings.automationSettings.snoozeMinutes)
+        notifications.onSnooze = { [weak self] id, minutes in self?.state.send(.automationSnooze(id: id, minutes: minutes)) }
+        notifications.onDone = { [weak self] id in self?.state.send(.automationDone(id: id)) }
+        notifications.onOpen = { [weak self] _, _ in self?.state.openConsole() }
+        notifications.onTap = { [weak self] _ in self?.state.openConsole() }
+        state.$snapshot
+            .map { (s: Snapshot) -> Int in s.settings.automationSettings.snoozeMinutes }
+            .removeDuplicates()
+            .sink { [weak self] (minutes: Int) in MainActor.assumeIsolated { self?.notifications.setSnoozeMinutes(minutes) } }
+            .store(in: &cancellables)
+        // The signals: app launch / quit, sleep / wake, lock / unlock, displays, the clock.
+        signals = SignalObserver(state: state)
+        signals.start()
+        // `Open at login`: the app registers itself with SMAppService on Kevin's flip in Settings › Automations
+        // (D writes the setting; this acts on the change). Never on arrival: Kevin may have removed the login
+        // item in System Settings, and a launch must not put it back.
+        state.$snapshot
+            .filter { $0 != .empty }
+            .compactMap { (s: Snapshot) -> Bool? in s.settings.automations?.openAtLogin }
+            .removeDuplicates()
+            .sink { [weak self] (on: Bool) in MainActor.assumeIsolated { self?.openAtLoginChanged(on) } }
+            .store(in: &cancellables)
 
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.overlay.screensChanged() }
@@ -191,10 +341,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 CrashGuard.remember("phase → \(phase.rawValue)")
                 MainActor.assumeIsolated {
                     guard let self else { return }
+                    let from = self.phaseSeen
                     self.phaseSeen = phase
+                    // Into a phase where the mic runs, before the graph starts: whatever still sounds (a ring that
+                    // started a moment ago) fades and the wire is held through it; nothing waiting plays later.
+                    if EarconCues.entersVoice(from: from, to: phase) {
+                        let faded = Earcons.shared.enterVoice()
+                        if !faded.isEmpty {
+                            let names = faded.map(\.rawValue).joined(separator: ", ")
+                            let held = max(0, Earcons.shared.wire.holdUntil - CFAbsoluteTimeGetCurrent())
+                            appLog("earcon: \(names) faded at the session's edge; wire held \(String(format: "%.2f", held)) s")
+                        }
+                    }
+                    // The edge's sound: `awake` before the graph starts (the wire is held while it sounds),
+                    // `pause` / `sleep` / `problem` after the graph has stopped.
+                    let cue = EarconCues.edge(from: from, to: phase, tuck: OrbPanelController.sleepTuckDelay)
+                    self.pendingCue?.cancel()
+                    self.pendingCue = nil
+                    if let cue, cue.earcon == .awake { self.playCue(cue, phase: phase) }
                     self.updateAudioActivity()
+                    // What landed while connecting, now the phase has settled: quiet → it rings (before the edge's
+                    // own sound, which it outranks); a session → the voice has it.
+                    for msg in self.localSayHold.settle(phase: phase, now: CFAbsoluteTimeGetCurrent()) { self.localSay(msg) }
+                    if let cue, cue.earcon != .awake { self.playCue(cue, phase: phase) }
                 }
             }
+            .store(in: &cancellables)
+        // A needs-Kevin problem raised outside a session: the problem sound (EarconCues.ProblemGate).
+        state.$snapshot
+            .filter { $0 != .empty }
+            .map(\.problems)
+            .removeDuplicates()
+            .sink { [weak self] (problems: [Problem]) in MainActor.assumeIsolated { self?.problemsChanged(problems) } }
+            .store(in: &cancellables)
+        // Settings › Audio › Sounds and Volume → the gate (Kevin's choice, else macOS's interface-sounds switch).
+        state.$snapshot
+            .map(\.settings.audioSettings)
+            .removeDuplicates()
+            .sink { (a: AudioSettings) in MainActor.assumeIsolated { Earcons.shared.configure(interface: a.soundsOn, volume: a.volume) } }
             .store(in: &cancellables)
         state.$connected
             .removeDuplicates()
@@ -216,6 +400,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .removeDuplicates()
             .sink { [weak self] uid in MainActor.assumeIsolated { self?.audio.setPreferredInputDevice(uid: uid) } }
             .store(in: &cancellables)
+        // design12 · the two sinks. Recording → the voice-processing policy (the engine reads it at every start, and
+        // rebuilds a running graph once Hormes has finished his sentence); the island hears the setting too.
+        state.$snapshot
+            .map(\.settings.audioSettings.recording)
+            .removeDuplicates()
+            .sink { [weak self] (on: Bool) in
+                CrashGuard.remember("audio: recording \(on ? "on" : "off")")
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    self.audio.setPolicy(VoiceProcessingPolicy.from(recording: on))
+                    self.postDockAudio()
+                }
+            }
+            .store(in: &cancellables)
+        // Mute (phase `muted`) → this process's input zeroed at the HAL, so the orange dot is honest; the graph stays up.
+        state.$snapshot
+            .map { (s: Snapshot) -> Bool in s.phase == .muted }
+            .removeDuplicates()
+            .sink { [weak self] (muted: Bool) in MainActor.assumeIsolated { self?.audio.setProcessInputMuted(muted) } }
+            .store(in: &cancellables)
 
         // The first read of every permission (read-only; the daemon gets the list on connect).
         permissions.start()
@@ -224,20 +428,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // in, to see the report written, the relaunch spawned and the notice on the next run.
         if let kind = ProcessInfo.processInfo.environment["HORMES_CRASH_TEST"] { CrashGuard.armTestCrash(kind) }
 
-        // Microphone: ask once, tell the daemon, and never start audio before we know.
+        // Microphone: read it now, tell the daemon, and never start audio before we know.
+        // The ASK waits for the first snapshot to say Setup has run (`onboardedPublished`):
+        // on a fresh Mac the Microphone and Speech Recognition dialogs used to land before
+        // any Hormes window, with only the plist strings for context; Setup › Permissions
+        // asks for them now, in order, and Done runs this same call with the prompt allowed.
         // HORMES_NO_AUDIO=1 skips the request entirely (headless test launches).
         if ProcessInfo.processInfo.environment["HORMES_NO_AUDIO"] == "1" {
             appLog("HORMES_NO_AUDIO=1, audio disabled")
             return
         }
-        refreshMicrophoneGrant(openSettingsIfDenied: false)
+        refreshMicrophoneGrant(openSettingsIfDenied: false, prompt: launchPromptsAllowed)
     }
 
-    /// Ask TCC (prompting only when undetermined), tell the daemon, and start or stop
-    /// audio to match. Re-run on every activation so a grant made in System Settings
-    /// takes effect without a relaunch.
-    private func refreshMicrophoneGrant(openSettingsIfDenied: Bool) {
+    /// Ask TCC (prompting only when undetermined, and only with `prompt`), tell the daemon,
+    /// and start or stop audio to match. Re-run on every activation so a grant made in
+    /// System Settings takes effect without a relaunch. With `prompt` false an undecided
+    /// microphone stays undecided (nothing lands on screen) and a decided one is read as
+    /// usual; launch and activation pass `launchPromptsAllowed`, a Request passes true.
+    private func refreshMicrophoneGrant(openSettingsIfDenied: Bool, prompt: Bool = true) {
         guard ProcessInfo.processInfo.environment["HORMES_NO_AUDIO"] != "1" else { return }
+        if !prompt, PermissionsKit.microphoneStatus() == .unknown { return }
         PermissionsKit.requestMicrophone { [weak self] grant in
             guard let self else { return }
             let previous = self.micGrant
@@ -247,18 +458,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.permissions.set(.microphone, grant: grant)
             self.wake.setMicrophone(granted: grant == .granted)
             if grant == .granted, !self.speechRequested {
-                // Second prompt, once, right after the first: the wake word needs the
-                // on-device recogniser. Nothing is sent anywhere.
-                self.speechRequested = true
-                WakeWordListener.requestAuthorization { [weak self] ok, detail in
-                    self?.wake.setSpeechRecognition(authorized: ok, detail: detail)
-                    self?.permissions.set(.speechRecognition, grant: ok ? .granted : PermissionsKit.speechRecognitionStatus())
-                    if !ok { self?.state.toast("Wake word off: \(detail)", tone: .warn) }
+                if prompt {
+                    // Second prompt, once, right after the first: the wake word needs the
+                    // on-device recogniser. Nothing is sent anywhere.
+                    self.speechRequested = true
+                    WakeWordListener.requestAuthorization { [weak self] ok, detail in
+                        self?.wake.setSpeechRecognition(authorized: ok, detail: detail)
+                        self?.permissions.set(.speechRecognition, grant: ok ? .granted : PermissionsKit.speechRecognitionStatus())
+                        if !ok { self?.state.toast("Wake word off: \(detail)", tone: .warn) }
+                    }
+                } else {
+                    // Setup has not run: a grant already made counts; an undecided one waits for it.
+                    self.adoptSpeechAuthorization()
                 }
             }
             if grant == .denied {
                 if previous != .denied {
-                    self.state.toast("Microphone access denied — Hormes cannot hear you. Enable it in System Settings › Privacy › Microphone.", tone: .error)
+                    self.state.toast("Microphone access denied, so Hormes cannot hear you. Enable it in System Settings › Privacy › Microphone.", tone: .error)
                 }
                 if openSettingsIfDenied { PermissionsKit.openSettings(pane: .microphone) }
             } else if grant == .granted, previous == .denied {
@@ -268,18 +484,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Every value of `settings.onboarded` a real snapshot publishes: the first decides
+    /// whether Setup opens (`checkFirstRun`); a true one — at launch on a Mac that is set up,
+    /// or the flip when Setup › Done is pressed — lets the launch path ask for the microphone
+    /// and Speech Recognition itself, the ask a normal launch has always made.
+    private func onboardedPublished(_ onboarded: Bool) {
+        checkFirstRun(onboarded: onboarded)
+        guard onboarded, !launchPromptsAllowed else { return }
+        launchPromptsAllowed = true
+        refreshMicrophoneGrant(openSettingsIfDenied: false)
+    }
+
     /// First snapshot from the daemon: if setup never finished, open the wizard once.
-    /// `onboarded` is the value just published (nil until the daemon has spoken).
-    private func checkFirstRun(onboarded: Bool?) {
-        guard !firstRunChecked, let onboarded, state.connected else { return }
+    /// `onboarded` is the value just published.
+    private func checkFirstRun(onboarded: Bool) {
+        guard !firstRunChecked, state.connected else { return }
         firstRunChecked = true
         if !onboarded { onboarding.show() }
+    }
+
+    /// How long a launch waits for the daemon's first snapshot before Setup opens without it.
+    static let noSnapshotSetupAfter: TimeInterval = 10
+
+    /// `noSnapshotSetupAfter` into the launch with no snapshot from any daemon. On a Mac that has
+    /// never finished Setup (settings.json says so, or there is none) the wizard opens on Welcome,
+    /// whose daemon line now carries daemon.log's last telling line, so a first launch whose
+    /// daemon cannot start says why instead of showing nothing. Once: a snapshot arriving later
+    /// finds the wizard open (`firstRunChecked`).
+    private func noSnapshotYet() {
+        guard !firstRunChecked, !state.connected else { return }
+        guard !AppDelegate.onboardedOnDisk(stateDir: AppDelegate.stateDir()) else { return }
+        firstRunChecked = true
+        if let daemon {
+            daemon.explainOutage()
+        } else if let tail = DaemonLog.telling(at: AppDelegate.stateDir().appendingPathComponent("daemon.log")) {
+            state.daemonDetail = "\(state.daemonDetail) · daemon.log: \(tail)"
+        }
+        appLog("setup: no snapshot from the daemon in \(Int(AppDelegate.noSnapshotSetupAfter)) s on a Mac not set up yet; opening Setup (\(state.daemonDetail))")
+        onboarding.show()
+    }
+
+    /// Whether `<stateDir>/settings.json` says Setup finished (`onboarded: true`). Read only, for
+    /// the launch that has no daemon to ask; the daemon stays the file's one writer.
+    static func onboardedOnDisk(stateDir: URL) -> Bool {
+        guard let data = try? Data(contentsOf: stateDir.appendingPathComponent("settings.json")),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return obj["onboarded"] as? Bool ?? false
+    }
+
+    /// The Speech Recognition grant as it stands, without a prompt: one Setup's sweep (or
+    /// System Settings) made counts now; an undecided or refused one is left to the ask
+    /// `launchPromptsAllowed` unlocks, which also says why the wake word is off.
+    private func adoptSpeechAuthorization() {
+        let (ok, detail) = WakeWordListener.currentAuthorization()
+        guard ok else { return }
+        wake.setSpeechRecognition(authorized: true, detail: detail)
+        permissions.set(.speechRecognition, grant: .granted)
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
         // Back from System Settings, most likely: every grant is re-read, fresh.
         permissions?.appActivated()
-        if micGrant != .granted { refreshMicrophoneGrant(openSettingsIfDenied: false) }
+        if micGrant != .granted { refreshMicrophoneGrant(openSettingsIfDenied: false, prompt: launchPromptsAllowed) }
         // Speech Recognition is asked once, but a grant made later in System Settings
         // must count without a relaunch: re-read the status (no prompt) on activation.
         if speechRequested, !wake.speechAuthorized {
@@ -300,6 +566,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.state.send(self.state.phase == .muted ? .unmute : .mute)
         }
         a.stop = { [weak self] in self?.state.transportStop() }
+        // design12: the Recording row (and the Dock menu's): set-settings only.
+        a.toggleRecording = { [weak self] in self?.toggleRecording() }
         a.openConsole = { [weak self] in
             self?.console.show()
             NSApp.activate(ignoringOtherApps: true)
@@ -312,7 +580,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSWorkspace.shared.open(dir)
         }
         a.quit = { NSApp.terminate(nil) }
+        // The automations (design11): the status menu's ring rows and Automations… — the row's commands, the Console.
+        a.snoozeRing = { [weak self] id, minutes in self?.state.send(.automationSnooze(id: id, minutes: minutes)) }
+        a.doneRing = { [weak self] id in self?.state.send(.automationDone(id: id)) }
+        a.openAutomations = { [weak self] in
+            self?.console.show()
+            NSApp.activate(ignoringOtherApps: true)
+        }
         return a
+    }
+
+    /// ⌃⌥S, the menu row, the banner: the ring's own snooze press, else Settings' minutes (timers five).
+    private func snoozeRinging() {
+        guard let ring = state.ringing else { return }
+        let minutes = StatusItem.snoozeMinutes(for: ring, settings: state.snapshot.settings.automationSettings)
+        state.send(.automationSnooze(id: ring.id, minutes: minutes))
+    }
+
+    /// `Settings.automations.openAtLogin` flipped: register or unregister this app as a login item. The first
+    /// value seen is remembered, not acted on.
+    private func openAtLoginChanged(_ on: Bool) {
+        defer { openAtLoginSeen = on }
+        guard let seen = openAtLoginSeen, seen != on else { return }
+        guard PermissionsKit.runsAsBundle else {
+            appLog("open at login: not a bundle, SMAppService skipped")
+            return
+        }
+        do {
+            if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
+            CrashGuard.remember("open at login → \(on ? "registered" : "unregistered")")
+            appLog("open at login: \(on ? "registered" : "unregistered") (status \(SMAppService.mainApp.status.rawValue))")
+        } catch {
+            appLog("open at login: SMAppService failed — \(error.localizedDescription)")
+            state.toast("Open at login could not be set: \(error.localizedDescription)", tone: .warn)
+        }
     }
 
     private func handle(hotkey: Hotkeys.Action) {
@@ -327,10 +628,142 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state.transportStop()
         case .markScreen:
             state.beginMarkMode()
-        case .transportToggle, .transportToggleAlias:
-            // ⌥⇧Space (and ⌥⇧P, the same toggle): go when asleep or paused, pause in session.
+        case .sayLine:
+            // ⌥⇧Return: the notch's field while the blob is parked there, else the Console's composer.
+            orb.sayLine()
+        case .transportToggle:
+            // ⌥⇧Space: go when asleep or paused, pause in session.
             state.transportToggle()
+        case .snooze:
+            // ⌃⌥S: snooze the ring; nothing rings, nothing happens — never a Go.
+            snoozeRinging()
+        case .toggleRecording:
+            // ⌃⌥R: Settings › Audio › Recording flipped — the whole audio block through `set-settings`, nothing else.
+            toggleRecording()
         }
+    }
+
+    // MARK: - audio state (design12)
+
+    /// Recording flipped from the menu, the Dock menu or ⌃⌥R: `set-settings` only (AppState.setRecording; the bench pins it).
+    private func toggleRecording() {
+        state.setRecording(!state.snapshot.settings.audioSettings.recording)
+    }
+
+    /// On main, from `AudioEngine.onAudioState`: AppState (the Console's `Shared with …`, the fuse's `guardOn`), the daemon's
+    /// `audio-state` frame at ≤ 1 Hz (a trailing send carries the last value of a burst), and the island's three facts.
+    private func audioStateChanged(_ readback: AudioStateReadback) {
+        let info = AudioStateInfo(readback)
+        audioGuardHeld = readback.guardHeld
+        audioSharedWith = info.sharedWith?.first
+        if info != state.audioState { state.audioState = info }
+        postDockAudio()
+        sendAudioFrame(info)
+    }
+
+    private func sendAudioFrame(_ info: AudioStateInfo) {
+        guard info != audioFrameLast else { return }
+        audioFrameLast = info
+        // Every frame's window counts, including the ones the trailing send below folds away.
+        if let p = info.playout { audioFrameWindows.note(lateMaxMs: p.lateMaxMs, queuedMinMs: p.queuedMinMs) }
+        let now = CFAbsoluteTimeGetCurrent()
+        if now - audioFrameSentAt >= 1 {
+            audioFrameSentAt = now
+            client.sendAudioState(withWindows(info))
+            return
+        }
+        guard !audioFramePending else { return }
+        audioFramePending = true
+        let wait = max(0.05, 1 - (now - audioFrameSentAt))
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, let last = self.audioFrameLast else { return }
+                self.audioFramePending = false
+                self.audioFrameSentAt = CFAbsoluteTimeGetCurrent()
+                self.client.sendAudioState(self.withWindows(last))
+            }
+        }
+    }
+
+    /// The frame going out, its `lateMaxMs` and `queuedMinMs` covering every window since the last frame sent.
+    private func withWindows(_ info: AudioStateInfo) -> AudioStateInfo {
+        let windows = audioFrameWindows.take()
+        guard var p = info.playout else { return info }
+        if let late = windows.lateMaxMs { p.lateMaxMs = late }
+        if let queued = windows.queuedMinMs { p.queuedMinMs = queued }
+        var out = info
+        out.playout = p
+        return out
+    }
+
+    /// The island's mute box and peek chip (`NotchDock.audioNotification`): the setting, the guard's edge, who shares.
+    private func postDockAudio() {
+        var info: [String: Any] = [
+            NotchDock.audioRecordingKey: state.snapshot.settings.audioSettings.recording,
+            NotchDock.audioHeldKey: audioGuardHeld,
+        ]
+        if let audioSharedWith { info[NotchDock.audioSharedKey] = audioSharedWith }
+        NotificationCenter.default.post(name: NotchDock.audioNotification, object: nil, userInfo: info)
+    }
+
+    // MARK: - earcons (the palette)
+
+    /// The files (the bundle's `Resources/Sounds`; a `swift build` binary reads the checkout's), the gate's
+    /// phase, the mark's receipt, and a line in the app log per decision.
+    private func installEarcons() {
+        let earcons = Earcons.shared
+        // A headless test launch makes no sound (the same switch that keeps the microphone off).
+        let directory = ProcessInfo.processInfo.environment["HORMES_NO_AUDIO"] == "1" ? nil
+            : Earcons.bundleDirectory() ?? RepoLocator.repoRoot()?.appendingPathComponent("apps/mac/Resources/Sounds", isDirectory: true)
+        let loaded = earcons.load(directory: directory)
+        appLog("earcons: \(loaded.count) of \(Earcon.allCases.count) loaded from \(directory?.path ?? "nowhere (HORMES_NO_AUDIO=1 or no Sounds folder)")")
+        earcons.voiceRuns = { [weak self] in
+            guard let self else { return false }
+            return AppState.voiceAudioRuns(in: self.phaseSeen)
+        }
+        earcons.onDecision = { e, decision in appLog("earcon: \(e.rawValue) \(decision)") }
+        // A mark kept while asleep or paused (OverlayManager.commitMark): the receipt that it waits for the next session.
+        state.markKeptHandler = { Earcons.shared.play(.mark) }
+    }
+
+    /// A `local.say` in a quiet phase: its ring (the kind decides it rings; the name picks the file), or the cue
+    /// before a line with no sound of its own, then the line on the sound's tail.
+    private func localSay(_ msg: LocalSayMessage) {
+        let text = String((msg.text ?? "").prefix(160))
+        if msg.sound != nil || msg.ring != nil {
+            Earcons.shared.ring(msg.sound, kind: msg.ring, automationId: msg.automationId)
+        } else if !text.isEmpty {
+            // A tap on the shoulder, not a voice from nowhere.
+            Earcons.shared.play(.cue)
+        }
+        // The line waits for the sound's tail (`LocalSpeaker.speak` sets the pre-utterance delay).
+        if !text.isEmpty { state.localSpeaker.speak(text) }
+    }
+
+    /// Play an edge's sound now, or after its delay if the phase is still the one it belongs to.
+    private func playCue(_ cue: EarconCues.Cue, phase: Phase) {
+        guard cue.delay > 0 else {
+            Earcons.shared.play(cue.earcon)
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.phaseSeen == phase else { return }
+                Earcons.shared.play(cue.earcon)
+            }
+        }
+        pendingCue = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + cue.delay, execute: work)
+    }
+
+    /// `snapshot.problems` as published: a new needs-Kevin kind sounds once, outside a session and quiet hours.
+    private func problemsChanged(_ problems: [Problem]) {
+        let quietHours = EarconCues.inQuiet(state.snapshot.settings.automationSettings.quietHours, at: Date())
+        let quiet = quietHours || AppState.voiceAudioRuns(in: phaseSeen)
+        let kinds = problemGate.admit(problems, now: CFAbsoluteTimeGetCurrent(), quiet: quiet)
+        guard !kinds.isEmpty else { return }
+        appLog("earcon: problem for \(kinds.joined(separator: ", "))")
+        Earcons.shared.play(.problem)
     }
 
     // MARK: - audio activity
@@ -374,15 +807,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for url in urls where url.scheme == "hormes" {
             let verb = url.host ?? url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
             switch verb {
-            case "go", "wake", "resume":
-                // The transport's Go (`wake` and `resume` are the old names for it). Anything
-                // on this Mac (or a browser) can open a URL: while the gate is on and the
-                // engine is dormant, the URL authenticates like the spoken word; while
-                // paused it resumes like the word does, without authentication (WakeGate.heard).
+            case "go":
+                // The transport's Go. Anything on this Mac (or a browser) can open a URL: while
+                // the gate is on and the engine is dormant, the URL authenticates like the spoken
+                // word; while paused it resumes like the word does, without authentication
+                // (WakeGate.heard).
                 if !wake.requestWake(source: "hormes://\(verb)") { state.transportGo() }
             case "pause": state.transportPause()
-            case "stop", "sleep": state.transportStop()
+            case "stop": state.transportStop()
             case "orb": orb.summon()
+            case "setup": state.openOnboarding()
             default: console.show()
             }
         }
@@ -392,10 +826,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         appLog("quit: terminating in phase \(state.phase.rawValue)")
+        // Shutdown is silent: nothing new starts, and whatever sounds stops.
+        Earcons.shared.silence()
+        // The one-Hormes claim goes first: a launch during this teardown waits for us to exit
+        // instead of handing off to an app that is going away.
+        SingleInstance.giveUpClaim()
         // Stop the engine first so the Live session (which bills by the second) closes:
         // the transport's stop interrupts whatever runs, closes the session and sleeps.
         if state.connected { client.send(.stop) }
         hotkeys?.unregister()
+        signals?.stop()
         overlay?.stop()
         ear?.setVoiceAudioActive(false)
         audio?.stop()
@@ -410,10 +850,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - helpers
 
+    /// The bundle's icns; from a `swift build` binary, the checkout's build/Hormes.icns when it has been made.
     private func installDockIcon() {
         let candidates = [
             Bundle.main.url(forResource: "Hormes", withExtension: "icns"),
-            URL(fileURLWithPath: "/Users/kevinliu/hormes/build/Hormes.icns"),
+            RepoLocator.repoRoot()?.appendingPathComponent("build/Hormes.icns"),
         ]
         for url in candidates.compactMap({ $0 }) where FileManager.default.fileExists(atPath: url.path) {
             if let image = NSImage(contentsOf: url) {
@@ -455,5 +896,100 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return sha.count >= 7 ? String(sha.prefix(7)) : sha
+    }
+}
+
+// MARK: - design12: the read-back as the protocol spells it
+
+private extension AudioDeviceInfo {
+    init(_ d: AudioDeviceFacts) { self.init(name: d.name, uid: d.uid, rate: d.rate, channels: d.channels, transport: d.transport) }
+}
+
+private extension AudioStateInfo {
+    /// `AudioStateReadback` → the frame's value: bundle ids become process names here (`NSRunningApplication`), the duck level
+    /// a plain number, the held seconds milliseconds; nil `sharedWith` stays nil (the HAL could not say — never `[]`).
+    init(_ r: AudioStateReadback) {
+        // Spelled out before the call: CI's older Swift gives up on long initializer expressions.
+        let guardHeldMs = Int((r.heldSeconds * 1000).rounded())
+        let earconHeldMs = Int((r.earconHeldSeconds * 1000).rounded())
+        self.init(running: r.running, voiceProcessing: r.voiceProcessing, duckLevel: r.duckLevel.map { Int($0) },
+                  advancedDucking: r.advancedDucking, agc: r.agc, bypassed: r.bypassed, rung: r.rung, wiring: r.wiring,
+                  hears: r.hears.map(AudioDeviceInfo.init), speaks: r.speaks.map(AudioDeviceInfo.init), tapFormat: r.tapFormat,
+                  recording: r.recording, fallback: r.fallback, guardOn: r.guardOn, guardTailMs: r.guardTailMs,
+                  guardHeldMs: guardHeldMs, earconHeldMs: earconHeldMs, gated: r.gated, chunks: r.chunks, breakthroughs: r.breakthroughs,
+                  sharedWith: r.sharedWith?.map(MicRouteInfo.processName), inputMuted: r.inputMuted, aggregatePresent: r.aggregatePresent,
+                  playout: r.playout.map(AudioPlayoutInfo.init), duck: r.duck.map(AudioDuckInfo.init), output: r.output.map(AudioOutputInfo.init))
+    }
+}
+
+// MARK: - voice PLAN W1.5: the playback telemetry as W2-5's contract spells it (Model/Protocol.swift)
+//
+// The readbacks count in whole milliseconds; the mirrors carry Doubles and write finite numbers only. Each field is
+// set by name, so the mapping never depends on a mirror's declaration order.
+
+private extension AudioPlayoutInfo {
+    init(_ p: PlayoutReadback) {
+        self.init()
+        chunks = p.chunks
+        underruns = p.underruns
+        underrunMs = Double(p.underrunMs)
+        longestUnderrunMs = Double(p.longestUnderrunMs)
+        wouldBeUnderruns = p.wouldBeUnderruns
+        speechUnderruns = p.speechUnderruns
+        refills = p.refills
+        refillMs = Double(p.refillMs)
+        resets = p.resets
+        targetMs = Double(p.targetMs)
+        queuedMs = Double(p.queuedMs)
+        queuedMinMs = p.queuedMinMs.map(Double.init)
+        lateMaxMs = Double(p.lateMaxMs)
+        lateMaxGraphMs = Double(p.lateMaxGraphMs)
+        droppedChunks = p.droppedChunks
+        droppedMs = Double(p.droppedMs)
+    }
+}
+
+private extension AudioDuckLastInfo {
+    init(_ e: DuckEventReadback) {
+        self.init()
+        source = e.source
+        confirmed = e.confirmed
+        depthDb = e.depthDb
+        runDbfs = e.runDbfs
+        thresholdDbfs = e.thresholdDbfs
+        releasedAfterMs = e.releasedAfterMs.map(Double.init)
+        reason = e.reason
+    }
+}
+
+private extension AudioDuckInfo {
+    init(_ d: DuckReadback) {
+        self.init()
+        ducks = d.ducks
+        gate = d.gate
+        confirmed = d.confirmed
+        unconfirmed = d.unconfirmed
+        held = d.held
+        refusedWords = d.refusedWords
+        refusedLive = d.refusedLive
+        wordOnsetsSkipped = d.wordOnsetsSkipped
+        duckedMs = Double(d.duckedMs)
+        deepMs = Double(d.deepMs)
+        residualP50Dbfs = d.residualP50Dbfs
+        residualP99Dbfs = d.residualP99Dbfs
+        echoFloorDbfs = d.echoFloorDbfs
+        last = d.last.map(AudioDuckLastInfo.init)
+    }
+}
+
+private extension AudioOutputInfo {
+    init(_ o: OutputReadback) {
+        self.init()
+        rmsDbfs = o.rmsDbfs
+        peakDbfs = o.peakDbfs
+        heardRmsDbfs = o.heardRmsDbfs
+        audibleMs = Double(o.audibleMs)
+        mixFormat = o.mixFormat.isEmpty ? nil : o.mixFormat
+        volume = o.volume
     }
 }

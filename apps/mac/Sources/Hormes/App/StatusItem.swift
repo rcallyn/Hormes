@@ -13,6 +13,13 @@ struct AppActions {
     var summonOrb: () -> Void = {}
     var openLedgerFolder: () -> Void = {}
     var quit: () -> Void = {}
+    /// The automations (design11): the ring's two presses — `automation.snooze` (id, minutes) / `automation.done`
+    /// (id) — and the Console opened on its Automations section. Never a session, never a brain turn.
+    var snoozeRing: (String, Int) -> Void = { _, _ in }
+    var doneRing: (String) -> Void = { _ in }
+    var openAutomations: () -> Void = {}
+    /// design12: Recording on / off — the whole audio block through `set-settings`, never another command.
+    var toggleRecording: () -> Void = {}
 }
 
 /// The menu-bar item: a template orb glyph drawn in code, a tooltip with the phase,
@@ -60,8 +67,9 @@ final class StatusItem: NSObject {
             .removeDuplicates()
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
             .store(in: &cancellables)
+        // While the sweep runs the menu carries its Cancel, and its Next at a step that waits (APP-7).
         state.$permissionSweep
-            .map { (p: PermissionSweepProgress?) -> Bool in p?.running ?? false }
+            .map { (p: PermissionSweepProgress?) -> [Bool] in [p?.running ?? false, StatusItem.sweepWaits(p)] }
             .removeDuplicates()
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
             .store(in: &cancellables)
@@ -70,6 +78,47 @@ final class StatusItem: NSObject {
             .removeDuplicates()
             .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
             .store(in: &cancellables)
+        // The Recording row's checkmark follows the setting; its tooltip names who shares the mic (design12).
+        state.$snapshot
+            .map { (s: Snapshot) -> Bool in s.settings.audioSettings.recording }
+            .removeDuplicates()
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+            .store(in: &cancellables)
+        state.$audioState
+            .map { (a: AudioStateInfo?) -> [String] in a?.sharedWith ?? [] }
+            .removeDuplicates()
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+            .store(in: &cancellables)
+        // The ring rows and the Next row follow the automations (design11).
+        state.$ringing
+            .removeDuplicates()
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+            .store(in: &cancellables)
+        state.$nextFire
+            .removeDuplicates()
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+            .store(in: &cancellables)
+        // The `Voice ▸` row and its submenu follow the saved pick, the session's voice and the running work (design13).
+        state.$snapshot
+            .map { (s: Snapshot) -> String in StatusItem.voiceKey(s) }
+            .removeDuplicates()
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+            .store(in: &cancellables)
+        // A live thread starting or ending flips Switch now's enabled state; the threads ride beside the snapshot.
+        state.$threads
+            .map { (t: [String: WorkThread]) -> Bool in t.values.contains { $0.status.isBusy } }
+            .removeDuplicates()
+            .sink { [weak self] _ in MainActor.assumeIsolated { self?.scheduleRefresh() } }
+            .store(in: &cancellables)
+    }
+
+    /// What the Voice row depends on, as one string for `removeDuplicates`. Lets first, one plain value per
+    /// part: CI's older Swift gives up on `??` inside an interpolation.
+    static func voiceKey(_ s: Snapshot) -> String {
+        let busy = VoiceSwitch.busy(delegations: s.delegations, threads: [], phase: s.phase)
+        let spoken = s.session?.voice ?? ""
+        let accent = s.session?.accent ?? ""
+        return [s.settings.voice, s.settings.accent, spoken, accent, String(busy)].joined(separator: "|")
     }
 
     private func scheduleRefresh() {
@@ -94,7 +143,7 @@ final class StatusItem: NSObject {
         let phase = state.phase
         item.button?.image = StatusItem.glyph(for: phase)
         item.button?.appearsDisabled = !state.connected
-        item.button?.toolTip = state.connected ? "Hormes — \(StatusItem.label(for: phase))" : "Hormes — daemon \(state.daemonDetail)"
+        item.button?.toolTip = state.connected ? "Hormes: \(StatusItem.label(for: phase))" : "Hormes: daemon \(state.daemonDetail)"
         item.menu = buildMenu()
     }
 
@@ -121,6 +170,16 @@ final class StatusItem: NSObject {
         return NSImage(systemSymbolName: name, accessibilityDescription: nil)?.withSymbolConfiguration(cfg)
     }
 
+    /// The Stop row's word: `Stopped` while asleep (nothing to stop), `Stop` in every other phase.
+    static func stopTitle(for phase: Phase) -> String {
+        phase == .asleep ? StatusWords.stopped : StatusWords.stop
+    }
+
+    /// A spent row's title: the word in the secondary colour at the menu's own size.
+    static func spentTitle(_ word: String) -> NSAttributedString {
+        NSAttributedString(string: word, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
+    }
+
     /// The Go/Pause row's title: the transport's word for the phase.
     static func transportTitle(for phase: Phase) -> String {
         switch AppState.transportPress(for: phase) {
@@ -137,7 +196,7 @@ final class StatusItem: NSObject {
         let paused = phase == .paused
         let connected = state.connected
 
-        let title = NSMenuItem(title: connected ? "Hormes — \(StatusItem.label(for: phase))" : "Hormes — \(state.daemonDetail)", action: nil, keyEquivalent: "")
+        let title = NSMenuItem(title: connected ? "Hormes: \(StatusItem.label(for: phase))" : "Hormes: \(state.daemonDetail)", action: nil, keyEquivalent: "")
         title.isEnabled = false
         menu.addItem(title)
 
@@ -151,53 +210,93 @@ final class StatusItem: NSObject {
             menu.addItem(row)
         }
 
-        // Go / Pause: the transport's one button (⌥⇧Space; ⌥⇧P is the same toggle).
+        // Go / Pause: the transport's one button (⌥⇧Space).
         let look = AppState.transportLabel(for: phase)
-        let transport = NSMenuItem(title: StatusItem.transportTitle(for: phase), action: #selector(doTransportToggle), keyEquivalent: " ")
-        transport.keyEquivalentModifierMask = [.option, .shift]
+        let transport = NSMenuItem(title: StatusItem.transportTitle(for: phase), action: #selector(doTransportToggle), keyEquivalent: Hotkeys.Action.transportToggle.keyEquivalent.0)
+        transport.keyEquivalentModifierMask = Hotkeys.Action.transportToggle.keyEquivalent.1
         transport.target = self
         transport.isEnabled = connected
         transport.image = StatusItem.symbol(look.symbol)
-        transport.toolTip = look.help + " (⌥⇧Space)"
+        transport.toolTip = look.help + " (\(Hotkeys.Action.transportToggle.glyph))"
         menu.addItem(transport)
 
         // The wake word gate, while the engine is dormant or paused: what it is doing and, if off, why.
         if WakeGate.listens(in: phase) {
-            let wakeSettings = state.snapshot.settings.wakeSettings
-            let gate = NSMenuItem(title: StatusItem.gateLabel(state.wakeGate, phrases: wakeSettings.phrases, auth: wakeSettings.auth, paused: paused), action: nil, keyEquivalent: "")
+            let wake = state.snapshot.settings.wake
+            let gate = NSMenuItem(title: StatusItem.gateLabel(state.wakeGate, phrases: wake.phrases, auth: wake.auth, paused: paused), action: nil, keyEquivalent: "")
             gate.isEnabled = false
             gate.image = StatusItem.symbol(StatusItem.gateSymbol(state.wakeGate))
             menu.addItem(gate)
         }
 
-        let mute = NSMenuItem(title: phase == .muted ? "Unmute" : "Mute", action: #selector(doToggleMute), keyEquivalent: "m")
-        mute.keyEquivalentModifierMask = [.option, .shift]
+        // The automations (design11): while one rings, the crash-row pattern — two hot rows, Snooze N (⌃⌥S) and Done;
+        // otherwise the next fire as one informational row. Both read AppState, which the daemon feeds.
+        if let ring = state.ringing {
+            let minutes = StatusItem.snoozeMinutes(for: ring, settings: state.snapshot.settings.automationSettings)
+            let snooze = NSMenuItem(title: "\(ring.line) · Snooze \(minutes)", action: #selector(doSnoozeRing), keyEquivalent: Hotkeys.Action.snooze.keyEquivalent.0)
+            snooze.keyEquivalentModifierMask = Hotkeys.Action.snooze.keyEquivalent.1
+            snooze.target = self
+            snooze.image = StatusItem.symbol("bell.fill")
+            snooze.toolTip = "Snooze: rings again in \(minutes) min (\(Hotkeys.Action.snooze.glyph))"
+            menu.addItem(snooze)
+            let done = NSMenuItem(title: "Done", action: #selector(doDoneRing), keyEquivalent: "")
+            done.target = self
+            done.image = StatusItem.symbol("checkmark.circle.fill")
+            done.toolTip = "Done: stops the \(ring.kind)"
+            menu.addItem(done)
+        } else if let next = state.nextFire {
+            let row = NSMenuItem(title: StatusItem.nextLabel(next), action: nil, keyEquivalent: "")
+            row.isEnabled = false
+            row.image = StatusItem.symbol("alarm.fill")
+            menu.addItem(row)
+        }
+
+        let mute = NSMenuItem(title: phase == .muted ? "Unmute" : "Mute", action: #selector(doToggleMute), keyEquivalent: Hotkeys.Action.toggleMute.keyEquivalent.0)
+        mute.keyEquivalentModifierMask = Hotkeys.Action.toggleMute.keyEquivalent.1
         mute.target = self
         mute.isEnabled = connected && inSession
-        mute.image = StatusItem.symbol(phase == .muted ? "mic.fill" : "mic.slash.fill")
+        mute.image = StatusItem.symbol(phase == .muted ? ConsoleGlyph.mic : ConsoleGlyph.muted)
         menu.addItem(mute)
 
+        // Recording (design12): the checkmark is the state, the title never flips; enabled whenever the daemon is there
+        // (the point is to set it before the demo), never gated on a session. While another process reads the mic the
+        // tooltip says who.
+        let recording = NSMenuItem(title: RecordingWords.menuRow, action: #selector(doToggleRecording), keyEquivalent: Hotkeys.Action.toggleRecording.keyEquivalent.0)
+        recording.keyEquivalentModifierMask = Hotkeys.Action.toggleRecording.keyEquivalent.1
+        recording.target = self
+        recording.isEnabled = connected
+        recording.state = state.snapshot.settings.audioSettings.recording ? .on : .off
+        recording.image = StatusItem.symbol(RecordingWords.chipGlyph)
+        recording.toolTip = RecordingWords.menuTip(sharedWith: RecordingWords.firstShared(state.audioState?.sharedWith))
+        menu.addItem(recording)
+
         // Stop is never disabled: it must land in every phase, connected or not (the
-        // local speaker flush still happens).
-        let stop = NSMenuItem(title: "Stop", action: #selector(doStop), keyEquivalent: "\u{1b}")
+        // local speaker flush still happens). Asleep, the deed is done: the row reads `Stopped`
+        // in the secondary colour (design13 § Stop) — grey, still a row that acts.
+        let stop = NSMenuItem(title: StatusItem.stopTitle(for: phase), action: #selector(doStop), keyEquivalent: "\u{1b}")
         stop.keyEquivalentModifierMask = [.option]
         stop.target = self
         stop.isEnabled = true
-        stop.image = StatusItem.symbol("stop.fill")
-        stop.toolTip = "Stop everything — close the session, sleep (⌥⎋)"
+        stop.image = StatusItem.symbol(ConsoleGlyph.stop)
+        stop.toolTip = "Stop everything: close the session, sleep (⌥⎋)"
+        if phase == .asleep { stop.attributedTitle = StatusItem.spentTitle(StatusWords.stopped) }
         menu.addItem(stop)
 
         menu.addItem(.separator())
 
-        let console = NSMenuItem(title: "Open Console", action: #selector(doOpenConsole), keyEquivalent: "j")
-        console.keyEquivalentModifierMask = [.option, .shift]
+        // design13: `Voice   Marin 🇬🇧 ▸` — the same free pick as the Console's chip, Switch now first
+        // while a pick waits. Native NSMenu is right here (the kit's rule is the Console's and Setup's).
+        menu.addItem(voiceRow())
+
+        let console = NSMenuItem(title: "Open Console", action: #selector(doOpenConsole), keyEquivalent: Hotkeys.Action.openConsole.keyEquivalent.0)
+        console.keyEquivalentModifierMask = Hotkeys.Action.openConsole.keyEquivalent.1
         console.target = self
         console.image = StatusItem.symbol("rectangle.3.group.fill")
         menu.addItem(console)
 
         let summon = NSMenuItem(title: "Summon Orb to Cursor", action: #selector(doSummon), keyEquivalent: "")
         summon.target = self
-        summon.image = StatusItem.symbol("cursorarrow.click.2")
+        summon.image = StatusItem.symbol(ConsoleGlyph.summon)
         menu.addItem(summon)
 
         let ledger = NSMenuItem(title: "Open Ledger Folder", action: #selector(doOpenLedger), keyEquivalent: "")
@@ -205,15 +304,21 @@ final class StatusItem: NSObject {
         ledger.image = StatusItem.symbol("list.bullet.rectangle.fill")
         menu.addItem(ledger)
 
+        let automations = NSMenuItem(title: "Automations…", action: #selector(doOpenAutomations), keyEquivalent: "")
+        automations.target = self
+        automations.image = StatusItem.symbol("alarm.fill")
+        automations.toolTip = "What is set to fire while Hormes sleeps (the Console's Automations section)"
+        menu.addItem(automations)
+
         menu.addItem(.separator())
 
         let quit = NSMenuItem(title: "Quit Hormes", action: #selector(doQuit), keyEquivalent: "q")
         quit.target = self
-        let circle = NSMenuItem(title: "Circle Something…", action: #selector(doMark), keyEquivalent: "c")
-        circle.keyEquivalentModifierMask = [.option, .shift]
+        let circle = NSMenuItem(title: "Circle Something…", action: #selector(doMark), keyEquivalent: Hotkeys.Action.markScreen.keyEquivalent.0)
+        circle.keyEquivalentModifierMask = Hotkeys.Action.markScreen.keyEquivalent.1
         circle.target = self
-        circle.image = StatusItem.symbol("scope")
-        circle.toolTip = "Draw around anything on screen and Hormes sees it (⌥⇧C)"
+        circle.image = StatusItem.symbol("pencil.and.outline")
+        circle.toolTip = "Draw around anything on screen and Hormes sees it (\(Hotkeys.Action.markScreen.glyph))"
         menu.addItem(circle)
 
         let setup = NSMenuItem(title: "Set Up…", action: #selector(doSetup), keyEquivalent: "")
@@ -229,14 +334,31 @@ final class StatusItem: NSObject {
         perms.toolTip = "Open Setup on the Permissions step"
         menu.addItem(perms)
 
+        // APP-7: the sweep's own Next and Cancel, while it runs. A step left waiting after Setup
+        // closed is moved on or ended here, without opening Setup again.
+        if state.permissionSweep?.running ?? false {
+            if StatusItem.sweepWaits(state.permissionSweep) {
+                let next = NSMenuItem(title: "Next", action: #selector(doSweepNext), keyEquivalent: "")
+                next.target = self
+                next.indentationLevel = 1
+                next.toolTip = "Skip this permission for now"
+                menu.addItem(next)
+            }
+            let cancel = NSMenuItem(title: "Cancel", action: #selector(doSweepCancel), keyEquivalent: "")
+            cancel.target = self
+            cancel.indentationLevel = 1
+            cancel.toolTip = "Stop asking. What is granted stays granted."
+            menu.addItem(cancel)
+        }
+
         let askAll = NSMenuItem(title: "Ask for everything…", action: #selector(doAskAll), keyEquivalent: "")
         askAll.target = self
         askAll.isEnabled = !(state.permissionSweep?.running ?? false)
-        askAll.image = StatusItem.symbol("checklist")
+        askAll.image = StatusItem.symbol(ConsoleGlyph.ask)
         askAll.toolTip = "Ask for every permission Hormes can use, one dialog at a time, then the System Settings panes"
         menu.addItem(askAll)
 
-        quit.image = StatusItem.symbol("power")
+        quit.image = StatusItem.symbol(ConsoleGlyph.quit)
         menu.addItem(quit)
 
         menu.autoenablesItems = false
@@ -245,6 +367,7 @@ final class StatusItem: NSObject {
 
     @objc private func doTransportToggle() { actions.transportToggle() }
     @objc private func doToggleMute() { actions.toggleMute() }
+    @objc private func doToggleRecording() { actions.toggleRecording() }
     @objc private func doStop() { actions.stop() }
     @objc private func doOpenConsole() { actions.openConsole() }
     @objc private func doSummon() { actions.summonOrb() }
@@ -254,14 +377,116 @@ final class StatusItem: NSObject {
     @objc private func doMark() { state.beginMarkMode() }
     @objc private func doPermissions() { state.openPermissionsSetup() }
     @objc private func doAskAll() { state.requestAll() }
+    @objc private func doSweepNext() { state.permissionSweepNext() }
+    @objc private func doSweepCancel() { state.permissionSweepCancel() }
     @objc private func doRevealCrash() { state.revealCrash() }
+    @objc private func doSnoozeRing() {
+        guard let ring = state.ringing else { return }
+        actions.snoozeRing(ring.id, StatusItem.snoozeMinutes(for: ring, settings: state.snapshot.settings.automationSettings))
+    }
+    @objc private func doDoneRing() {
+        guard let ring = state.ringing else { return }
+        actions.doneRing(ring.id)
+    }
+    @objc private func doOpenAutomations() { actions.openAutomations() }
+
+    // MARK: - the Voice row (design13)
+
+    /// `Voice   Marin 🇬🇧` with the submenu; the value in the secondary colour after the key.
+    private func voiceRow() -> NSMenuItem {
+        let s = state.snapshot
+        let row = NSMenuItem(title: VoiceMenuWords.voice, action: nil, keyEquivalent: "")
+        row.attributedTitle = StatusItem.voiceTitle(voice: s.settings.voice, accent: s.settings.accent)
+        row.image = StatusItem.symbol(ConsoleGlyph.voice)
+        row.toolTip = HelpCopy.voiceChip.hint
+        let busy = VoiceSwitch.busy(delegations: s.delegations, threads: Array(state.threads.values), phase: s.phase)
+        row.submenu = voiceMenu(StatusItem.voiceMenu(settings: s.settings, session: s.session, phase: s.phase, busy: busy))
+        return row
+    }
+
+    /// The submenu, pure: the rows from `VoiceMenuModel` as NSMenuItems carrying their id in
+    /// `representedObject`; no target yet, so the harness could build it without an AppState.
+    static func voiceMenu(settings: Settings, session: SessionInfo?, phase: Phase, busy: Bool) -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for row in VoiceMenuModel.rows(voice: settings.voice, accent: settings.accent, session: session, phase: phase, busy: busy) {
+            switch row.kind {
+            case .separator:
+                menu.addItem(.separator())
+            case .switchNow:
+                let item = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
+                item.isEnabled = row.enabled
+                item.tag = 1
+                item.toolTip = VoiceSwitch.tip(enabled: row.enabled)
+                menu.addItem(item)
+            case .voice(let id):
+                let item = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
+                item.representedObject = id
+                item.state = row.on ? .on : .off
+                item.tag = 2
+                menu.addItem(item)
+            case .accent(let id):
+                let item = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
+                item.representedObject = id
+                item.state = row.on ? .on : .off
+                item.tag = 3
+                menu.addItem(item)
+            }
+        }
+        return menu
+    }
+
+    /// `Voice` in the label colour, the pick (`Marin 🇬🇧`) after it in the secondary one.
+    static func voiceTitle(voice: String, accent: String) -> NSAttributedString {
+        let font = NSFont.menuFont(ofSize: 0)
+        let out = NSMutableAttributedString(string: VoiceMenuWords.voice, attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+        out.append(NSAttributedString(string: "   " + VoiceMenuModel.value(voice: voice, accent: accent),
+                                      attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor]))
+        return out
+    }
+
+    /// The submenu wired to this item: Switch now → `voice.reopen`; a voice or accent row → one `set-settings`.
+    private func voiceMenu(_ menu: NSMenu) -> NSMenu {
+        for item in menu.items where !item.isSeparatorItem {
+            item.target = self
+            switch item.tag {
+            case 1: item.action = #selector(doSwitchVoice)
+            case 2: item.action = #selector(doPickVoice(_:))
+            default: item.action = #selector(doPickAccent(_:))
+            }
+        }
+        return menu
+    }
+
+    @objc private func doSwitchVoice() { state.send(.voiceReopen) }
+    @objc private func doPickVoice(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, id != state.snapshot.settings.voice else { return }
+        state.send(.setSettings(SettingsPatch(voice: id)))
+    }
+    @objc private func doPickAccent(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String, id != state.snapshot.settings.accent else { return }
+        state.send(.setSettings(SettingsPatch(accent: id)))
+    }
+
+    // MARK: - automations rows
+
+    /// The ring's own snooze press, else Settings' minutes (timers five) — the island's rule.
+    static func snoozeMinutes(for ring: RingLine, settings: AutomationSettings) -> Int {
+        ring.presses.first { $0.kind == "snooze" }?.minutes ?? (ring.kind == "timer" ? 5 : settings.snoozeMinutes)
+    }
+
+    /// "Next · 07:10 Wake up, Kevin".
+    static func nextLabel(_ next: NextFire) -> String {
+        guard next.at.isFinite else { return "Next · \(next.name)" }
+        return "Next · \(RingWords.clock(Date(timeIntervalSince1970: next.at / 1000))) \(next.name)"
+    }
 
     // MARK: - crash row
 
     /// "Crashed 2 min ago — Failed to create tap due to format mismatch", the reason cut to a menu's width.
     static func crashLabel(_ crash: CrashNotice, now: Date = Date()) -> String {
         let reason = crash.reason.count > 64 ? String(crash.reason.prefix(63)) + "…" : crash.reason
-        return "Crashed \(CrashNotice.ago(crash.at, now: now)) — \(reason)"
+        return "Crashed \(CrashNotice.ago(crash.at, now: now)): \(reason)"
     }
 
     // MARK: - permissions row
@@ -274,6 +499,12 @@ final class StatusItem: NSObject {
         if missing.isEmpty { return "Permissions: all \(list.count) granted" }
         let required = missing.filter(\.required).count
         return "Permissions: \(missing.count) missing" + (required > 0 ? " (\(required) required)" : "")
+    }
+
+    /// The sweep is at a step that waits on Kevin (a dialog that returned at once, a System Settings pane): Next applies.
+    static func sweepWaits(_ p: PermissionSweepProgress?) -> Bool {
+        guard let p, p.running else { return false }
+        return p.stage == .waiting || p.stage == .settings
     }
 
     static func permissionsSymbol(_ list: [PermissionInfo]) -> String {
@@ -290,15 +521,15 @@ final class StatusItem: NSObject {
     /// (WakeGate.heard) — so the row says so, and names the other way back.
     static func gateLabel(_ g: WakeGateState, phrases: [String], auth: WakeAuth = .either, paused: Bool = false) -> String {
         switch g {
-        case .off(let reason): return "Wake word off — \(reason)"
+        case .off(let reason): return GateWords.off(reason)
         case .listening:
             let phrase = phrases.first { !$0.trimmingCharacters(in: .whitespaces).isEmpty } ?? "the wake word"
             if paused { return "paused · say “\(phrase)” or press Go" }
-            return "Listening for “\(phrase)”" + (auth == .none ? " — no authentication" : "")
+            return "Listening for “\(phrase)”" + (auth == .none ? GateWords.noAuth() : "")
         case .heard: return "Heard you"
         case .authenticating(let method): return "Waiting for \(method)"
         case .granted: return paused ? "Resuming…" : "Waking…"
-        case .denied(let reason): return "Not this time — \(reason)"
+        case .denied(let reason): return GateWords.denied(reason)
         case .lockedOut(let until): return "Locked for \(max(1, Int(until.timeIntervalSinceNow.rounded()))) s"
         }
     }
@@ -347,4 +578,10 @@ final class StatusItem: NSObject {
         image.isTemplate = true
         return image
     }
+}
+
+/// The status menu's words (design13): every visible literal once. Builder G adds `voice` beside these.
+enum StatusWords {
+    static let stop = "Stop"
+    static let stopped = "Stopped"
 }
