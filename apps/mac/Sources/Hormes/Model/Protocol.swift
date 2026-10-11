@@ -4,6 +4,14 @@ import Foundation
 // JSON over the socket; every field name matches the TypeScript exactly. Unknown
 // enum values decode to a safe default so a newer daemon never crashes the app.
 
+/// Mirror of PROTOCOL_VERSION (APP-3). The app sends it in its hello and reads the daemon's (EngineClient); a
+/// difference, or a daemon hello without one, means the two were built from different checkouts: the app raises
+/// `app.version` and refuses Go until it clears. Bump it with the TypeScript constant: contract-additions.test.ts
+/// pins the two equal.
+public enum ProtocolVersion {
+    public static let current = 4
+}
+
 public enum Phase: String, Codable, CaseIterable {
     case asleep, connecting, listening, speaking, thinking, acting, muted, error, paused
 
@@ -14,10 +22,10 @@ public enum Phase: String, Codable, CaseIterable {
 }
 
 public enum SpeakerRole: String, Codable {
-    case kevin, hormes
+    case user, hormes
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = SpeakerRole(rawValue: raw) ?? .kevin
+        self = SpeakerRole(rawValue: raw) ?? .user
     }
 }
 
@@ -29,7 +37,7 @@ public struct TranscriptItem: Codable, Identifiable, Equatable {
     public var endMs: Double
     public var at: Double
     public var final: Bool
-    /// "typed" when Kevin typed it in the Console.
+    /// "typed" when User typed it in the Console.
     public var source: String?
 }
 
@@ -65,48 +73,8 @@ public struct DelegationStep: Codable, Identifiable, Equatable {
     public var text: String?
     public var tool: ToolStep?
     public var screenshotPath: String?
-    /// The worker's name when one of the delegation's workers ran this step.
-    public var worker: String?
-}
-
-// MARK: - Workers: a second pair of hands inside one delegation (mirror of Worker).
-
-public enum WorkerLane: String, Codable, Equatable, Sendable {
-    case background, screen
-    public init(from decoder: Decoder) throws {
-        self = WorkerLane(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .background
-    }
-}
-
-public enum WorkerStatus: String, Codable, Equatable, Sendable {
-    case starting, working, done, failed, cancelled
-    case waitingScreen = "waiting-screen"
-    case awaitingConfirmation = "awaiting-confirmation"
-    public init(from decoder: Decoder) throws {
-        self = WorkerStatus(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .working
-    }
-    /// Still alive: not done, failed or cancelled.
-    public var isRunning: Bool {
-        switch self {
-        case .starting, .working, .waitingScreen, .awaitingConfirmation: return true
-        case .done, .failed, .cancelled: return false
-        }
-    }
-}
-
-public struct Worker: Codable, Identifiable, Equatable, Sendable {
-    public var id: String
-    /// Spoken as-is ("Spotify").
-    public var name: String
-    public var delegationId: String
-    public var task: String
-    public var lane: WorkerLane
-    public var status: WorkerStatus
-    public var detail: String?
-    public var startedAt: Double
-    public var doneAt: Double?
-    public var steps: Int
-    public var app: String?
+    /// The spawned thread's name when it ran this step on its parent's timeline; nil: main's.
+    public var thread: String?
 }
 
 // MARK: - Threads: independent lines of work, each as capable as the main conversation (mirror of Thread).
@@ -121,7 +89,7 @@ public enum ThreadLane: String, Codable, Equatable, Sendable {
 public enum ThreadStatus: String, Codable, Equatable, Sendable {
     case idle, queued, starting, thinking, acting, paused, done, failed, stopped
     case waitingScreen = "waiting-screen"
-    case waitingKevin = "waiting-kevin"
+    case waitingUser = "waiting-user"
     public init(from decoder: Decoder) throws {
         self = ThreadStatus(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .thinking
     }
@@ -218,7 +186,7 @@ public struct ThreadTranscript: Codable, Equatable {
     public var readMs: Double?
 }
 
-// MARK: - Memory: what Hormes knows about Kevin across sessions (mirror of MemoryItem / MemorySummary).
+// MARK: - Memory: what Hormes knows about User across sessions (mirror of MemoryItem / MemorySummary).
 
 public enum MemoryKind: String, Codable, CaseIterable, Equatable, Sendable {
     case preference, fact, episode, procedure, contact, place
@@ -254,12 +222,13 @@ public struct MemoryItem: Codable, Identifiable, Equatable, Sendable {
     public var state: MemoryState
     public var mergedInto: String?
     public var supersedes: [String]?
-    /// extracted | kevin | tool
+    /// extracted | user | tool
     public var origin: String
 }
 
 public struct MemorySummary: Codable, Equatable, Sendable {
     public struct LastRun: Codable, Equatable, Sendable {
+        /// responses | local | rules
         public var extractor: String
         public var added: Int
         public var updated: Int
@@ -275,8 +244,11 @@ public struct MemorySummary: Codable, Equatable, Sendable {
     public var count: Int
     public var forgotten: Int
     public var archived: Int
-    /// openai | keyword
+    /// How items are matched: openai | local | keyword.
     public var embeddings: String
+    /// "text-embedding-3-small" or the local model's id; absent for keyword matching.
+    public var embeddingModel: String?
+    public var embeddingDims: Int?
     public var pending: Int
     public var lastRunAt: Double?
     public var lastRun: LastRun?
@@ -289,7 +261,7 @@ public struct DelegationTimings: Codable, Equatable {
     public var firstThinkingAt: Double?
     public var firstCommentaryAt: Double?
     public var doneAt: Double?
-    /// Wall clock when Kevin's triggering utterance ended (the transcript's end placed on the session's start clock); absent when the session start is unknown.
+    /// Wall clock when User's triggering utterance ended (the transcript's end placed on the session's start clock); absent when the session start is unknown.
     public var speechEndAt: Double?
     /// Wall clock of the first acting tool (click, type, key, scroll, open_app, applescript, run_shell, a file write, a browser action) that returned ok.
     public var firstActionAt: Double?
@@ -307,7 +279,7 @@ public struct Delegation: Codable, Identifiable, Equatable {
     public var timings: DelegationTimings
     /// The thread that ran it; nil = main.
     public var threadId: String?
-    /// Steps in the ledger when `steps` is a cut window.
+    /// Step total of a thread's delegation; a thread page shows it before its steps are paged in. Absent on main's delegations.
     public var stepCount: Int?
 }
 
@@ -412,7 +384,7 @@ public struct AgentMessage: Codable, Identifiable, Equatable {
     public var at: Double
     public var tool: AgentToolCall?
     public var thinking: Bool?
-    /// A message Kevin just sent, echoed before the session confirms it.
+    /// A message User just sent, echoed before the session confirms it.
     public var pending: Bool?
 }
 
@@ -436,7 +408,7 @@ public struct AgentTranscript: Codable, Equatable {
     }
 }
 
-// MARK: - Marks (what Kevin circled)
+// MARK: - Marks (what User circled)
 
 public struct ScreenMark: Codable, Identifiable, Equatable {
     public var id: String
@@ -446,12 +418,20 @@ public struct ScreenMark: Codable, Identifiable, Equatable {
     public var screenshotPath: String?
     public var consumed: Bool
     public var element: MarkElement?
+    /// How it was made. Absent or "circle": User's stroke. "window": the front window captured
+    /// whole (`mark.window`); its rect is the window's frame, no snap.
+    public var source: String?
 
     public struct MarkElement: Codable, Equatable {
         public var role: String?
         public var title: String?
         public var app: String?
     }
+
+    /// A whole front window (`mark.window`), not a stroke.
+    public var isWindow: Bool { source == "window" }
+    /// Not handed to a brain yet.
+    public var isPending: Bool { !consumed }
 }
 
 public struct ConnectorHealth: Codable, Equatable {
@@ -460,6 +440,11 @@ public struct ConnectorHealth: Codable, Equatable {
     public var detail: String
 }
 
+/// Mirror of the protocol's `BrainKind`. `local` is a model on this Mac served by Ollama
+/// (127.0.0.1:11434), LM Studio (:1234) or llama.cpp (:8080), discovered by the engine or pinned
+/// by `Settings.brainBaseUrl`; explicit only — `auto` never picks it. Under `local`,
+/// `Settings.brainModel` is the server's own id ("qwen3.5:27b"), or empty for the best fit on
+/// this Mac (`setup.local.picked`).
 public enum BrainKind: String, Codable, CaseIterable {
     case auto
     case codex
@@ -467,6 +452,7 @@ public enum BrainKind: String, Codable, CaseIterable {
     case anthropicApi = "anthropic-api"
     case openaiResponses = "openai-responses"
     case openaiCompatible = "openai-compatible"
+    case local
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
         self = BrainKind(rawValue: raw) ?? .auto
@@ -479,23 +465,33 @@ public enum BrainKind: String, Codable, CaseIterable {
         case .anthropicApi: return "Anthropic API"
         case .openaiResponses: return "OpenAI"
         case .openaiCompatible: return "OpenAI-compatible server"
+        case .local: return "Local model"
+        }
+    }
+    /// Short model label for compact controls.
+    public var shortLabel: String {
+        switch self {
+        case .openaiCompatible: return "OpenAI-compatible"
+        case .local: return "Local"
+        default: return label
         }
     }
     /// One line for a picker: what it needs.
     public var needs: String {
         switch self {
-        case .auto: return "Whatever is signed in on this Mac — Codex, Claude Code — or a key you add."
-        case .codex: return "Your ChatGPT / Codex login on this Mac. No key."
-        case .claudeCode: return "Your Claude Code login on this Mac. No key."
+        case .auto: return "Whatever is signed in on this Mac (Codex, Claude Code) or a key you add."
+        case .codex: return "Your ChatGPT or Codex login on this Mac."
+        case .claudeCode: return "Your Claude Code login on this Mac."
         case .anthropicApi: return "An Anthropic API key."
         case .openaiResponses: return "The OpenAI key you already use for the voice."
-        case .openaiCompatible: return "A base URL and a key: OpenRouter, Ollama, LM Studio, vLLM…"
+        case .openaiCompatible: return "A base URL and a key: OpenRouter, vLLM, a hosted server. For Ollama or LM Studio on this Mac, pick Local model."
+        case .local: return "A model on this Mac through Ollama or LM Studio. Everything but the voice stays here."
         }
     }
     /// Which secret, if any, a kind wants entered.
     public var secretKey: String? {
         switch self {
-        case .auto, .codex, .claudeCode: return nil
+        case .auto, .codex, .claudeCode, .local: return nil
         case .anthropicApi: return "ANTHROPIC_API_KEY"
         case .openaiResponses: return "OPENAI_API_KEY"
         case .openaiCompatible: return "HORMES_BRAIN_API_KEY"
@@ -513,7 +509,7 @@ public enum WakeAuth: String, Codable, Equatable, CaseIterable {
     case touchId = "touch-id", passphrase, either, none
     public init(from decoder: Decoder) throws {
         let raw = try decoder.singleValueContainer().decode(String.self)
-        self = WakeAuth(rawValue: raw) ?? .either
+        self = WakeAuth(rawValue: raw) ?? .none
     }
     public var label: String {
         switch self {
@@ -525,79 +521,276 @@ public enum WakeAuth: String, Codable, Equatable, CaseIterable {
     }
 }
 
-/// The local wake word: on-device speech recognition while asleep, then authentication.
+/// Local wake gestures: on-device detection while asleep, with optional authentication.
+public enum WakeTrigger: String, Codable, CaseIterable {
+    case word, clap, both
+    public var label: String {
+        switch self { case .word: return "Wake word"; case .clap: return "Double clap"; case .both: return "Word or double clap" }
+    }
+}
 public struct WakeSettings: Codable, Equatable {
     public var enabled: Bool
     public var phrases: [String]
     public var auth: WakeAuth
+    public var trigger: WakeTrigger?
 
-    public init(enabled: Bool, phrases: [String], auth: WakeAuth) {
-        self.enabled = enabled; self.phrases = phrases; self.auth = auth
+    public init(enabled: Bool, phrases: [String], auth: WakeAuth, trigger: WakeTrigger? = .word) {
+        self.enabled = enabled; self.phrases = phrases; self.auth = auth; self.trigger = trigger
     }
 
-    public static let standard = WakeSettings(enabled: true, phrases: ["hormes", "jar head", "hey hormes"], auth: .either)
+    public static let standard = WakeSettings(enabled: true, phrases: ["hormes", "hor mes", "hey hormes"], auth: .none)
 
-    public var json: [String: Any] { ["enabled": enabled, "phrases": phrases, "auth": auth.rawValue] }
+    public var json: [String: Any] { ["enabled": enabled, "phrases": phrases, "auth": auth.rawValue, "trigger": (trigger ?? .word).rawValue] }
+}
+
+/// design12: the audio block (`Settings.audio`). Nested like `wake`, merged field-wise at load by the
+/// engine, so a daemon before the block sends none and `audioSettings` fills the default in.
+public struct AudioSettings: Codable, Equatable {
+    /// Recording a demo: no voice-processing unit, the ranked mic, the software echo guard.
+    public var recording: Bool
+    /// Settings › Audio › Sounds: the interface sounds (heard, awake, pause, sleep, snooze, opened, mark, cue,
+    /// problem). nil = never set: macOS's "Play user interface sound effects" decides (read, never written).
+    /// Rings (chime, timer, alarm) sound either way.
+    public var sounds: Bool?
+    /// Settings › Audio › Volume, 0…1, times the system output volume; nil = `defaultSoundVolume`.
+    public var soundVolume: Double?
+
+    public init(recording: Bool, sounds: Bool? = nil, soundVolume: Double? = nil) {
+        self.recording = recording; self.sounds = sounds; self.soundVolume = soundVolume
+    }
+
+    public static let standard = AudioSettings(recording: false)
+    public static let defaultSoundVolume = 0.7
+
+    /// The interface sounds as they stand: User's choice, else the system's.
+    public var soundsOn: Bool { sounds ?? AudioSettings.systemInterfaceSounds() }
+    /// The volume as it stands, clamped to 0…1.
+    public var volume: Double {
+        guard let v = soundVolume, v.isFinite else { return AudioSettings.defaultSoundVolume }
+        return min(1, max(0, v))
+    }
+
+    /// macOS's "Play user interface sound effects" (System Settings › Sound), read only: the key is absent
+    /// until User turns it off, so absent is on.
+    public static func systemInterfaceSounds() -> Bool {
+        let key = "com.apple.sound.uiaudio.enabled"
+        if let v = UserDefaults(suiteName: "com.apple.systemsound")?.object(forKey: key) as? NSNumber { return v.boolValue }
+        if let v = UserDefaults.standard.object(forKey: key) as? NSNumber { return v.boolValue }
+        return true
+    }
+
+    public var json: [String: Any] {
+        var o: [String: Any] = ["recording": recording]
+        if let sounds { o["sounds"] = sounds }
+        if let soundVolume, soundVolume.isFinite { o["soundVolume"] = min(1, max(0, soundVolume)) }
+        return o
+    }
 }
 
 public struct Settings: Codable, Equatable {
+    public var ownerApproval: Bool? = nil
+    public var proactive: Bool? = nil
+    public var voiceProvider: String? = nil
+    public var geminiModel: String? = nil
+    public var geminiVoice: String? = nil
     public var voice: String
     public var brain: BrainKind
+    /// Model override for the chosen backend; empty = that backend's default. Under `local`: the
+    /// server's listed id, verbatim; empty = the best fit on this Mac (`setup.local.picked`).
     public var brainModel: String
-    /// openai-compatible only: the Chat Completions server.
+    /// openai-compatible: base URL of the Chat Completions server. local: pin the server root
+    /// instead of discovering it (a second Ollama on another port, a LAN box). No trailing /v1 needed.
     public var brainBaseUrl: String?
     public var effort: String
+    /// Core Audio device UID (not a getUserMedia id); nil = ranked.
     public var micDeviceId: String?
     public var idleSleepMinutes: Double
+    /// Start listening on launch (ignored while the wake word gate is enabled).
     public var autoWake: Bool
+    /// Where the Orb sits, saved across launches.
     public var orbPosition: OrbPosition?
-    /// Optional on the wire so a daemon from before the gate existed still decodes.
-    public var wake: WakeSettings?
-    /// First-run onboarding finished. Optional on the wire for the same reason.
-    public var onboarded: Bool?
-    /// Reflexes: act on unambiguous spoken commands without the model.
-    public var reflexes: Bool?
+    public var wake: WakeSettings
+    /// Act on unambiguous spoken commands without the model (the 250 ms path).
+    public var reflexes: Bool
     /// "free" (float where it last worked) or "notch" (live in the MacBook notch).
-    public var orbHome: String?
-    /// Retention: days before a day's ledger / shots move to the trash (0 = never). Optional on the wire.
-    public var ledgerRetentionDays: Int?
-    public var shotsRetentionDays: Int?
-    /// Workers: let the brain split independent work across a second pair of hands. Optional on the wire.
-    public var workers: Bool?
-    /// The language the voice speaks ("en"), how the English sounds (american | british | none), and durable memory. Optional on the wire.
-    public var language: String?
-    public var accent: String?
-    public var memory: Bool?
-    /// Observation lines on acting tools; typed-while-asleep wakes; thread overflow rule; warm thread processes. Optional on the wire.
-    public var observe: Bool?
-    public var replayFinish: Bool?
-    public var typedWakes: Bool?
-    public var threadOverflow: String?
-    public var warmThreads: Int?
+    public var orbHome: String
+    /// Retention: days before a day's ledger / shots move to the trash (0 = never).
+    public var ledgerRetentionDays: Int
+    public var shotsRetentionDays: Int
+    /// Let the brain split independent work across threads.
+    public var threads: Bool
+    /// The language the voice speaks ("en") and how the English sounds (american | british | none).
+    public var language: String
+    public var accent: String
+    /// Durable memory of User across sessions.
+    public var memory: Bool
+    /// Every acting tool answers with what is now in front (the observation line).
+    public var observe: Bool
+    /// A typed line while asleep wakes Hormes (opens a paid session).
+    public var typedWakes: Bool
+    /// A new request naming an unclaimed app while main has acted: "supersede" or "spawn".
+    public var threadOverflow: String
+    /// Warm codex app-server processes kept ready for threads (0..3).
+    public var warmThreads: Int
+    /// Automations: the switch, the unattended kinds, quiet hours, the recipes. nil from a daemon before the field.
+    public var automations: AutomationSettings?
+    /// design12: the audio block (Recording). nil from a daemon before the field.
+    public var audio: AudioSettings?
+    /// What the user is called: what the brain reads and Console › Settings / Settings › Session
+    /// show. "" = unset (the engine falls back to the account's full name); nil from a daemon
+    /// before the field.
+    public var userName: String?
 
-    public var languageTag: String { language ?? "en" }
-    public var accentKind: String { accent ?? "american" }
-    public var memoryOn: Bool { memory ?? true }
-    public var workersOn: Bool { workers ?? true }
-    public var wakeSettings: WakeSettings { wake ?? .standard }
-    public var isOnboarded: Bool { onboarded ?? false }
-    public var reflexesOn: Bool { reflexes ?? true }
-    public var livesInNotch: Bool { (orbHome ?? "notch") == "notch" }
+    public var livesInNotch: Bool { orbHome == "notch" }
+    /// The name as typed, trimmed; "" when unset or from a daemon before the field.
+    public var userNameSet: String { (userName ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+    /// Mirror of core's `effectiveUserName(settings, fallback)`: the set name, else `fallback`
+    /// (the app passes NSFullUserName(), the engine the account's RealName).
+    public func userName(or fallback: String) -> String {
+        let set = userNameSet
+        return set.isEmpty ? fallback : set
+    }
+    /// The block, or the contract's default when the daemon predates it.
+    public var automationSettings: AutomationSettings { automations ?? .standard }
+    /// The audio block, or the contract's default when the daemon predates it.
+    public var audioSettings: AudioSettings { audio ?? .standard }
+}
+
+// MARK: - Local model servers (mirror of LocalFlavor / LocalFit / LocalModel / LocalServerStatus / DataPath)
+
+/// Which local server answered. `ollama`: GET /api/version; `lmstudio`: GET /api/v0/models;
+/// `llamacpp`: GET /health. A flavour this app does not know decodes as `.unknown`.
+public enum LocalFlavor: String, Codable, Equatable {
+    case ollama, lmstudio, llamacpp, unknown
+    public init(from decoder: Decoder) throws {
+        self = LocalFlavor(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+    /// The server's name as a surface prints it ("Ollama 0.34.0").
+    public var name: String {
+        switch self {
+        case .ollama: return "Ollama"
+        case .lmstudio: return "LM Studio"
+        case .llamacpp: return "llama.cpp"
+        case .unknown: return "local server"
+        }
+    }
+}
+
+/// Weights against this Mac's memory — display data the engine computes, a rule of thumb, not a
+/// measurement: `good` ≤ 50 % of usable, `tight` ≤ 85 %, else `no`; `unknown` when the server
+/// reports no size (LM Studio, llama.cpp).
+public enum LocalFit: String, Codable, Equatable {
+    case good, tight, no, unknown
+    public init(from decoder: Decoder) throws {
+        self = LocalFit(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
+    }
+}
+
+public struct LocalModel: Codable, Equatable, Identifiable {
+    /// Verbatim as the server lists it ("qwen3.5:27b", "qwen3.5:27b-mlx"); always sent as-is.
+    public var id: String
+    /// Mirror of LocalCapability (completion | tools | vision | thinking | embedding), kept [String]:
+    /// a capability this app does not know still decodes.
+    public var capabilities: [String]
+    /// Bytes on disk (Ollama /api/tags `size`); absent when the server does not say.
+    public var sizeBytes: Double?
+    /// Trained maximum (Ollama model_info "<arch>.context_length"; LM Studio max_context_length; llama.cpp n_ctx).
+    public var contextLength: Int?
+    public var family: String?
+    public var parameterSize: String?
+    /// Ollama `modified_at`, wall-clock ms.
+    public var modifiedAt: Double?
+    public var fit: LocalFit
+    /// Loaded in memory right now (Ollama /api/ps; LM Studio state === "loaded"; llama.cpp always).
+    public var loaded: Bool
+    /// Ollama `remote_host` set: runs on ollama.com, not this Mac. Never offered as a brain or an embedder.
+    public var cloud: Bool
+
+    public init(id: String, capabilities: [String], sizeBytes: Double? = nil, contextLength: Int? = nil, family: String? = nil,
+                parameterSize: String? = nil, modifiedAt: Double? = nil, fit: LocalFit, loaded: Bool, cloud: Bool) {
+        self.id = id; self.capabilities = capabilities; self.sizeBytes = sizeBytes; self.contextLength = contextLength
+        self.family = family; self.parameterSize = parameterSize; self.modifiedAt = modifiedAt; self.fit = fit; self.loaded = loaded; self.cloud = cloud
+    }
+
+    public var hasTools: Bool { capabilities.contains("tools") }
+    public var hasVision: Bool { capabilities.contains("vision") }
+    public var hasThinking: Bool { capabilities.contains("thinking") }
+    public var isEmbedding: Bool { capabilities.contains("embedding") }
+}
+
+/// What to suggest pulling for this Mac when nothing tool-capable is listed. Never run by Hormes:
+/// a surface prints `command` with Copy and User runs it.
+public struct LocalSuggested: Codable, Equatable {
+    public var id: String
+    public var sizeBytes: Double
+    public var command: String
+    public init(id: String, sizeBytes: Double, command: String) { self.id = id; self.sizeBytes = sizeBytes; self.command = command }
+}
+
+/// The local model server as the engine last looked (SetupStatus.local), whatever `brain` is.
+public struct LocalServerStatus: Codable, Equatable {
+    public var reachable: Bool
+    public var flavor: LocalFlavor?
+    /// Ollama /api/version; others when they say.
+    public var version: String?
+    /// The root in use (discovered or pinned), "" when none answered.
+    public var baseUrl: String
+    /// Every non-cloud model with `completion` (tools-less ones included, so the picker can grey them), best fit first.
+    public var models: [LocalModel]
+    /// The id the engine chose when `Settings.brainModel` is empty under `local`; absent when a model is picked or nothing fits.
+    public var picked: String?
+    /// The embedding model memory uses; absent = keyword matching.
+    public var embedModel: String?
+    public var suggested: LocalSuggested?
+    /// Total memory of this Mac, so a surface can say "17 GB of 128 GB".
+    public var ramBytes: Double
+    /// Wall-clock ms of the last look; 0 = never.
+    public var checkedAt: Double
+
+    public init(reachable: Bool, flavor: LocalFlavor?, version: String?, baseUrl: String, models: [LocalModel], picked: String?,
+                embedModel: String?, suggested: LocalSuggested?, ramBytes: Double, checkedAt: Double) {
+        self.reachable = reachable; self.flavor = flavor; self.version = version; self.baseUrl = baseUrl; self.models = models
+        self.picked = picked; self.embedModel = embedModel; self.suggested = suggested; self.ramBytes = ramBytes; self.checkedAt = checkedAt
+    }
+
+    /// The value before any look, and the empty value when nothing answers (the protocol's LOCAL_NONE).
+    public static let none = LocalServerStatus(reachable: false, flavor: nil, version: nil, baseUrl: "", models: [], picked: nil, embedModel: nil, suggested: nil, ramBytes: 0, checkedAt: 0)
+
+    /// Tool-capable, non-cloud, for the picker.
+    public var pickable: [LocalModel] { models.filter { $0.hasTools && !$0.cloud } }
+}
+
+/// One row of "where words go" (SetupStatus.dataPaths). The voice is always `cloud`; the brain
+/// and memory move with the settings; the web is the sites User asks for.
+public struct DataPath: Codable, Equatable, Identifiable {
+    /// voice | brain | memory | web (String: a row this app does not know still decodes)
+    public var what: String
+    /// cloud | mac | lan | off
+    public var `where`: String
+    /// One mono line: "OpenAI gpt-live-1 — every word heard and said; billed per second".
+    public var detail: String
+    public init(what: String, where: String, detail: String) { self.what = what; self.where = `where`; self.detail = detail }
+    public var id: String { what }
 }
 
 /// Configuration health without secrets: key presence and the last probe.
 public struct SetupStatus: Codable, Equatable {
-    public enum KeyState: String, Codable { case ok, missing, invalid, unchecked
+    /// `noLiveModel`: the key answered (not 401) but the Live model probe came back 404 — the
+    /// key works, GPT-Live-1 is not on it; the first wake would fail with the voice.key problem.
+    public enum KeyState: String, Codable { case ok, missing, invalid, unchecked, noLiveModel
         public init(from decoder: Decoder) throws { self = KeyState(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unchecked }
     }
     public enum BrainState: String, Codable { case ok, unavailable, unchecked
         public init(from decoder: Decoder) throws { self = BrainState(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unchecked }
     }
     public struct Secrets: Codable, Equatable {
+        public var gemini: Bool? = nil
         public var openai: Bool
         public var anthropic: Bool
         public var brainApiKey: Bool
     }
+    public var voiceProvider: String? = nil
+    public var voiceKey: KeyState? = nil
     public var openaiKey: KeyState
     public var brain: BrainState
     public var brainDetail: String
@@ -605,8 +798,18 @@ public struct SetupStatus: Codable, Equatable {
     public var brainResolved: BrainKind?
     public var liveModel: String
     public var secrets: Secrets
+    /// The local model server, whatever `brain` is: refreshed by config.probe, restartBrain and the local heal timer.
+    public var local: LocalServerStatus
+    /// Where words go right now (the four rows voice · brain · memory · web), computed by the engine; the doctor prints the same rows.
+    public var dataPaths: [DataPath]
 
-    public static let unknown = SetupStatus(openaiKey: .unchecked, brain: .unchecked, brainDetail: "", brainResolved: nil, liveModel: "gpt-live-1", secrets: Secrets(openai: false, anthropic: false, brainApiKey: false))
+    public init(openaiKey: KeyState, brain: BrainState, brainDetail: String, brainResolved: BrainKind? = nil, liveModel: String, secrets: Secrets,
+                local: LocalServerStatus, dataPaths: [DataPath]) {
+        self.openaiKey = openaiKey; self.brain = brain; self.brainDetail = brainDetail; self.brainResolved = brainResolved
+        self.liveModel = liveModel; self.secrets = secrets; self.local = local; self.dataPaths = dataPaths
+    }
+
+    public static let unknown = SetupStatus(openaiKey: .unchecked, brain: .unchecked, brainDetail: "", brainResolved: nil, liveModel: "gpt-live-1", secrets: Secrets(openai: false, anthropic: false, brainApiKey: false), local: .none, dataPaths: [])
 }
 
 public enum Grant: String, Codable, Sendable {
@@ -618,7 +821,7 @@ public enum Grant: String, Codable, Sendable {
 }
 
 /// Every macOS permission Hormes asks for (mirror of PERMISSION_KINDS). The first four
-/// are what the voice and the hands need; the rest let the brain reach what Kevin asks
+/// are what the voice and the hands need; the rest let the brain reach what User asks
 /// about.
 public enum PermissionKind: String, Codable, CaseIterable, Equatable, Sendable {
     case microphone, speechRecognition, screenRecording, accessibility
@@ -653,17 +856,14 @@ public struct PermissionInfo: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Every permission as the app last read it (the process TCC keys on); one row per kind.
 public struct Permissions: Codable, Equatable {
-    public var microphone: Grant
-    public var screenRecording: Grant
-    public var accessibility: Grant
-    /// The whole list as the app last read it; optional on the wire for older daemons.
-    public var all: [PermissionInfo]?
-    public init(microphone: Grant, screenRecording: Grant, accessibility: Grant, all: [PermissionInfo]? = nil) {
-        self.microphone = microphone; self.screenRecording = screenRecording; self.accessibility = accessibility; self.all = all
-    }
+    public var all: [PermissionInfo]
+    public init(all: [PermissionInfo]) { self.all = all }
+    /// The grant a row records for `kind`; `.unknown` when no row has been read yet.
+    public func grant(_ kind: PermissionKind) -> Grant { all.first { $0.kind == kind }?.grant ?? .unknown }
     /// Required permissions that are not granted, by kind.
-    public var missingRequired: [PermissionKind] { (all ?? []).filter { $0.required && $0.grant != .granted }.map(\.kind) }
+    public var missingRequired: [PermissionKind] { all.filter { $0.required && $0.grant != .granted }.map(\.kind) }
 }
 
 public struct AudioLevels: Codable, Equatable {
@@ -673,6 +873,7 @@ public struct AudioLevels: Codable, Equatable {
 }
 
 public struct SessionInfo: Codable, Equatable {
+    public var voiceProvider: String? = nil
     public var id: String
     public var startedAt: Double
     public var expiresAt: Double
@@ -698,6 +899,42 @@ public struct UsageToday: Codable, Equatable {
     public var sessions: Int
 }
 
+/// LM-6: one day of the `ledger.days` reply's `totals` (mirror of LedgerDayTotals), for the Ledger tab's day rows
+/// and month heads. The reply's `days` list stays beside it; a daemon before the field sends the list alone.
+public struct LedgerDayTotals: Codable, Equatable {
+    public var day: String
+    /// The day file's `session.started` rows.
+    public var sessions: Int
+    /// Each session's seconds, once, in the day file of the row that carries them. A session with a `session.closed`
+    /// row (a `LedgerRow.lostReason` close included) counts that row's `usageSeconds`. Only a session with no closed
+    /// row yet counts its last `session.usage` row. Never both: a lost close repeats its last usage row's seconds.
+    public var billedSeconds: Double
+}
+
+/// LM-6: the whole `ledger.days` answer as the Ledger tab reads it: the day list, newest first, and each day's totals
+/// by day (none from a daemon before them, where a day's figures wait until it is read). `partial`: the daemon answered
+/// within its budget before it had read every day's totals, so `totals` leaves out the days still being read, and the
+/// Console asks again (ConsoleSession.askDays).
+public struct LedgerDays: Equatable {
+    public var days: [String]
+    public var totals: [String: LedgerDayTotals]
+    public var partial: Bool
+    public init(days: [String], totals: [String: LedgerDayTotals] = [:], partial: Bool = false) {
+        self.days = days; self.totals = totals; self.partial = partial
+    }
+}
+
+/// One page of `ledger.search` (`ledger.hits`): the hits, newest first, and `older`, the day to send as the next
+/// page's `before` when the daemon's byte bound stopped the page with older days unread (nil: nothing older is
+/// left, or a daemon before paging, which reads every day at once).
+public struct LedgerSearchPage: Equatable {
+    public var hits: [LedgerHit]
+    public var older: String?
+    public init(hits: [LedgerHit], older: String? = nil) {
+        self.hits = hits; self.older = older
+    }
+}
+
 /// GPT-Live-1 list price, for the meter. Billed per second.
 public enum LivePrice {
     public static let perMinuteUSD = 0.05
@@ -721,7 +958,7 @@ public struct HormesSessionSummary: Codable, Equatable, Identifiable {
     public var resumedFrom: String?
     /// Conversation (chain) state from the tombstone rows; nil = active.
     public var state: String?
-    /// Kevin's own name; nil or "" = the auto title.
+    /// User's own name; nil or "" = the auto title.
     public var name: String?
     public var pinned: Bool?
     public var trashedAt: Double?
@@ -736,16 +973,29 @@ public struct ProblemRemedy: Codable, Equatable {
     public var label: String
     public var command: [String: JSONValue]?
     public var open: String?
+    /// Text the surface offers to copy (a shell command User runs himself: `ollama pull qwen3.5:27b`).
+    /// Never executed by any surface.
+    public var copy: String?
+    public init(label: String, command: [String: JSONValue]?, open: String?, copy: String? = nil) {
+        self.label = label; self.command = command; self.open = open; self.copy = copy
+    }
 }
 
 public struct Problem: Codable, Equatable, Identifiable {
     /// Mirror of `ProblemKind`, kept a String on purpose: a kind this app does not know
     /// (a newer daemon) decodes as itself and the Console shows it with the default glyph.
     /// Today: permission.accessibility, permission.screenRecording, permission.microphone,
-    /// permission.fullDiskAccess, permission.other, brain.unavailable, brain.probe,
+    /// permission.fullDiskAccess, permission.other, brain.unavailable, brain.probe, brain.local,
     /// voice.limit, voice.connection, voice.key, hands.helper, disk.low, dock, daemon,
-    /// crash, other. `dock` is Hormes twice in the Dock; its remedy is "Fix the Dock"
-    /// (`problem.retry {kind:"dock"}`).
+    /// crash, other, automation.missed, automation.blocked, automation.budget,
+    /// automation.notifications, automation.watch, automation.failed (SL-15: an unattended fire
+    /// failed, a red recipe exit there in the morning), app.version (APP-3: the app and the daemon
+    /// are from different builds; the remedy restarts the daemon, and `remedy.copy` is pnpm build:mac
+    /// for a skew that stays, an app older than the daemon).
+    /// `dock` is Hormes twice in the Dock; its remedy is "Fix the Dock"
+    /// (`problem.retry {kind:"dock"}`). `brain.local` is the local server or model needing
+    /// User — not running, nothing pulled that can call tools, the picked id gone, a cloud tag,
+    /// a window too small: amber, with the command to run in `remedy.copy`.
     public var kind: String
     public var text: String
     public var remedy: ProblemRemedy?
@@ -759,7 +1009,695 @@ public struct TrashInfo: Codable, Equatable {
     public var bytes: Double
 }
 
+
+// MARK: - Automations (mirror of Automation / AutomationWhen / AutomationAction / AutomationClauses /
+// RingLine / AutomationPress / AutomationEvent / AutomationSettings / ShellRecipe — design11).
+//
+// Flat structs of optionals: every `kind` stays a String so a kind this app does not know (a newer
+// daemon, a later pass) decodes and shows with the default glyph instead of failing the snapshot.
+
+/// A local wall-clock recurrence. `kind`: weekly (days, at) · interval (everyMs, anchorAt) · monthly (nth, weekday, at) · monthday (day, at).
+public struct Recurrence: Codable, Equatable {
+    public var kind: String
+    public var days: [String]?
+    public var at: String?
+    public var everyMs: Double?
+    public var anchorAt: Double?
+    public var nth: Int?
+    public var weekday: String?
+    public var day: Int?
+}
+
+/// A signal the daemon sees without a brain. `kind`: folder.file · download.done · app.launch · app.quit ·
+/// mac.wake · screen.unlock · display.connected · display.disconnected · recipe.red · agent.status.
+public struct SystemEvent: Codable, Equatable {
+    public var kind: String
+    public var path: String?
+    public var glob: String?
+    public var settleMs: Double?
+    public var app: String?
+    public var recipe: String?
+    public var everySeconds: Double?
+    public var agent: String?
+    public var status: String?
+}
+
+/// When a row fires. `kind`: at (at) · in (ms) · every (every, phrase) · on (on).
+public struct AutomationWhen: Codable, Equatable {
+    public var kind: String
+    public var at: Double?
+    public var ms: Double?
+    public var every: Recurrence?
+    public var phrase: String?
+    public var on: SystemEvent?
+}
+
+public struct AutomationBudget: Codable, Equatable {
+    public var steps: Int
+    public var seconds: Double
+}
+
+/// What happens. `kind`: chime (line, sound) · say (line) · notify (title, body, open) · open (app, url, path) ·
+/// file (into) · run-recipe (recipe) · press (app, key) · wake-brain (prompt, budget, speak).
+public struct AutomationAction: Codable, Equatable {
+    public var kind: String
+    public var line: String?
+    public var sound: String?
+    public var title: String?
+    public var body: String?
+    public var open: String?
+    public var app: String?
+    public var url: String?
+    public var path: String?
+    public var into: String?
+    public var recipe: String?
+    public var key: String?
+    public var prompt: String?
+    public var budget: AutomationBudget?
+    public var speak: Bool?
+
+    /// The kinds that act on the Mac (a row carries at most one).
+    public static let actingKinds: Set<String> = ["open", "file", "run-recipe", "press", "wake-brain"]
+    public var isActing: Bool { AutomationAction.actingKinds.contains(kind) }
+}
+
+/// "HH:mm" to "HH:mm", local; wraps midnight when `to` is before `from`.
+public struct ClockSpan: Codable, Equatable {
+    public var from: String
+    public var to: String
+    public init(from: String, to: String) { self.from = from; self.to = to }
+    public var json: [String: Any] { ["from": from, "to": to] }
+}
+
+public struct AutomationClauses: Codable, Equatable {
+    public var window: ClockSpan?
+    public var days: [String]?
+    /// `true` (a one-shot watcher) or "day" (at most once per local day); a JSON bool or string.
+    public var once: JSONValue?
+    public var cooldown: Double?
+    public var until: Double?
+    /// "respect" or "override" (alarms default override); optional so a bare row decodes.
+    public var quiet: String?
+}
+
+public struct AutomationCreatedBy: Codable, Equatable {
+    public var by: String
+    public var chainId: String?
+    public var delegationId: String?
+    public var request: String
+}
+
+/// The set-up yes for run-recipe / press / wake-brain: when, and the words User heard (the cost line).
+public struct AutomationConfirmed: Codable, Equatable {
+    public var at: Double
+    public var heard: String
+}
+
+/// The Console's word for a row, derived as the contract's `automationKind()` derives it.
+public enum AutomationKindWord: String {
+    case alarm, timer, reminder, routine, watcher
+
+    public init(when: AutomationWhen, then: [AutomationAction]) {
+        let first = then.first?.kind
+        switch when.kind {
+        case "in": self = .timer
+        case "on": self = .watcher
+        case "every": self = first == "chime" ? .alarm : .routine
+        default: self = first == "chime" ? .alarm : .reminder
+        }
+    }
+
+    /// Capitalised, for a head or an anchor word: "Alarm".
+    public var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+}
+
+public struct Automation: Codable, Identifiable, Equatable {
+    public var id: String
+    public var name: String
+    public var when: AutomationWhen
+    public var then: [AutomationAction]
+    public var clauses: AutomationClauses
+    public var echo: String
+    /// armed · snoozed · firing · fired · deferred · paused · done · failed · trashed (a String: a newer state still decodes).
+    public var state: String
+    public var nextAt: Double?
+    public var lastFiredAt: Double?
+    public var lastDetail: String?
+    public var fires: Int
+    public var missed: Int
+    public var snoozedUntil: Double?
+    public var createdAt: Double
+    public var updatedAt: Double
+    public var createdBy: AutomationCreatedBy
+    public var confirmed: AutomationConfirmed?
+
+    public var kind: AutomationKindWord { AutomationKindWord(when: when, then: then) }
+    public var isTerminal: Bool { state == "done" || state == "trashed" }
+    /// A wake-brain row spends brain minutes: the `billed` badge.
+    public var isBilled: Bool { then.contains { $0.kind == "wake-brain" } }
+}
+
+/// A press a ring offers. `kind`: snooze (minutes) · done · open (target).
+public struct AutomationPress: Codable, Equatable {
+    public var kind: String
+    public var minutes: Int?
+    public var target: String?
+}
+
+/// The one line the island shows while a row is `fired`.
+public struct RingLine: Codable, Equatable {
+    public var id: String
+    public var kind: String
+    public var name: String
+    public var line: String
+    public var calm: String?
+    public var at: Double
+    public var lateMs: Double?
+    public var presses: [AutomationPress]
+    public var more: Int
+}
+
+/// The foot's "next Timer 12:00 · pasta".
+public struct NextFire: Codable, Equatable {
+    public var id: String
+    public var kind: String
+    public var name: String
+    public var at: Double
+}
+
+/// Why a fire was missed or skipped (mirror of MissedWhy): Hormes was off, the Mac slept through it, quiet hours held
+/// it, the brain budget was spent, or a time zone move put its wall clock behind now. The wire fields stay `String`
+/// (`AutomationEvent.why`, `LedgerRow.why`), so a value from a newer daemon still decodes; read them through this.
+public enum MissedWhy: String, Codable, CaseIterable {
+    case daemonDown = "daemon-down"
+    case macSlept = "mac-slept"
+    case quietHours = "quiet-hours"
+    case budget
+    case zoneMoved = "zone-moved"
+}
+
+/// One change on one row (`automation.event`). `kind`: set (automation) · fired (actions, line, ok, detail,
+/// lateMs, presses, ring) · state (state, nextAt, detail) · missed (dueAt, lateMs, skipped, why: a MissedWhy) · tick (remainingMs).
+public struct AutomationEvent: Codable, Equatable {
+    public var seq: Int
+    public var at: Double
+    public var id: String
+    public var kind: String
+    public var automation: Automation?
+    public var actions: [String]?
+    public var line: String?
+    public var ok: Bool?
+    public var detail: String?
+    public var lateMs: Double?
+    public var presses: [AutomationPress]?
+    public var state: String?
+    public var nextAt: Double?
+    public var dueAt: Double?
+    public var skipped: Bool?
+    public var why: String?
+    public var remainingMs: Double?
+    /// `fired` (SL-14): true when the fire put a ring up, false when it only acted (a routine that opened an app).
+    /// nil from a daemon before the field.
+    public var ring: Bool?
+}
+
+/// A recipe is never deleted: `recipe.trash` stamps `trashedAt` (hidden from pickers, refused as a
+/// target, listed under Trash with Restore); `recipe.restore` clears it.
+public struct ShellRecipe: Codable, Equatable, Identifiable {
+    public var name: String
+    public var command: String
+    public var cwd: String?
+    public var timeoutSeconds: Double
+    public var approvedAt: Double
+    public var trashedAt: Double?
+    public var id: String { name }
+    public var isTrashed: Bool { trashedAt != nil }
+
+    public init(name: String, command: String, cwd: String?, timeoutSeconds: Double, approvedAt: Double, trashedAt: Double? = nil) {
+        self.name = name; self.command = command; self.cwd = cwd; self.timeoutSeconds = timeoutSeconds; self.approvedAt = approvedAt; self.trashedAt = trashedAt
+    }
+
+    public var json: [String: Any] {
+        var o: [String: Any] = ["name": name, "command": command, "timeoutSeconds": timeoutSeconds, "approvedAt": approvedAt]
+        if let cwd { o["cwd"] = cwd }
+        if let trashedAt { o["trashedAt"] = trashedAt }
+        return o
+    }
+}
+
+/// Settings.automations: the master switch, the kinds that may fire while asleep, quiet hours, the recipes.
+public struct AutomationSettings: Codable, Equatable {
+    public var enabled: Bool
+    public var unattended: [String]
+    public var quietHours: ClockSpan?
+    public var snoozeMinutes: Int
+    public var wakeBudgetMinutesPerDay: Int
+    public var recipes: [ShellRecipe]
+    public var openAtLogin: Bool
+
+    public init(enabled: Bool, unattended: [String], quietHours: ClockSpan?, snoozeMinutes: Int, wakeBudgetMinutesPerDay: Int, recipes: [ShellRecipe], openAtLogin: Bool) {
+        self.enabled = enabled; self.unattended = unattended; self.quietHours = quietHours; self.snoozeMinutes = snoozeMinutes
+        self.wakeBudgetMinutesPerDay = wakeBudgetMinutesPerDay; self.recipes = recipes; self.openAtLogin = openAtLogin
+    }
+
+    /// The contract's DEFAULT_SETTINGS.automations.
+    public static let standard = AutomationSettings(enabled: true, unattended: ["chime", "say", "notify", "open", "file"], quietHours: nil, snoozeMinutes: 10, wakeBudgetMinutesPerDay: 5, recipes: [], openAtLogin: false)
+
+    /// The whole block as a `set-settings` patch value (the engine replaces it whole).
+    public var json: [String: Any] {
+        var o: [String: Any] = ["enabled": enabled, "unattended": unattended, "snoozeMinutes": snoozeMinutes, "wakeBudgetMinutesPerDay": wakeBudgetMinutesPerDay,
+                                "recipes": recipes.map { $0.json }, "openAtLogin": openAtLogin]
+        if let quietHours { o["quietHours"] = quietHours.json }
+        return o
+    }
+}
+
+/// `automation.set`'s row as the Console form or the CLI sends it: the engine fills id, state, fires, the stamps and createdBy.
+/// One `when` grammar: the Console sends User's words as `whenPhrase` and the engine parses them with core's
+/// `parseWhen` (a refusal carries its error text); `when` is given only by a sender that already holds the parsed form.
+public struct AutomationDraft: Encodable, Equatable {
+    public var id: String?
+    public var name: String
+    public var when: AutomationWhen?
+    public var whenPhrase: String?
+    public var then: [AutomationAction]
+    public var clauses: AutomationClauses
+    public var echo: String
+
+    public init(id: String? = nil, name: String, when: AutomationWhen? = nil, whenPhrase: String? = nil, then: [AutomationAction], clauses: AutomationClauses, echo: String) {
+        self.id = id; self.name = name; self.when = when; self.whenPhrase = whenPhrase; self.then = then; self.clauses = clauses; self.echo = echo
+    }
+
+    /// The draft as a JSON object (nil fields left out), for `EngineCommand.json`.
+    public var json: [String: Any] {
+        guard let data = try? JSONEncoder().encode(self), let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return ["name": name, "echo": echo] }
+        return o
+    }
+}
+
+// MARK: - Automation frames (daemon → app: `local.say`, `notify`; app → daemon: `system.signal`).
+
+/// `local.say`: the app plays the earcon and the local speaker reads `text` — never model text except a redacted wake-brain line.
+public struct LocalSayMessage: Codable, Equatable {
+    public var text: String?
+    /// The file, in the old system names: Pop · Glass · Ping · Hero (`Earcon.named`).
+    public var sound: String?
+    /// What it rings for — `alarm` · `timer` · `chime`, the automation's kind as the engine set it (`Ring.of`); nil
+    /// for an open's tink, and from a daemon before the field (the name decides then, as it did).
+    public var ring: String?
+    public var automationId: String
+
+    public init(text: String? = nil, sound: String? = nil, ring: String? = nil, automationId: String) {
+        self.text = text; self.sound = sound; self.ring = ring; self.automationId = automationId
+    }
+}
+
+/// `notify`: a banner with the ring's presses; a press lands on the same row as the island's.
+public struct NotifyMessage: Codable, Equatable {
+    public var id: String
+    public var title: String
+    public var body: String?
+    public var presses: [AutomationPress]
+    public var automationId: String
+}
+
+/// A signal the app observes on User's behalf and forwards (`system.signal`): data, never a command.
+/// `kind`: app.launch · app.quit (app, bundleId) · mac.wake · mac.sleep · screen.unlock · screen.lock ·
+/// display.connected · display.disconnected · clock.changed.
+public struct SystemSignal: Equatable {
+    public var kind: String
+    public var app: String?
+    public var bundleId: String?
+
+    public init(kind: String, app: String? = nil, bundleId: String? = nil) { self.kind = kind; self.app = app; self.bundleId = bundleId }
+
+    /// The wire's ClientMessage: `{type: "system.signal", signal, at}`.
+    public func json(at: Double) -> [String: Any] {
+        var signal: [String: Any] = ["kind": kind]
+        if let app { signal["app"] = app }
+        if let bundleId { signal["bundleId"] = bundleId }
+        return ["type": "system.signal", "signal": signal, "at": at]
+    }
+}
+
+// MARK: - Audio state (design12: the mirror of the protocol's AudioState / AudioDeviceInfo)
+
+/// One audio device as the HAL described it: `rate` on a Bluetooth headset is the hands-free
+/// tell (16 000 / 8 000 narrowed, 44 100+ full quality). Plain fields; the frame's field names.
+public struct AudioDeviceInfo: Codable, Equatable {
+    public var name: String
+    public var uid: String
+    public var rate: Double
+    public var channels: Int
+    public var transport: String
+
+    public init(name: String, uid: String, rate: Double, channels: Int, transport: String) {
+        self.name = name; self.uid = uid; self.rate = rate; self.channels = channels; self.transport = transport
+    }
+
+    public var json: [String: Any] { ["name": name, "uid": uid, "rate": rate, "channels": channels, "transport": transport] }
+}
+
+/// The audio graph read back — what is, not what was asked for. The app builds it from
+/// `AudioStateReadback`, sends it as the `audio-state` frame and the daemon keeps it in the
+/// snapshot. Strings and numbers only; `sharedWith` carries process NAMES (mapped by the app),
+/// nil when the HAL cannot say — never an empty list for "unknown".
+public struct AudioStateInfo: Codable, Equatable {
+    public var running: Bool
+    public var voiceProcessing: Bool
+    public var duckLevel: Int?
+    public var advancedDucking: Bool?
+    public var agc: Bool?
+    public var bypassed: Bool?
+    public var rung: Int
+    public var wiring: String
+    public var hears: AudioDeviceInfo?
+    public var speaks: AudioDeviceInfo?
+    public var tapFormat: String
+    public var recording: Bool
+    public var fallback: Bool
+    public var guardOn: Bool
+    public var guardTailMs: Int
+    public var guardHeldMs: Int?
+    /// Milliseconds of wire the `awake` earcon held since the graph was asked to start; nil from a build before it.
+    public var earconHeldMs: Int?
+    public var gated: Int
+    public var chunks: Int
+    public var breakthroughs: Int
+    public var sharedWith: [String]?
+    public var inputMuted: Bool
+    public var aggregatePresent: Bool
+    public var since: Double?
+    /// Voice PLAN W1.5: the speaker player, the barge-in duck and what reached the speaker, since the graph started.
+    /// nil from a build that does not count them.
+    public var playout: AudioPlayoutInfo?
+    public var duck: AudioDuckInfo?
+    public var output: AudioOutputInfo?
+
+    public init(running: Bool = false, voiceProcessing: Bool = false, duckLevel: Int? = nil, advancedDucking: Bool? = nil, agc: Bool? = nil,
+                bypassed: Bool? = nil, rung: Int = 0, wiring: String = "", hears: AudioDeviceInfo? = nil, speaks: AudioDeviceInfo? = nil,
+                tapFormat: String = "", recording: Bool = false, fallback: Bool = false, guardOn: Bool = false, guardTailMs: Int = 0,
+                guardHeldMs: Int? = nil, earconHeldMs: Int? = nil, gated: Int = 0, chunks: Int = 0, breakthroughs: Int = 0, sharedWith: [String]? = nil,
+                inputMuted: Bool = false, aggregatePresent: Bool = false, since: Double? = nil,
+                playout: AudioPlayoutInfo? = nil, duck: AudioDuckInfo? = nil, output: AudioOutputInfo? = nil) {
+        self.running = running; self.voiceProcessing = voiceProcessing; self.duckLevel = duckLevel; self.advancedDucking = advancedDucking
+        self.agc = agc; self.bypassed = bypassed; self.rung = rung; self.wiring = wiring; self.hears = hears; self.speaks = speaks
+        self.tapFormat = tapFormat; self.recording = recording; self.fallback = fallback; self.guardOn = guardOn; self.guardTailMs = guardTailMs
+        self.guardHeldMs = guardHeldMs; self.earconHeldMs = earconHeldMs; self.gated = gated; self.chunks = chunks; self.breakthroughs = breakthroughs; self.sharedWith = sharedWith
+        self.inputMuted = inputMuted; self.aggregatePresent = aggregatePresent; self.since = since
+        self.playout = playout; self.duck = duck; self.output = output
+    }
+
+    /// The frame's `state` object: exactly the protocol's AudioState field names, booleans as
+    /// booleans, counters as numbers, optionals absent rather than null.
+    public var json: [String: Any] {
+        var o: [String: Any] = [
+            "running": running, "voiceProcessing": voiceProcessing, "rung": rung, "wiring": wiring, "tapFormat": tapFormat,
+            "recording": recording, "fallback": fallback, "guardOn": guardOn, "guardTailMs": guardTailMs,
+            "gated": gated, "chunks": chunks, "breakthroughs": breakthroughs, "inputMuted": inputMuted, "aggregatePresent": aggregatePresent,
+        ]
+        if let duckLevel { o["duckLevel"] = duckLevel }
+        if let advancedDucking { o["advancedDucking"] = advancedDucking }
+        if let agc { o["agc"] = agc }
+        if let bypassed { o["bypassed"] = bypassed }
+        if let hears { o["hears"] = hears.json }
+        if let speaks { o["speaks"] = speaks.json }
+        if let guardHeldMs { o["guardHeldMs"] = guardHeldMs }
+        if let earconHeldMs { o["earconHeldMs"] = earconHeldMs }
+        if let sharedWith { o["sharedWith"] = sharedWith }
+        if let since { o["since"] = since }
+        if let playout { o["playout"] = playout.json }
+        if let duck { o["duck"] = duck.json }
+        if let output { o["output"] = output.json }
+        return o
+    }
+}
+
+// MARK: - Playback telemetry (voice PLAN W1.5: mirrors of AudioPlayout / AudioDuck / AudioDuckLast / AudioOutput /
+// LiveAudio)
+//
+// Numbers and three closed-vocabulary words (the duck's source and reason, the mix format); nothing quotes what
+// User or Hormes said. Each one decodes field by field: a field this build reads differently (a newer app or
+// daemon) comes back nil or 0. A value that is not an object at all (`"playout": "x"`, `"liveAudio": [1, 2]`)
+// comes back nil where it rides, never a struct of invented zeros. Neither costs the snapshot or the row it rides
+// in. `json` writes finite numbers only (silence is -inf dBFS, which JSONSerialization cannot write) and leaves an
+// absent optional out, so the frame always passes the daemon's isAudioState.
+
+/// The playback telemetry types. Each one's decoder throws when its value is not an object; where one rides
+/// (AudioStateInfo, Snapshot, LedgerRow, AudioDuckInfo), the parent reads it through the `decodeIfPresent` below,
+/// so that throw becomes nil and the parent still decodes.
+protocol SoftTelemetry: Decodable {}
+
+extension KeyedDecodingContainer {
+    /// A telemetry object, or nil when it is absent, null or not an object. Overload resolution prefers this to the
+    /// generic `decodeIfPresent` for a SoftTelemetry type, in the synthesized decoders too.
+    func decodeIfPresent<T: SoftTelemetry>(_ type: T.Type, forKey key: Key) throws -> T? {
+        try? decode(T.self, forKey: key)
+    }
+}
+
+private extension KeyedDecodingContainer {
+    /// One telemetry field, or nil when it is absent or typed differently.
+    func soft<T: Decodable>(_ key: Key) -> T? { (try? decodeIfPresent(T.self, forKey: key)) ?? nil }
+}
+
+/// A required telemetry number as the wire takes it: finite, else 0.
+private func wireNumber(_ value: Double) -> Double { value.isFinite ? value : 0 }
+
+/// An optional telemetry number under `key`, only when it is there and finite.
+private func putNumber(_ o: inout [String: Any], _ key: String, _ value: Double?) {
+    if let value, value.isFinite { o[key] = value }
+}
+
+/// The speaker player since the graph started (mirror of AudioPlayout). `…Ms` are milliseconds of audio.
+public struct AudioPlayoutInfo: Codable, Equatable {
+    public var chunks: Int = 0
+    /// The player ran dry mid-stream: how often, for how long in all, and the longest hole.
+    public var underruns: Int = 0
+    public var underrunMs: Double = 0
+    public var longestUnderrunMs: Double = 0
+    /// The shadow zero-cushion count: the player of before the cushion, in the same session.
+    public var wouldBeUnderruns: Int = 0
+    public var resets: Int = 0
+    public var targetMs: Double = 0
+    public var queuedMs: Double = 0
+    /// nil when nothing was scheduled this window.
+    public var queuedMinMs: Double?
+    /// This window's longest wait on the audio queue (since the previous frame), and the longest since the graph started.
+    public var lateMaxMs: Double = 0
+    public var lateMaxGraphMs: Double?
+    /// Arrived while the graph was down.
+    public var droppedChunks: Int = 0
+    public var droppedMs: Double = 0
+}
+
+extension AudioPlayoutInfo: SoftTelemetry {
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        chunks = c.soft(.chunks) ?? 0
+        underruns = c.soft(.underruns) ?? 0
+        underrunMs = c.soft(.underrunMs) ?? 0
+        longestUnderrunMs = c.soft(.longestUnderrunMs) ?? 0
+        wouldBeUnderruns = c.soft(.wouldBeUnderruns) ?? 0
+        resets = c.soft(.resets) ?? 0
+        targetMs = c.soft(.targetMs) ?? 0
+        queuedMs = c.soft(.queuedMs) ?? 0
+        queuedMinMs = c.soft(.queuedMinMs)
+        lateMaxMs = c.soft(.lateMaxMs) ?? 0
+        lateMaxGraphMs = c.soft(.lateMaxGraphMs)
+        droppedChunks = c.soft(.droppedChunks) ?? 0
+        droppedMs = c.soft(.droppedMs) ?? 0
+    }
+
+    public var json: [String: Any] {
+        var o: [String: Any] = [
+            "chunks": chunks, "underruns": underruns, "underrunMs": wireNumber(underrunMs), "longestUnderrunMs": wireNumber(longestUnderrunMs),
+            "wouldBeUnderruns": wouldBeUnderruns, "resets": resets, "targetMs": wireNumber(targetMs), "queuedMs": wireNumber(queuedMs),
+            "lateMaxMs": wireNumber(lateMaxMs), "droppedChunks": droppedChunks, "droppedMs": wireNumber(droppedMs),
+        ]
+        putNumber(&o, "queuedMinMs", queuedMinMs)
+        putNumber(&o, "lateMaxGraphMs", lateMaxGraphMs)
+        return o
+    }
+}
+
+/// The newest duck (mirror of AudioDuckLast). `source`: what started it; `reason`: why it released.
+public struct AudioDuckLastInfo: Codable, Equatable {
+    public var source: String = ""
+    public var confirmed: Bool = false
+    /// -6 unconfirmed, -20 confirmed.
+    public var depthDb: Double = 0
+    public var runDbfs: Double?
+    public var thresholdDbfs: Double?
+    /// nil while it holds.
+    public var releasedAfterMs: Double?
+    public var reason: String?
+}
+
+extension AudioDuckLastInfo: SoftTelemetry {
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        source = c.soft(.source) ?? ""
+        confirmed = c.soft(.confirmed) ?? false
+        depthDb = c.soft(.depthDb) ?? 0
+        runDbfs = c.soft(.runDbfs)
+        thresholdDbfs = c.soft(.thresholdDbfs)
+        releasedAfterMs = c.soft(.releasedAfterMs)
+        reason = c.soft(.reason)
+    }
+
+    public var json: [String: Any] {
+        var o: [String: Any] = ["source": source, "confirmed": confirmed, "depthDb": wireNumber(depthDb)]
+        putNumber(&o, "runDbfs", runDbfs)
+        putNumber(&o, "thresholdDbfs", thresholdDbfs)
+        putNumber(&o, "releasedAfterMs", releasedAfterMs)
+        if let reason { o["reason"] = reason }
+        return o
+    }
+}
+
+/// The barge-in duck since the graph started (mirror of AudioDuck): counts by kind, time ducked, the residual echo.
+public struct AudioDuckInfo: Codable, Equatable {
+    public var ducks: Int = 0
+    public var gate: Int = 0
+    public var confirmed: Int = 0
+    public var unconfirmed: Int = 0
+    public var held: Int = 0
+    public var refusedWords: Int = 0
+    public var refusedLive: Int?
+    public var wordOnsetsSkipped: Int = 0
+    /// Time at a gain under 0.9, and at -14 dB or deeper.
+    public var duckedMs: Double = 0
+    public var deepMs: Double = 0
+    /// Mic slices while Hormes is audible and the duck is idle.
+    public var residualP50Dbfs: Double?
+    public var residualP99Dbfs: Double?
+    public var echoFloorDbfs: Double?
+    public var last: AudioDuckLastInfo?
+}
+
+extension AudioDuckInfo: SoftTelemetry {
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        ducks = c.soft(.ducks) ?? 0
+        gate = c.soft(.gate) ?? 0
+        confirmed = c.soft(.confirmed) ?? 0
+        unconfirmed = c.soft(.unconfirmed) ?? 0
+        held = c.soft(.held) ?? 0
+        refusedWords = c.soft(.refusedWords) ?? 0
+        refusedLive = c.soft(.refusedLive)
+        wordOnsetsSkipped = c.soft(.wordOnsetsSkipped) ?? 0
+        duckedMs = c.soft(.duckedMs) ?? 0
+        deepMs = c.soft(.deepMs) ?? 0
+        residualP50Dbfs = c.soft(.residualP50Dbfs)
+        residualP99Dbfs = c.soft(.residualP99Dbfs)
+        echoFloorDbfs = c.soft(.echoFloorDbfs)
+        last = c.soft(.last)
+    }
+
+    public var json: [String: Any] {
+        var o: [String: Any] = [
+            "ducks": ducks, "gate": gate, "confirmed": confirmed, "unconfirmed": unconfirmed, "held": held,
+            "refusedWords": refusedWords, "wordOnsetsSkipped": wordOnsetsSkipped, "duckedMs": wireNumber(duckedMs), "deepMs": wireNumber(deepMs),
+        ]
+        if let refusedLive { o["refusedLive"] = refusedLive }
+        putNumber(&o, "residualP50Dbfs", residualP50Dbfs)
+        putNumber(&o, "residualP99Dbfs", residualP99Dbfs)
+        putNumber(&o, "echoFloorDbfs", echoFloorDbfs)
+        if let last { o["last"] = last.json }
+        return o
+    }
+}
+
+/// What reached the speaker (mirror of AudioOutput): voiced chunks before the duck, after its gain, the mixer's
+/// format (`48000 Hz ×2`), the default output's volume scalar (0..1). Every field nil until there is one to read.
+public struct AudioOutputInfo: Codable, Equatable {
+    public var rmsDbfs: Double?
+    public var peakDbfs: Double?
+    public var heardRmsDbfs: Double?
+    /// Voiced audio played, in ms: the doctor's per-minute rules divide by it. nil from an app before the field.
+    public var audibleMs: Double?
+    public var mixFormat: String?
+    public var volume: Double?
+}
+
+extension AudioOutputInfo: SoftTelemetry {
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        rmsDbfs = c.soft(.rmsDbfs)
+        peakDbfs = c.soft(.peakDbfs)
+        heardRmsDbfs = c.soft(.heardRmsDbfs)
+        audibleMs = c.soft(.audibleMs)
+        mixFormat = c.soft(.mixFormat)
+        volume = c.soft(.volume)
+    }
+
+    public var json: [String: Any] {
+        var o: [String: Any] = [:]
+        putNumber(&o, "rmsDbfs", rmsDbfs)
+        putNumber(&o, "peakDbfs", peakDbfs)
+        putNumber(&o, "heardRmsDbfs", heardRmsDbfs)
+        putNumber(&o, "audibleMs", audibleMs)
+        if let mixFormat { o["mixFormat"] = mixFormat }
+        putNumber(&o, "volume", volume)
+        return o
+    }
+}
+
+/// The daemon's own counts of the open session's audio (mirror of LiveAudio, `Snapshot.liveAudio`): Live's delta
+/// sizes and arrival times, how far it runs ahead, the frames the output gate dropped, the event loop's worst delay.
+public struct LiveAudioInfo: Codable, Equatable {
+    public var deltas: Int = 0
+    public var deltaMsP50: Double?
+    public var deltaMsMax: Double?
+    public var arrivalP99Ms: Double?
+    public var arrivalMaxMs: Double?
+    public var aheadMs: Double?
+    public var gatedFrames: Int = 0
+    public var loopDelayMaxMs: Double?
+    public var formatRate: Double?
+}
+
+extension LiveAudioInfo: SoftTelemetry {
+    public init(from decoder: Decoder) throws {
+        self.init()
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deltas = c.soft(.deltas) ?? 0
+        deltaMsP50 = c.soft(.deltaMsP50)
+        deltaMsMax = c.soft(.deltaMsMax)
+        arrivalP99Ms = c.soft(.arrivalP99Ms)
+        arrivalMaxMs = c.soft(.arrivalMaxMs)
+        aheadMs = c.soft(.aheadMs)
+        gatedFrames = c.soft(.gatedFrames) ?? 0
+        loopDelayMaxMs = c.soft(.loopDelayMaxMs)
+        formatRate = c.soft(.formatRate)
+    }
+}
+
+public struct ApprovalInfo: Codable, Equatable {
+    public var id: String
+    public var threadId: String
+    public var description: String
+    public var requiresOwner: Bool
+}
+
+public struct ProactiveSuggestion: Codable, Equatable {
+    public var id: String
+    public var agentId: String
+    public var title: String
+    public var explanation: String
+    public var request: String
+    public var at: Double
+    public var expiresAt: Double
+}
+
 public struct Snapshot: Codable, Equatable {
+    public var approval: ApprovalInfo? = nil
+    public var suggestions: [ProactiveSuggestion]? = nil
     public var phase: Phase
     public var session: SessionInfo?
     public var transcript: [TranscriptItem]
@@ -768,50 +1706,60 @@ public struct Snapshot: Codable, Equatable {
     public var connectors: [ConnectorHealth]
     public var settings: Settings
     public var permissions: Permissions
-    public var problems: [String]
+    /// Most recent problems, newest last: what kind, one line, and the one action that fixes it.
+    public var problems: [Problem]
     public var brainReady: Bool
     public var handsReady: Bool
-    /// Optional on the wire for older daemons.
-    public var setup: SetupStatus?
-    public var marks: [ScreenMark]?
+    public var setup: SetupStatus
+    /// Regions User circled, newest last.
+    public var marks: [ScreenMark]
     /// While paused: which session the pause closed and when the pause decays to sleep.
     public var pause: PauseInfo?
-    /// Today's billed seconds (for the meter). Optional on the wire for older daemons.
+    /// Today's billed seconds (for the meter); optional in the contract.
     public var usageToday: UsageToday?
-    /// The problems with their remedies; `problems` (plain text) is the same list for older surfaces.
-    public var problemsTyped: [Problem]?
     public var trash: TrashInfo?
     public var hiddenAgents: [String]?
-    /// The delegation's workers (running, and finished within the last half minute). Optional on the wire.
-    public var workers: [Worker]?
-    /// What Hormes remembers about Kevin (counts, mode, the last run). Optional on the wire.
+    /// What Hormes remembers about User (counts, mode, the last run); optional in the contract.
     public var memory: MemorySummary?
-    /// Live threads (main first) and those finished within the linger. Optional on the wire.
-    public var threads: [WorkThread]?
+    /// Every live thread (main first) and those finished within the linger.
+    public var threads: [WorkThread]
+    /// The live automation rows (armed first), then the Trash's newest eight (`state == "trashed"`); nil from a daemon before the field.
+    public var automations: [Automation]?
+    /// The newest `fired` row with a line, while one is up.
+    public var ringing: RingLine?
+    /// The foot's "next Timer 12:00 · pasta".
+    public var nextFire: NextFire?
+    /// The recipes the shell gate now rates confirm, by name: the `asks` badge, never pickable. nil from a daemon before the field.
+    public var recipesAsking: [String]?
+    /// design12: the app's audio graph as it last read itself back (`audio-state`); absent while no app is connected.
+    public var audioState: AudioStateInfo?
+    /// Voice PLAN W1.5: the daemon's own counts of the open session's audio; absent while no session is open.
+    public var liveAudio: LiveAudioInfo?
 
-    public var allThreads: [WorkThread] { threads ?? [] }
-    public var liveThreads: [WorkThread] { allThreads.filter { $0.status.isLive } }
+    public var automationRows: [Automation] { automations ?? [] }
+    public var liveThreads: [WorkThread] { threads.filter { $0.status.isLive } }
     public var spawnedLiveThreads: [WorkThread] { liveThreads.filter { $0.id != "main" } }
 
-    public var allWorkers: [Worker] { workers ?? [] }
-    public var runningWorkers: [Worker] { allWorkers.filter { $0.status.isRunning } }
-    public var setupStatus: SetupStatus { setup ?? .unknown }
-    public var screenMarks: [ScreenMark] { marks ?? [] }
-
+    /// The contract's DEFAULT_SETTINGS, no session, nothing read yet.
     public static let empty = Snapshot(
         phase: .asleep, session: nil, transcript: [], delegations: [], agents: [], connectors: [],
-        settings: Settings(voice: "cedar", brain: .auto, brainModel: "", brainBaseUrl: nil, effort: "medium", micDeviceId: nil, idleSleepMinutes: 10, autoWake: true, orbPosition: nil, wake: .standard, onboarded: nil, reflexes: nil, orbHome: nil),
-        permissions: Permissions(microphone: .unknown, screenRecording: .unknown, accessibility: .unknown),
-        problems: [], brainReady: false, handsReady: false, setup: nil, marks: [], pause: nil, usageToday: nil)
+        settings: Settings(voice: "ballad", brain: .auto, brainModel: "", brainBaseUrl: nil, effort: "medium", micDeviceId: nil,
+                           idleSleepMinutes: 10, autoWake: true, orbPosition: nil, wake: .standard, reflexes: true, orbHome: "notch",
+                           ledgerRetentionDays: 0, shotsRetentionDays: 14, threads: true, language: "en", accent: "british", memory: true,
+                           observe: true, typedWakes: false, threadOverflow: "supersede", warmThreads: 2),
+        permissions: Permissions(all: []),
+        problems: [], brainReady: false, handsReady: false, setup: .unknown, marks: [], pause: nil, usageToday: nil, threads: [])
 }
 
 // MARK: - Commands (app → engine). Encoded as {"type": ..., ...} exactly like EngineCommand.
 
 public enum EngineCommand: Equatable {
+    case work(HormesWorkCommand)
+    case calendarResult(CalendarReadResult)
     /// `stop` is the transport's stop: interrupt everything, close the session (the meter
     /// stops), sleep. `go` is its one button: wake when asleep, resume when paused.
     /// `interrupt` cancels the current work and speech but stays awake (a spoken "stop").
-    case wake, sleep, mute, unmute, stop, go
+    case sleep, mute, unmute, stop, go
     /// Sleep with a cause the ledger records ("dock" when the blob is dropped into the notch).
     case sleepCause(String)
     case interrupt(how: String)
@@ -841,11 +1789,17 @@ public enum EngineCommand: Equatable {
     case threadStop(threadId: String)
     case threadPause(threadId: String)
     case threadResume(threadId: String)
-    case threadAnswer(threadId: String, yes: Bool)
+    case threadAnswer(threadId: String, yes: Bool, pendingId: String? = nil)
+    case suggestionAccept(id: String)
+    case suggestionDismiss(id: String)
     case threadSay(threadId: String, text: String)
     case agentHistory(agentId: String, before: String)
-    /// Kevin circled a region (global points, y down) — with his stroke.
+    /// User circled a region (global points, y down) — with his stroke.
     case markAdd(rect: Rect, path: [Point2]?)
+    /// Forget one circled region (the × on a thumbnail); an unknown id changes nothing.
+    case markRemove(id: String)
+    /// Capture the frontmost window whole as a mark (the notch's Window box).
+    case markWindow
     case markClear
     /// Restart the engine process on its current code (the app respawns it).
     case daemonRestart
@@ -865,19 +1819,34 @@ public enum EngineCommand: Equatable {
     case ledgerRestoreDay(day: String)
     case ledgerSweep
     case agentHide(agentId: String, hidden: Bool)
-    /// Stop one worker from its Console row; the others and the session carry on.
-    case workerStop(workerId: String)
     case problemRetry(kind: String)
     case openConsole, openLedger
     case requestPermission(String)
-    /// Secrets to write to ~/.hormes/env; nil removes. Keys: OPENAI_API_KEY, ANTHROPIC_API_KEY, HORMES_BRAIN_API_KEY.
+    /// Secrets to write to ~/.hormes/env; nil removes. Keys: OPENAI_API_KEY, ANTHROPIC_API_KEY, HORMES_BRAIN_API_KEY, GEMINI_API_KEY.
     case setSecrets([String: String?])
     /// Re-check the OpenAI key and the brain; results arrive in snapshot.setup.
     case probeSetup
+    // Automations (the Console's rail, the island's presses, the CLI). Never a deletion: Move to Trash / Restore.
+    case automationSet(AutomationDraft)
+    case automationSnooze(id: String, minutes: Int)
+    case automationDone(id: String)
+    /// A repeater rolls to its next occurrence; a one-shot is done without firing.
+    case automationSkip(id: String)
+    case automationPause(id: String)
+    case automationResume(id: String)
+    case automationRename(id: String, name: String)
+    case automationTrash(id: String)
+    case automationRestore(id: String)
+    /// Fire it now (refused by the engine unless User is there to hear it).
+    case automationRun(id: String)
+    case recipeSet(ShellRecipe)
+    case recipeTrash(name: String)
+    case recipeRestore(name: String)
 
     public var json: [String: Any] {
         switch self {
-        case .wake: return ["type": "wake"]
+        case .work(let command): return ["type": "work.command", "command": command.json]
+        case .calendarResult(let result): return ["type": "calendar.result", "result": result.json]
         case .sleep: return ["type": "sleep"]
         case .sleepCause(let cause): return ["type": "sleep", "cause": cause]
         case .mute: return ["type": "mute"]
@@ -918,13 +1887,20 @@ public enum EngineCommand: Equatable {
         case .threadStop(let id): return ["type": "thread.stop", "threadId": id]
         case .threadPause(let id): return ["type": "thread.pause", "threadId": id]
         case .threadResume(let id): return ["type": "thread.resume", "threadId": id]
-        case .threadAnswer(let id, let yes): return ["type": "thread.answer", "threadId": id, "yes": yes]
+        case .threadAnswer(let id, let yes, let pendingId):
+            var o: [String: Any] = ["type": "thread.answer", "threadId": id, "yes": yes]
+            if let pendingId { o["pendingId"] = pendingId }
+            return o
+        case .suggestionAccept(let id): return ["type": "suggestion.accept", "id": id]
+        case .suggestionDismiss(let id): return ["type": "suggestion.dismiss", "id": id]
         case .threadSay(let id, let text): return ["type": "thread.say", "threadId": id, "text": text]
         case .agentHistory(let id, let before): return ["type": "agent.history", "agentId": id, "before": before]
         case .markAdd(let rect, let path):
             var o: [String: Any] = ["type": "mark.add", "rect": ["x": rect.x, "y": rect.y, "w": rect.w, "h": rect.h]]
             if let path { o["path"] = path.map { ["x": $0.x, "y": $0.y] } }
             return o
+        case .markRemove(let id): return ["type": "mark.remove", "id": id]
+        case .markWindow: return ["type": "mark.window"]
         case .markClear: return ["type": "mark.clear"]
         case .daemonRestart: return ["type": "daemon.restart"]
         case .pause: return ["type": "pause"]
@@ -941,7 +1917,6 @@ public enum EngineCommand: Equatable {
         case .ledgerRestoreDay(let day): return ["type": "ledger.restore-day", "day": day]
         case .ledgerSweep: return ["type": "ledger.sweep"]
         case .agentHide(let id, let hidden): return ["type": "agent.hide", "agentId": id, "hidden": hidden]
-        case .workerStop(let id): return ["type": "worker.stop", "workerId": id]
         case .problemRetry(let kind): return ["type": "problem.retry", "kind": kind]
         case .openConsole: return ["type": "open-console"]
         case .openLedger: return ["type": "open-ledger"]
@@ -951,19 +1926,36 @@ public enum EngineCommand: Equatable {
             for (k, v) in secrets { o[k] = v ?? NSNull() }
             return ["type": "config.set-secrets", "secrets": o]
         case .probeSetup: return ["type": "config.probe"]
+        case .automationSet(let draft): return ["type": "automation.set", "automation": draft.json]
+        case .automationSnooze(let id, let minutes): return ["type": "automation.snooze", "id": id, "minutes": minutes]
+        case .automationDone(let id): return ["type": "automation.done", "id": id]
+        case .automationSkip(let id): return ["type": "automation.skip", "id": id]
+        case .automationPause(let id): return ["type": "automation.pause", "id": id]
+        case .automationResume(let id): return ["type": "automation.resume", "id": id]
+        case .automationRename(let id, let name): return ["type": "automation.rename", "id": id, "name": name]
+        case .automationTrash(let id): return ["type": "automation.trash", "id": id]
+        case .automationRestore(let id): return ["type": "automation.restore", "id": id]
+        case .automationRun(let id): return ["type": "automation.run", "id": id]
+        case .recipeSet(let recipe): return ["type": "recipe.set", "recipe": recipe.json]
+        case .recipeTrash(let name): return ["type": "recipe.trash", "name": name]
+        case .recipeRestore(let name): return ["type": "recipe.restore", "name": name]
         }
     }
 }
 
 /// Partial<Settings>; only set fields are sent.
 public struct SettingsPatch: Equatable {
+    public var voiceProvider: String?
+    public var geminiModel: String?
+    public var geminiVoice: String?
+    public var ownerApproval: Bool?
+    public var proactive: Bool?
     public var voice: String?
     public var brain: BrainKind?
     public var brainModel: String?
     /// `.some(nil)` clears it (system default / none).
     public var brainBaseUrl: String??
     public var effort: String?
-    public var onboarded: Bool?
     public var micDeviceId: String??
     public var idleSleepMinutes: Double?
     public var autoWake: Bool?
@@ -974,41 +1966,55 @@ public struct SettingsPatch: Equatable {
     public var orbHome: String?
     public var ledgerRetentionDays: Int?
     public var shotsRetentionDays: Int?
-    public var workers: Bool?
+    public var threads: Bool?
     public var language: String?
     public var accent: String?
     public var memory: Bool?
     public var observe: Bool?
-    public var replayFinish: Bool?
     public var typedWakes: Bool?
     public var threadOverflow: String?
     public var warmThreads: Int?
+    /// Replaces the whole automations block (Settings › Automations writes it via `set-settings`).
+    public var automations: AutomationSettings?
+    /// Replaces the whole audio block (Settings › Audio › Recording, the status menu, ⌃⌥R — `set-settings` only).
+    public var audio: AudioSettings?
+    /// The user's name; "" clears it (the engine falls back to the account's full name).
+    public var userName: String?
 
     public init(voice: String? = nil, brain: BrainKind? = nil, brainModel: String? = nil, brainBaseUrl: String?? = nil, effort: String? = nil,
-                onboarded: Bool? = nil, micDeviceId: String?? = nil, idleSleepMinutes: Double? = nil, autoWake: Bool? = nil, orbPosition: OrbPosition? = nil,
+                micDeviceId: String?? = nil, idleSleepMinutes: Double? = nil, autoWake: Bool? = nil, orbPosition: OrbPosition? = nil,
                 wake: WakeSettings? = nil, reflexes: Bool? = nil, orbHome: String? = nil,
-                workers: Bool? = nil, language: String? = nil, accent: String? = nil, memory: Bool? = nil) {
+                threads: Bool? = nil, language: String? = nil, accent: String? = nil, memory: Bool? = nil) {
         self.voice = voice; self.brain = brain; self.brainModel = brainModel; self.brainBaseUrl = brainBaseUrl; self.effort = effort
-        self.onboarded = onboarded
         self.micDeviceId = micDeviceId; self.idleSleepMinutes = idleSleepMinutes; self.autoWake = autoWake; self.orbPosition = orbPosition
         self.wake = wake
         self.reflexes = reflexes; self.orbHome = orbHome
-        self.workers = workers; self.language = language; self.accent = accent; self.memory = memory
+        self.threads = threads; self.language = language; self.accent = accent; self.memory = memory
     }
 
     /// The thread knobs, set after init (rarely patched; Settings › Threads).
-    public mutating func setThreads(observe: Bool? = nil, replayFinish: Bool? = nil, typedWakes: Bool? = nil, threadOverflow: String? = nil, warmThreads: Int? = nil) {
-        self.observe = observe; self.replayFinish = replayFinish; self.typedWakes = typedWakes; self.threadOverflow = threadOverflow; self.warmThreads = warmThreads
+    public mutating func setThreads(observe: Bool? = nil, typedWakes: Bool? = nil, threadOverflow: String? = nil, warmThreads: Int? = nil) {
+        self.observe = observe; self.typedWakes = typedWakes; self.threadOverflow = threadOverflow; self.warmThreads = warmThreads
     }
+
+    /// The audio block, set after init (design12).
+    public mutating func setAudio(_ a: AudioSettings) { audio = a }
+
+    /// The user's name, set after init (Console › Settings, Settings › Session); trimmed, "" = unset.
+    public mutating func setUserName(_ name: String) { userName = name.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     public var json: [String: Any] {
         var o: [String: Any] = [:]
+        if let v = voiceProvider { o["voiceProvider"] = v }
+        if let v = geminiModel { o["geminiModel"] = v }
+        if let v = geminiVoice { o["geminiVoice"] = v }
         if let v = voice { o["voice"] = v }
+        if let v = ownerApproval { o["ownerApproval"] = v }
+        if let v = proactive { o["proactive"] = v }
         if let v = brain { o["brain"] = v.rawValue }
         if let v = brainModel { o["brainModel"] = v }
         if let v = effort { o["effort"] = v }
         if let v = brainBaseUrl { o["brainBaseUrl"] = v ?? NSNull() }
-        if let v = onboarded { o["onboarded"] = v }
         if let v = micDeviceId { o["micDeviceId"] = v ?? NSNull() }
         if let v = idleSleepMinutes { o["idleSleepMinutes"] = v }
         if let v = autoWake { o["autoWake"] = v }
@@ -1018,15 +2024,17 @@ public struct SettingsPatch: Equatable {
         if let v = orbHome { o["orbHome"] = v }
         if let v = ledgerRetentionDays { o["ledgerRetentionDays"] = v }
         if let v = shotsRetentionDays { o["shotsRetentionDays"] = v }
-        if let v = workers { o["workers"] = v }
+        if let v = threads { o["threads"] = v }
         if let v = language { o["language"] = v }
         if let v = accent { o["accent"] = v }
         if let v = memory { o["memory"] = v }
         if let v = observe { o["observe"] = v }
-        if let v = replayFinish { o["replayFinish"] = v }
         if let v = typedWakes { o["typedWakes"] = v }
         if let v = threadOverflow { o["threadOverflow"] = v }
         if let v = warmThreads { o["warmThreads"] = v }
+        if let v = automations { o["automations"] = v.json }
+        if let v = audio { o["audio"] = v.json }
+        if let v = userName { o["userName"] = v }
         return o
     }
 }
@@ -1057,12 +2065,6 @@ public enum OverlayCommand: Equatable {
     case rect(rect: Rect, label: String?, ttlMs: Double?, tone: OverlayTone)
     case text(x: Double, y: Double, text: String, ttlMs: Double?, tone: OverlayTone)
     case stroke(points: [Point2], label: String?, ttlMs: Double?, tone: OverlayTone)
-    /// The blob flies to a point and hovers dwellMs (default 2 s) before drifting home.
-    /// `thread` names the thread whose blob flies; nil = the main blob.
-    case orbFly(x: Double, y: Double, dwellMs: Double?, reason: String?, thread: String?)
-    /// The blob flies to the first point, becomes a cursor, and drags the stroke along the points.
-    case orbTrace(points: [Point2], closed: Bool, label: String?, ttlMs: Double?, tone: OverlayTone, reason: String?, thread: String?)
-    case orbHome
     case clear
 
     public init?(json: [String: Any]) {
@@ -1096,29 +2098,15 @@ public enum OverlayCommand: Equatable {
             let pts = raw.compactMap(pt)
             guard pts.count >= 2 else { return nil }
             self = .stroke(points: pts, label: json["label"] as? String, ttlMs: num("ttlMs"), tone: tone)
-        case "orb.fly":
-            guard let x = num("x"), let y = num("y") else { return nil }
-            self = .orbFly(x: x, y: y, dwellMs: num("dwellMs"), reason: json["reason"] as? String, thread: json["thread"] as? String)
-        case "orb.trace":
-            guard let raw = json["points"] as? [Any] else { return nil }
-            let pts = raw.compactMap(pt)
-            guard pts.count >= 2 else { return nil }
-            self = .orbTrace(points: pts, closed: (json["closed"] as? Bool) ?? false, label: json["label"] as? String, ttlMs: num("ttlMs"), tone: tone, reason: json["reason"] as? String, thread: json["thread"] as? String)
-        case "orb.home":
-            self = .orbHome
         case "point":
             guard let x = num("x"), let y = num("y") else { return nil }
             self = .point(x: x, y: y, label: json["label"] as? String, ttlMs: num("ttlMs"))
         case "highlight":
-            guard let r = json["rect"] as? [String: Any],
-                  let x = (r["x"] as? NSNumber)?.doubleValue, let y = (r["y"] as? NSNumber)?.doubleValue,
-                  let w = (r["w"] as? NSNumber)?.doubleValue, let h = (r["h"] as? NSNumber)?.doubleValue else { return nil }
-            self = .highlight(rect: Rect(x: x, y: y, w: w, h: h), label: json["label"] as? String, ttlMs: num("ttlMs"))
+            guard let rect = rectOf(json["rect"]) else { return nil }
+            self = .highlight(rect: rect, label: json["label"] as? String, ttlMs: num("ttlMs"))
         case "path":
-            guard let f = json["from"] as? [String: Any], let t = json["to"] as? [String: Any],
-                  let fx = (f["x"] as? NSNumber)?.doubleValue, let fy = (f["y"] as? NSNumber)?.doubleValue,
-                  let tx = (t["x"] as? NSNumber)?.doubleValue, let ty = (t["y"] as? NSNumber)?.doubleValue else { return nil }
-            self = .path(from: Point2(x: fx, y: fy), to: Point2(x: tx, y: ty), ttlMs: num("ttlMs"))
+            guard let from = pt(json["from"]), let to = pt(json["to"]) else { return nil }
+            self = .path(from: from, to: to, ttlMs: num("ttlMs"))
         case "click-pulse":
             guard let x = num("x"), let y = num("y") else { return nil }
             self = .clickPulse(x: x, y: y)
@@ -1131,6 +2119,9 @@ public enum OverlayCommand: Equatable {
 }
 
 // MARK: - Ledger rows (loosely typed: the Console renders what it recognises).
+//
+// Rows from day files before 2026-09-13 may say `worker` (a row type, a step key): all-optional
+// columns and per-row decoding (EngineClient.decodeRows) skip them.
 
 public struct LedgerRow: Codable, Identifiable {
     public var at: Double
@@ -1144,6 +2135,10 @@ public struct LedgerRow: Codable, Identifiable {
     public var summary: String?
     public var text: String?
     public var sessionId: String?
+    /// `session.started` rows: the voice, and the language and accent the session opened with.
+    public var voice: String?
+    public var language: String?
+    public var accent: String?
     public var reason: String?
     public var usageSeconds: Double?
     public var agent: AgentInfo?
@@ -1166,8 +2161,7 @@ public struct LedgerRow: Codable, Identifiable {
     public var app: String?
     public var actionClass: String?
     public var until: Double?
-    /// `worker` rows: the record at that moment. `sleep` rows: why, the cue, the farewell.
-    public var worker: Worker?
+    /// `sleep` rows: why, the cue, the farewell.
     public var cause: String?
     public var phrase: String?
     public var farewell: Bool?
@@ -1179,7 +2173,73 @@ public struct LedgerRow: Codable, Identifiable {
     /// The thread's own status word on `thread.status` / `thread.ended` rows (`status` above is the delegation's), and the change's detail.
     public var threadStatus: ThreadStatus?
     public var detail: String?
-    public var id: String { "\(type)-\(at)-\(item?.id ?? step?.id ?? delegation?.id ?? worker?.id ?? "")" }
+    /// `automation.*` rows: the wire's `id` (the automation's), the row at `set`, what a fire ran and said, how late, how long,
+    /// the brain seconds a wake-brain turn spent; `automation.state`: the new state; `automation.missed`: when it was due and why;
+    /// `recipe.set`: the recipe. `by` above says who (brain · console · cli · user · engine); `until` above is a snooze's end.
+    public var rowId: String?
+    public var automation: Automation?
+    public var actions: [String]?
+    public var ok: Bool?
+    public var line: String?
+    public var lateMs: Double?
+    public var ms: Double?
+    public var brainSeconds: Double?
+    public var state: String?
+    public var dueAt: Double?
+    public var skipped: Bool?
+    public var why: String?
+    public var recipe: ShellRecipe?
+    // design12: the `audio.guard` row — the software echo guard's counters per User turn (engine `appendGuardRow`).
+    public var tailMs: Double?
+    public var heldMs: Double?
+    public var gated: Int?
+    public var chunks: Int?
+    public var breakthroughs: Int?
+    public var fallback: Bool?
+    /// Voice PLAN W1.5: the `audio.playout` row at session close, the last playback counters (numbers only).
+    public var playout: AudioPlayoutInfo?
+    public var duck: AudioDuckInfo?
+    public var output: AudioOutputInfo?
+    public var liveAudio: LiveAudioInfo?
+    /// A decision a day's move to the Trash carried (the protocol's CarriedDecision, on conversation.* / now.* /
+    /// agent.hidden rows): written again into the move's day file, `at` the move, `decidedAt` when User decided. A
+    /// session or chain read answers it at `decidedAt`; a day's rows hold it where the move wrote it
+    /// (StreamBuilder.fromLedger's `.day` reading says so).
+    public var carried: Bool?
+    public var decidedAt: Double?
+    /// `ledger.moved` rows: per session that stays and continues a conversation, the sessions that left whose
+    /// conversation it continues (memory hides by it, decision D5).
+    public var lineage: [String: [String]]?
+    /// V8 / LM-2: the `session.closed` reason for a session the daemon died in (SESSION_LOST_REASON). The next start
+    /// sweeps before it appends anything and writes that close with the `usageSeconds` of the session's last
+    /// `session.usage` row (sessionId, usageSeconds: the coalesced billed seconds, every 60 s and at detach), 0 s when
+    /// it has none, and the newest `at` the dead daemon wrote (the largest in the newest day file). The `at` picks the
+    /// day file, so the close lands where a normal close would have, and it sorts after the session's last rows.
+    public static let lostReason = "lost"
+    /// The row's key: type · at · the first id it carries (item, step, delegation, thread, the wire's own).
+    /// An if/else ladder, not a `??` chain inside the interpolation (CI's older Swift).
+    public var id: String {
+        let tail: String
+        if let item { tail = item.id }
+        else if let step { tail = step.id }
+        else if let delegation { tail = delegation.id }
+        else if let threadId { tail = threadId }
+        else if let rowId { tail = rowId }
+        else { tail = "" }
+        return "\(type)-\(at)-\(tail)"
+    }
+
+    /// Every stored column by its wire name; `rowId` reads the wire's `id` (the struct's own `id` is derived).
+    enum CodingKeys: String, CodingKey {
+        case at, type, item, delegation, delegationId, step, status, timings, summary, text, sessionId, voice, language, accent, reason, usageSeconds, agent
+        case how, cancelled, resumedFrom, pausedMs, chainId, by, name, pinned, day, what, to, path, agentId, hidden, app, actionClass, until
+        case cause, phrase, farewell, thread, threadId, steps, seconds, threadStatus, detail
+        case rowId = "id"
+        case automation, actions, ok, line, lateMs, ms, brainSeconds, state, dueAt, skipped, why, recipe
+        case tailMs, heldMs, gated, chunks, breakthroughs, fallback
+        case playout, duck, output, liveAudio
+        case carried, decidedAt, lineage
+    }
 }
 
 // MARK: - A JSON value for tool inputs/outputs of unknown shape.
@@ -1228,3 +2288,388 @@ public let hormesJSONDecoder: JSONDecoder = {
     let d = JSONDecoder()
     return d
 }()
+
+// MARK: - Hormes durable work (packages/protocol/src/work.ts)
+public struct HormesCourse: Codable, Equatable, Identifiable { public var id, title: String }
+public struct HormesGoal: Codable, Equatable, Identifiable {
+    public var id, title, kind, state: String
+    public var criteria: [String]
+    public var next: String
+    public var version: Int
+    public var updatedAt: Double
+    public var courseId: String?
+    public var outcome: String?
+    public var deadline: Double?
+    public var criteriaVersion: Int?
+    public var assessment: String?
+}
+public struct HormesGoalInput: Codable, Equatable {
+    public var title, outcome, kind: String
+    public var criteria: [String]
+    public var deadline: Double?
+    public var courseId: String?
+}
+public struct HormesSource: Codable, Equatable, Identifiable {
+    public var id, title, kind, text: String
+    public var at: Double
+    public var url, path: String?
+    public var origin: String
+    public var courseId: String?
+}
+public struct HormesObservation: Codable, Equatable, Identifiable {
+    public var id, goalId, sessionId: String
+    public var at: Double
+    public var kind, actor, text: String
+    public var exerciseId: String?
+    public var input, utteranceId: String?
+}
+public struct HormesEvidence: Codable, Equatable, Identifiable {
+    public var id, observationId, sessionId, goalId, exerciseId: String
+    public var at: Double
+    public var criterion: String
+    public var correct: Bool
+    public var assistance, method, answer, feedback, limitations: String
+    public var invalidated: HormesEvidenceInvalidation?
+}
+public struct HormesEvidenceInvalidation: Codable, Equatable {
+    public var at: Double
+    public var reason: String
+}
+public struct HormesIntervention: Codable, Equatable, Identifiable {
+    public var id, goalId, sessionId: String
+    public var at: Double
+    public var kind, state, text, reason: String
+    public var sourceIds: [String]
+}
+public struct HormesExercise: Codable, Equatable {
+    public var id, title, prompt, sourceId, kind: String
+    public var independent: Bool
+}
+public struct HormesBoardPlan: Codable, Equatable { public var id, json, purpose: String; public var at: Double }
+public struct HormesLearningSurface: Codable, Equatable {
+    public var id, kind: String
+    public var deckId, cardId, front, back, attemptId: String?
+    public var options: [String]?
+    public var index, total: Int?
+    public var revealedAt, endsAt: Double?
+    public var sourceId, url, caption, reason: String?
+}
+public struct HormesRecallPlan: Codable, Equatable {
+    public var deckId: String
+    public var enabled: Bool
+    public var nextDueAt: Double
+    public var resumeSurface: HormesLearningSurface?
+}
+public struct HormesFocusClock: Codable, Equatable { public var endsAt: Double; public var breakSeconds: Int }
+public struct HormesDeck: Codable, Equatable, Identifiable {
+    public var id, title, goalId: String
+    public var courseId: String?
+    public var sourceIds: [String]
+    public var createdAt: Double
+    public var cardCount: Int
+    public var origin, purpose: String
+    public var demo: Bool
+}
+public struct HormesRecallAttempt: Codable, Equatable, Identifiable {
+    public var origin: String?
+    public var deviceId: String?
+    public var clientAnsweredAt: Double?
+    public var id, sessionId, goalId, deckId, cardId: String
+    public var at: Double
+    public var front, answer, back, result, method, input: String
+    public var assisted, demo: Bool
+    public var utteranceId: String?
+    public var choiceIndex: Int?
+    public var nextDueAt, intervalMs: Double
+}
+public struct HormesTravel: Codable, Equatable {
+    public var origin, destination, date, departAfter, arriveBefore, preference: String
+}
+public struct HormesLectureNotes: Codable, Equatable {
+    public var text: String
+    public var takeaways, sourceIds: [String]
+    public var revision: Int
+    public var at: Double
+}
+public struct HormesLectureAnswer: Codable, Equatable {
+    public var requestId, question, status: String
+    public var text, error: String?
+    public var at: Double
+    public var sourceIds: [String]
+}
+public struct HormesLecture: Codable, Equatable {
+    public var status, sourceId: String
+    public var revision: Int
+    public var captureId, draft, caption: String?
+    public var startedAt: Double?
+    public var notes: HormesLectureNotes?
+    public var answer: HormesLectureAnswer?
+}
+public struct HormesClassTarget: Codable, Equatable { public var title, courseId, courseTitle: String; public var goalId: String?; public var calendarId: String?; public var calendarStartsAt: Double? }
+public struct HormesClassReview: Codable, Equatable { public var fromSessionId, state: String; public var target: HormesClassTarget; public var error: String? }
+public struct HormesMeetingAttachment: Codable, Equatable, Identifiable {
+    public var id, sourceId, title, name, path, kind, mimeType, sha256, version: String
+    public var bytes: Int
+    public var demo: Bool
+}
+public struct HormesMeetingBrief: Codable, Equatable { public var text: String; public var sourceIds: [String]; public var at: Double }
+public struct HormesMeetingGmail: Codable, Equatable {
+    public var app, composeId, fingerprint, status: String
+    public var windowId, tabId: Int
+    public var verifiedAt: Double
+    public var byteBoundAttachments: Bool
+    public var error: String?
+}
+public struct HormesMeetingFollowUp: Codable, Equatable {
+    public var id, subject, body: String
+    public var to, reconnect, exportPath: String?
+    public var sourceIds, attachmentIds, requests: [String]
+    public var revision: Int
+    public var at: Double
+    public var reviewedAt: Double?
+    public var gmail: HormesMeetingGmail?
+}
+public struct HormesMeeting: Codable, Equatable {
+    public var status, sourceId: String
+    public var revision: Int
+    public var captureId, caption, draft: String?
+    public var attachments: [HormesMeetingAttachment]
+    public var brief: HormesMeetingBrief?
+    public var followUp: HormesMeetingFollowUp?
+}
+public struct HormesEducationSession: Codable, Equatable {
+    public var skillId: String
+    public var returnSessionId: String?
+}
+public struct HormesSession: Codable, Equatable, Identifiable {
+    public var id, goalId, mode, title, state: String
+    public var createdAt, updatedAt: Double
+    public var next: String
+    public var version: Int
+    public var calendarId: String?
+    public var calendarStartsAt: Double?
+    public var courseId: String?
+    public var demo: Bool
+    public var education: HormesEducationSession?
+    public var exercise: HormesExercise?
+    public var scene: String?
+    public var sceneRevision: Int
+    public var pendingPlan: HormesBoardPlan?
+    public var surface: HormesLearningSurface?
+    public var recallPlan: HormesRecallPlan?
+    public var focusClock: HormesFocusClock?
+    public var lecture: HormesLecture?
+    public var meeting: HormesMeeting?
+    public var classReview: HormesClassReview?
+    public var sourceIds: [String]
+    public var artifact: String?
+    public var artifactSourceIds: [String]
+    public var travel: HormesTravel?
+    public var grocery: HormesGrocery?
+}
+public struct HormesCalendarSource: Codable, Equatable, Identifiable {
+    public var id, title, account: String
+}
+public struct HormesCalendarEvent: Codable, Equatable, Identifiable {
+    public var id, title: String
+    public var startsAt, endsAt: Double
+    public var calendar: String
+    public var sourceCalendarId, mode, goalId: String?
+    public var demo: Bool
+}
+public struct HormesOffer: Codable, Equatable, Identifiable {
+    public var id, eventId, mode, title, reason: String
+    public var at, expiresAt, eventStartsAt: Double
+}
+public struct HormesEducationStage: Codable, Equatable, Identifiable {
+    public var id, title, description: String
+}
+public struct HormesEducationSubject: Codable, Equatable, Identifiable {
+    public var id, title: String
+}
+public struct HormesEducationEvidence: Codable, Equatable, Identifiable {
+    public var id, sessionId, goalId, observationId, exerciseId: String
+    public var at: Double
+    public var correct: Bool
+    public var assistance, criterion, answer, feedback, limitations: String
+}
+public struct HormesEducationPractice: Codable, Equatable {
+    public var skillId, goalId, courseId, label, reason: String
+}
+public struct HormesEducationProgress: Codable, Equatable {
+    public var status: String
+    public var independentCorrect, independentAttempts, assistedCorrect, assistedAttempts: Int
+    public var evidence: [HormesEducationEvidence]
+    public var nextPractice: HormesEducationPractice?
+}
+public struct HormesEducationSkill: Codable, Equatable, Identifiable {
+    public var id, title, description, stageId, subjectId: String
+    public var prerequisiteIds: [String]
+    public var real, demo: HormesEducationProgress
+}
+public struct HormesEducation: Codable, Equatable {
+    public var version: Int
+    public var limitation: String
+    public var stages: [HormesEducationStage]
+    public var subjects: [HormesEducationSubject]
+    public var skills: [HormesEducationSkill]
+    public var activeGoalIds: [String]
+}
+public struct HormesWorkState: Codable, Equatable {
+    public var tasks: [HormesWorkTask]?
+    public var education: HormesEducation?
+    public var courses: [HormesCourse]?
+    public var decks: [HormesDeck]?
+    public var recallAttempts: [HormesRecallAttempt]?
+    public var goals: [HormesGoal]
+    public var sessions: [HormesSession]
+    public var active: HormesSession?
+    public var observations: [HormesObservation]
+    public var evidence: [HormesEvidence]
+    public var interventions: [HormesIntervention]
+    public var sources: [HormesSource]
+    public var calendar: [HormesCalendarEvent]
+    public var calendarSources: [HormesCalendarSource]?
+    public var selectedCalendarIds: [String]?
+    public var demoBlock: String?
+    public var quiet, busy: Bool
+    public var status: String
+    public var calendarEnabled: Bool?
+    public var offer: HormesOffer?
+    public static let empty = HormesWorkState(goals: [], sessions: [], observations: [], evidence: [], interventions: [], sources: [], calendar: [], quiet: false, busy: false, status: "")
+}
+public struct HormesWorkReply: Codable, Equatable {
+    public var requestId: String
+    public var ok: Bool
+    public var message, speech: String?
+    public var voicePhase: String?
+    public var presentation: String?
+    public var state: HormesWorkState
+}
+public struct HormesWorkCommand: Codable, Equatable {
+    public var action: String
+    public var requestId: String = UUID().uuidString
+    public var sessionId, mode, text, scene: String?
+    public var revision: Int?
+    public var planId: String?
+    public var success: Bool?
+    public var blockId, interventionId: String?
+    public var evidenceId: String?
+    public var skillId: String?
+    public var travel: HormesTravel?
+    public var events: [HormesCalendarEvent]?
+    public var calendarSources: [HormesCalendarSource]?
+    public var selectedCalendarIds: [String]?
+    public var goalId: String?
+    public var enabled: Bool?
+    public var offerId: String?
+    public var deckId, surfaceId: String?
+    public var durationSeconds, choiceIndex: Int?
+    public var title, courseId, courseTitle: String?
+    public var goalInput: HormesGoalInput?
+    public var expectedGoalVersion: Int?
+    public var taskId: String?
+    public var expectedTaskVersion: Int?
+    public var json: [String: Any] {
+        guard let data = try? JSONEncoder().encode(self), let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return object
+    }
+}
+
+/// Exact imported to-do lines; completion here is explicitly user reported.
+public struct HormesWorkTask: Codable, Equatable, Identifiable {
+    public var id, sourceId, noteId, noteTitle, noteRevision, text: String
+    public var line: Int
+    public var status: String
+    public var version: Int
+    public var createdAt, updatedAt: Double
+    public var suggestedMode, mode, goalId, sessionId: String?
+    public var reportedDoneAt, supersededAt: Double?
+    public var sourceHistory: [HormesTaskSourceRevision]?
+}
+public struct HormesTaskSourceRevision: Codable, Equatable {
+    public var sourceId, noteRevision: String
+    public var line: Int
+    public var at: Double
+}
+
+// Explicit calendar query: fresh native data, independent of proactive work state.
+public struct CalendarReadRequest: Codable, Equatable {
+    public var id: String
+    public var startDate: String?
+    public var days: Int
+    public var calendarIds: [String]
+}
+public struct CalendarReadSource: Codable, Equatable {
+    public var id, title, account: String
+}
+public struct CalendarReadEvent: Codable, Equatable {
+    public var id, title: String
+    public var startsAt, endsAt: Double
+    public var calendar, sourceCalendarId: String
+    public var allDay: Bool
+}
+public struct CalendarReadResult: Codable, Equatable {
+    public var id: String
+    public var ok: Bool
+    public var error, permission: String?
+    public var timeZone: String
+    public var startsAt, endsAt, readAt: Double
+    public var calendars: [CalendarReadSource]
+    public var events: [CalendarReadEvent]
+    public var truncated: Bool
+    public var json: [String: Any] {
+        guard let data = try? JSONEncoder().encode(self), let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
+        return value
+    }
+}
+
+public struct HormesGroceryItem: Codable, Equatable, Identifiable {
+    public var id, request, state: String
+    public var receiptId, quote, product, priceText, url: String?
+    public var checkedAt: Double?
+}
+public struct HormesGroceryNote: Codable, Equatable {
+    public var id, title, revision, origin, sourceId: String
+    public var importedAt: Double
+}
+public struct HormesGroceryPlan: Codable, Equatable, Identifiable {
+    public var id, text, origin: String
+    public var itemIds: [String]
+}
+public struct HormesGroceryReview: Codable, Equatable {
+    public var at: Double
+    public var summary: String
+    public var receiptIds: [String]
+}
+public struct HormesGroceryBlocked: Codable, Equatable {
+    public var at: Double
+    public var reason: String
+}
+public struct HormesGrocery: Codable, Equatable {
+    public var phase: String
+    public var note: HormesGroceryNote?
+    public var items: [HormesGroceryItem]
+    public var plan: [HormesGroceryPlan]
+    public var review: HormesGroceryReview?
+    public var blocked: HormesGroceryBlocked?
+}
+
+// The authenticated iPhone quiz companion. Pairing codes never enter model snapshots.
+public struct HormesPhoneDevice: Codable, Equatable, Identifiable {
+    public var id, name: String
+    public var pairedAt, lastSeenAt: Double
+    public var automaticDelivery: Bool?
+}
+public struct HormesPhonePairing: Codable, Equatable {
+    public var url: String
+    public var expiresAt: Double
+}
+public struct HormesPhoneState: Codable, Equatable {
+    public var enabled: Bool
+    public var devices: [HormesPhoneDevice]
+    public var error: String?
+    public var pairing: HormesPhonePairing?
+    public var pushConfigured: Bool?
+    public static let empty = HormesPhoneState(enabled: false, devices: [])
+}

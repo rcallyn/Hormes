@@ -1,3 +1,8 @@
+export * from "./work.ts";
+export * from "./phone.ts";
+export * from "./calendar.ts";
+import { isCalendarReadResult, type CalendarReadRequest, type CalendarReadResult } from "./calendar.ts";
+import type { WorkCommand, WorkReply } from "./work.ts";
 /**
  * @hormes/protocol — the shared vocabulary.
  *
@@ -6,7 +11,7 @@
  * surface be rebuilt without touching the engine and vice versa.
  *
  * Coordinates everywhere are GLOBAL SCREEN POINTS with the origin at the top-left
- * of the main display (the CoreGraphics convention). Kevin's second display sits
+ * of the main display (the CoreGraphics convention). User's second display sits
  * above the primary one, so negative coordinates are ordinary, never an error.
  */
 
@@ -24,7 +29,7 @@ export type Phase = (typeof PHASES)[number];
 
 // ------------------------------------------------------------- transcript ---
 
-export type Speaker = "kevin" | "hormes";
+export type Speaker = "user" | "hormes";
 
 export interface TranscriptItem {
   readonly id: string;
@@ -37,8 +42,13 @@ export interface TranscriptItem {
   readonly at: number;
   /** False while fragments are still arriving for this utterance. */
   readonly final: boolean;
-  /** "typed": Kevin typed it in the Console (on the record like a spoken line). */
+  /** "typed": User typed it in the Console (on the record like a spoken line). */
   readonly source?: "typed";
+  /**
+   * A line of Hormes's the room-talk gate kept off the speaker (a voice turn nobody asked for: an answer to the room).
+   * On the ledger's `said` row as the record; never on the Console's said rows, in the continuity, or the echo's.
+   */
+  readonly unheard?: true;
 }
 
 // ------------------------------------------------------------ delegations ---
@@ -69,7 +79,7 @@ export interface DelegationStep {
 
 // ---- threads: independent lines of work, each as capable as the main conversation ----
 //
-// Kevin (2026-09-13) asked to see independent threads and conversations: "multiple blobs
+// User (2026-09-13) asked to see independent threads and conversations: "multiple blobs
 // doing their own work … just as feature rich as if it were the main thread … keep track of
 // those using extremely performant data structure representations".
 // A Thread has its own brain (a warm codex app-server process), its own conversation
@@ -80,7 +90,7 @@ export interface DelegationStep {
 // (depth THREAD_SPAWN_DEPTH); every spawned thread is a Thread like main.
 export const MAIN_THREAD_ID = "main";
 export type ThreadLane = "voice" | "screen" | "background";
-export const THREAD_STATUSES = ["idle", "queued", "starting", "thinking", "acting", "waiting-screen", "waiting-kevin", "paused", "done", "failed", "stopped"] as const;
+export const THREAD_STATUSES = ["idle", "queued", "starting", "thinking", "acting", "waiting-screen", "waiting-user", "paused", "done", "failed", "stopped"] as const;
 export type ThreadStatus = (typeof THREAD_STATUSES)[number];
 export const THREAD_TERMINAL: ReadonlySet<ThreadStatus> = new Set<ThreadStatus>(["done", "failed", "stopped"]);
 /** Live threads at once, main included. */
@@ -116,7 +126,7 @@ export interface Thread {
   readonly apps: readonly string[];
   /** The newest of `apps`, where the blob parks. */
   readonly app?: string;
-  /** Last acting point in global points, from a tagged orb.fly. */
+  /** Last click point in global screen coordinates. */
   readonly at?: Point;
   readonly startedAt: number;
   readonly updatedAt: number;
@@ -125,7 +135,7 @@ export interface Thread {
   readonly steps: number;
   readonly waits: number;
   readonly budget: { readonly steps: number; readonly seconds: number };
-  /** ≤ 160 while waiting-kevin. */
+  /** ≤ 160 while waiting-user. */
   readonly question?: string;
   readonly currentDelegationId?: string;
   readonly lastScreenshotPath?: string;
@@ -161,19 +171,19 @@ export interface ThreadTranscript {
   readonly readMs?: number;
 }
 
-// ---- memory: what Hormes knows about Kevin across sessions ------------------
+// ---- memory: what Hormes knows about User across sessions ------------------
 //
 // A dedicated module (@hormes/memory) keeps an append-only record of one-sentence
-// items ("Kevin prefers …"), extracted from closed conversations, deduplicated by
+// items ("User prefers …"), extracted from closed conversations, deduplicated by
 // embedding similarity, scored by recency, importance and use, and injected into
 // prompts under a hard token budget. Forget is a state; nothing is ever deleted.
 export type MemoryKind = "preference" | "fact" | "episode" | "procedure" | "contact" | "place";
 export type MemoryState = "live" | "forgotten" | "merged" | "archived";
-export type MemoryOrigin = "extracted" | "kevin" | "tool";
+export type MemoryOrigin = "extracted" | "user" | "tool";
 export interface MemorySource {
   readonly sessionId?: string;
   readonly at: number;
-  readonly type: "heard" | "said" | "request" | "summary" | "kevin" | "tool";
+  readonly type: "heard" | "said" | "request" | "summary" | "user" | "tool";
 }
 export interface MemoryItem {
   readonly id: string;
@@ -199,12 +209,15 @@ export interface MemorySummary {
   readonly count: number;
   readonly forgotten: number;
   readonly archived: number;
-  /** How items are matched: OpenAI embeddings (a key is present) or keywords. */
-  readonly embeddings: "openai" | "keyword";
+  /** How items are matched: OpenAI embeddings, a local embedding model, or keywords. */
+  readonly embeddings: "openai" | "local" | "keyword";
+  /** "text-embedding-3-small" or the local model's id; absent for keyword matching. */
+  readonly embeddingModel?: string;
+  readonly embeddingDims?: number;
   /** Conversations waiting for a quiet moment to be read. */
   readonly pending: number;
   readonly lastRunAt?: number;
-  readonly lastRun?: { readonly extractor: "responses" | "rules"; readonly added: number; readonly updated: number; readonly noop: number; readonly refused: number; readonly ms: number };
+  readonly lastRun?: { readonly extractor: "responses" | "local" | "rules"; readonly added: number; readonly updated: number; readonly noop: number; readonly refused: number; readonly ms: number };
   /** Tokens the last prompts spent on memory. */
   readonly budgetUsed?: { readonly brain: number; readonly voice: number };
   /** Items the last delegation was given (the Now rail's "used this turn"). */
@@ -229,12 +242,12 @@ export interface DelegationTimings {
   readonly firstCommentaryAt?: number;
   readonly doneAt?: number;
   /**
-   * Wall clock when Kevin's triggering utterance ended: the last of his transcript
+   * Wall clock when User's triggering utterance ended: the last of his transcript
    * items that ended before Live's delegation event, its session-timeline `endMs`
    * placed on the clock of `session.started`. Absent when no utterance preceded the
    * delegation or the session's start is not known. `delegatedAt − speechEndAt` is
    * Live's own transcription and decision time; `firstActionAt − speechEndAt` is what
-   * Kevin waits for (docs/LATENCY.md).
+   * User waits for (docs/LATENCY.md).
    */
   readonly speechEndAt?: number;
   /**
@@ -260,8 +273,10 @@ export interface Delegation {
   readonly timings: DelegationTimings;
   /** The thread that ran it; absent = "main". */
   readonly threadId?: string;
-  /** Steps in the ledger when `steps` is a cut window (the small snapshot). */
+  /** Step total of a thread's delegation (threads/turns.ts writes it); a thread page shows it before its steps are paged in. Absent on main's delegations, whose `steps` are complete. */
   readonly stepCount?: number;
+  /** The automation whose `wake-brain` action ran this turn: `liveId` is "" and nothing is appended to Live. */
+  readonly origin?: { readonly automationId: string };
 }
 
 // ----------------------------------------------------------------- agents ---
@@ -322,7 +337,7 @@ export interface AgentMessage {
   readonly tool?: AgentToolCall;
   /** Reasoning / thinking text rather than a reply. */
   readonly thinking?: boolean;
-  /** A message Kevin just sent, echoed before the session confirms it. */
+  /** A message User just sent, echoed before the session confirms it. */
   readonly pending?: boolean;
 }
 
@@ -348,7 +363,7 @@ export interface AgentTranscript {
 
 // ------------------------------------------------------------- marks ---
 
-/** Something Kevin circled on screen for Hormes: a region, its stroke, and its screenshot. */
+/** Something User circled on screen for Hormes: a region, its stroke, and its screenshot. */
 export interface ScreenMark {
   readonly id: string;
   readonly rect: Rect;
@@ -360,6 +375,8 @@ export interface ScreenMark {
   readonly consumed: boolean;
   /** What the stroke surrounded, when the accessibility tree or window list could say. `rect` is snapped to it. */
   readonly element?: { readonly role?: string; readonly title?: string; readonly app?: string };
+  /** How it was made. Absent or "circle": User's stroke. "window": the front window captured whole (`mark.window`); its rect is the window's frame, no snap. */
+  readonly source?: "circle" | "window";
 }
 
 export interface ConnectorHealth {
@@ -368,23 +385,331 @@ export interface ConnectorHealth {
   readonly detail: string;
 }
 
+// ------------------------------------------------------------ automations ---
+//
+// Set while awake, carried out by the daemon while asleep.
+//
+// User (2026-09-14): "alarms, automations and more that don't require the agent to be fully
+// awake but can just be on system". An Automation is `when <trigger> then <actions>`, armed by a
+// brain tool in a conversation (confirmed once at set-up when an action needs a yes) and fired
+// by the engine from tick() or a system signal with NO Live session and NO brain turn — except
+// `wake-brain`, opted into per row with the cost said out loud. Nothing fires that would need a
+// question at fire time: the set-up gate refuses it. Rows are never deleted: `trashed` is a state.
+
+export type Weekday = "mon" | "tue" | "wed" | "thu" | "fri" | "sat" | "sun";
+/** "HH:mm", 24 h, local. DST follows the Mac's clock: 07:10 is 07:10 on both sides of the change. */
+export type ClockTime = `${number}:${number}`;
+
+/** Local wall-clock recurrence, normalised from User's phrase. `monthly`/`monthday` are pass 2 (typed now so the wire holds). */
+export type Recurrence =
+  /** "weekdays 09:00" · "daily 18:00" · "mon,wed 07:10" */
+  | { readonly kind: "weekly"; readonly days: readonly Weekday[]; readonly at: ClockTime }
+  /** "every 2 h" (≥ 60 000) */
+  | { readonly kind: "interval"; readonly everyMs: number; readonly anchorAt: number }
+  | { readonly kind: "monthly"; readonly nth: 1 | 2 | 3 | 4 | -1; readonly weekday: Weekday; readonly at: ClockTime }
+  | { readonly kind: "monthday"; readonly day: number; readonly at: ClockTime };
+
+/** When it fires. `at` and `in` are one-shots; `every` and `on` repeat. */
+export type AutomationWhen =
+  /** alarm, reminder: wall-clock ms */
+  | { readonly kind: "at"; readonly at: number }
+  /** timer: ms after createdAt; nextAt fixed once */
+  | { readonly kind: "in"; readonly ms: number }
+  /** alarm (repeating), routine; `phrase` for read-back */
+  | { readonly kind: "every"; readonly every: Recurrence; readonly phrase: string }
+  /** watcher */
+  | { readonly kind: "on"; readonly on: SystemEvent };
+
+/** A signal the daemon can see without a brain. Pass 1 set. */
+export type SystemEvent =
+  /** A file appears in a folder and settles (`settleMs` after its last write, default 3000); `glob` narrows ("*.pdf"). Browser partials never count. */
+  | { readonly kind: "folder.file"; readonly path: string; readonly glob?: string; readonly settleMs?: number }
+  | { readonly kind: "download.done"; readonly glob?: string }
+  | { readonly kind: "app.launch" | "app.quit"; readonly app: string }
+  | { readonly kind: "mac.wake" | "screen.unlock" }
+  | { readonly kind: "display.connected" | "display.disconnected" }
+  /** A named recipe polled every `everySeconds` (≥ 30); fires when its exit flips non-zero and once when it flips back. */
+  | { readonly kind: "recipe.red"; readonly recipe: string; readonly everySeconds: number }
+  /** One of User's coding-agent sessions changed status (the agents registry). `agent` absent = any. */
+  | { readonly kind: "agent.status"; readonly agent?: string; readonly status: AgentStatus };
+// Reserved for pass 2 (never armed in pass 1; classifyAutomation refuses the kind by name):
+//   { kind: "clipboard.match"; pattern } · { kind: "network.changed"; network? } · { kind: "automation.fired"; id }
+
+/** What happens. Each kind is a chip in Settings.automations.unattended; off there = refused at set-up. */
+export type AutomationAction =
+  /**
+   * sound + island line with Snooze · Done (+ banner). `sound` keeps the old system names; the app plays its palette:
+   * Pop a small pop · Glass the chime · Ping the timer · Hero the alarm. Absent: Hero for an alarm, Ping for a timer, else Glass.
+   */
+  | { readonly kind: "chime"; readonly line: string; readonly sound?: "Pop" | "Glass" | "Ping" | "Hero" }
+  /** LocalSpeaker reads a FIXED line ≤ 160, written at set-up, redacted */
+  | { readonly kind: "say"; readonly line: string }
+  /** banner with Snooze · Done (Open · Done when `open`) */
+  | { readonly kind: "notify"; readonly title: string; readonly body?: string; readonly open?: string }
+  /** app · https URL · file/folder; classifyUrl/Path must say run */
+  | { readonly kind: "open"; readonly app?: string; readonly url?: string; readonly path?: string }
+  /** move the triggering file (folder.file/download.done only); never overwrite, never unlink, inside ~ */
+  | { readonly kind: "file"; readonly into: string }
+  /** a Settings recipe; shell gate with confirmed=false must say run */
+  | { readonly kind: "run-recipe"; readonly recipe: string }
+  /** one key/chord in a named app, only while it is in front and no secure field has focus */
+  | { readonly kind: "press"; readonly app: string; readonly key: string }
+  | { readonly kind: "wake-brain"; readonly prompt: string; readonly budget: { readonly steps: number; readonly seconds: number }; readonly speak: boolean };
+
+export const AUTOMATION_ACTION_KINDS = ["chime", "say", "notify", "open", "file", "run-recipe", "press", "wake-brain"] as const;
+export type AutomationActionKind = (typeof AUTOMATION_ACTION_KINDS)[number];
+/** The kinds that act on the Mac (a row carries at most one); the rest only show, say or sound. */
+export const AUTOMATION_ACTING_KINDS: ReadonlySet<AutomationActionKind> = new Set<AutomationActionKind>(["open", "file", "run-recipe", "press", "wake-brain"]);
+
+export interface AutomationClauses {
+  /** fires only inside (local, wraps midnight) */
+  readonly window?: { readonly from: ClockTime; readonly to: ClockTime };
+  /** watchers only; `every` carries its own days */
+  readonly days?: readonly Weekday[];
+  /** one-shot watcher · at most once per local day */
+  readonly once?: boolean | "day";
+  /** seconds between fires (storm guard); default 30 for watchers, 0 for clocks */
+  readonly cooldown?: number;
+  /** repeaters stop after this instant */
+  readonly until?: number;
+  /** alarms default override; everything else respect */
+  readonly quiet: "respect" | "override";
+}
+
+export type AutomationState =
+  /** waiting for nextAt or the signal */
+  | "armed"
+  /** snoozedUntil is the new nextAt */
+  | "snoozed"
+  /** an action runs now (recipe, brain turn, file move) */
+  | "firing"
+  /** rang; waiting for Done (chime/notify/say) until Done or AUTOMATION_LINGER_MS */
+  | "fired"
+  /** due inside quiet hours with quiet=respect; fires at quiet end */
+  | "deferred"
+  /** User paused it */
+  | "paused"
+  /** a one-shot that fired and was dismissed/skipped, or a repeater past `until` */
+  | "done"
+  /** the last fire could not run (lastDetail says why); repeaters re-arm, one-shots stay */
+  | "failed"
+  /** Moved to Trash: hidden from the rails, restorable, never deleted */
+  | "trashed";
+export const AUTOMATION_TERMINAL: ReadonlySet<AutomationState> = new Set<AutomationState>(["done", "trashed"]);
+
+/** The Console's word for a row, derived — nothing stores it. */
+export type AutomationKind = "alarm" | "timer" | "reminder" | "routine" | "watcher";
+/**
+ * What a `local.say` rings for, set by the engine from the row's kind: the app's ring is the kind's, never the
+ * sound's name — it sounds with Settings › Audio › Sounds off, Snooze and Done fade it, and an alarm keeps its own
+ * level whatever the Volume says. An open's confirmation carries none (it is the interface's tink).
+ */
+export type LocalSayRing = "alarm" | "timer" | "chime";
+export function ringOf(kind: AutomationKind): LocalSayRing {
+  return kind === "alarm" ? "alarm" : kind === "timer" ? "timer" : "chime";
+}
+export function automationKind(a: Pick<Automation, "when" | "then">): AutomationKind {
+  const w = a.when.kind, first = a.then[0]?.kind;
+  if (w === "in") return "timer";
+  if (w === "on") return "watcher";
+  if (w === "every") return first === "chime" ? "alarm" : "routine";
+  return first === "chime" ? "alarm" : "reminder";
+}
+
+export interface Automation {
+  /** "auto_…" (newId) */
+  readonly id: string;
+  /** ≤ 24 chars, spoken as-is; unique among non-trashed rows, case-insensitive */
+  readonly name: string;
+  readonly when: AutomationWhen;
+  /** 1–3, in order; at most one acting kind; a failure stops the chain */
+  readonly then: readonly AutomationAction[];
+  readonly clauses: AutomationClauses;
+  /** the one line Hormes read back at set-up, ≤ 120, redacted */
+  readonly echo: string;
+  readonly state: AutomationState;
+  /** absent for watchers and terminal states */
+  readonly nextAt?: number;
+  readonly lastFiredAt?: number;
+  /** ≤ 200, redacted: "filed invoice.pdf → Papers" · "recipe exit 1" · "quiet hours: shown, not said" · "12 min late" */
+  readonly lastDetail?: string;
+  readonly fires: number;
+  /** skipped or late because the daemon was down or the Mac slept */
+  readonly missed: number;
+  readonly snoozedUntil?: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly createdBy: { readonly by: "brain" | "console" | "cli"; readonly chainId?: string; readonly delegationId?: string; readonly request: string };
+  /** The set-up yes for run-recipe / press / wake-brain: when User confirmed and the words he heard (the cost line). Absent for free kinds. */
+  readonly confirmed?: { readonly at: number; readonly heard: string };
+}
+
+/** Live (non-trashed) rows in one snapshot: armed / snoozed / deferred by nextAt, then the rest by updatedAt. */
+export const AUTOMATIONS_MAX = 32;
+/** Trashed rows after them, newest first, for the Console's Trash fold (Restore); the journal keeps every one. */
+export const AUTOMATIONS_TRASHED_MAX = 8;
+export const AUTOMATION_ACTIONS_MAX = 3;
+/** a ring stays up this long; alarms then self-snooze ONCE, others count as Done ("unanswered") */
+export const AUTOMATION_LINGER_MS = 10 * 60_000;
+/** alarms re-chime while `fired` */
+export const AUTOMATION_REPEAT_CHIME_MS = 30_000;
+/** minutes; the box's word is Settings.snoozeMinutes; the minis show the other two */
+export const AUTOMATION_SNOOZES = [5, 10, 30] as const;
+/** say/chime/notify lines: a sentence, not a briefing */
+export const AUTOMATION_LINE_CHARS = 160;
+export const AUTOMATION_WATCH_COOLDOWN_S = 30;
+/** recipe.red floor */
+export const AUTOMATION_POLL_MIN_S = 30;
+export const AUTOMATION_FOLDER_WATCHERS_MAX = 8;
+/** a watcher that wakes the brain needs ten minutes between fires */
+export const AUTOMATION_WAKE_COOLDOWN_MIN_S = 600;
+/** a tick gap this long means the Mac slept: resync */
+export const AUTOMATION_SLEEP_GAP_MS = 5_000;
+/** How late a one-shot may still fire after the daemon comes back; later = missed. Routines and watchers never fire late. */
+export const AUTOMATION_GRACE_MS: Readonly<Record<AutomationKind, number>> = { alarm: 15 * 60_000, timer: 10 * 60_000, reminder: 60 * 60_000, routine: 0, watcher: 0 };
+
+/** The presses a ring offers; the island, the banner and the Console show the same set. */
+export type AutomationPress = { readonly kind: "snooze"; readonly minutes: number } | { readonly kind: "done" } | { readonly kind: "open"; readonly target: string };
+
+/** The one line the island shows while a row is `fired` (the newest; `more` counts the others). */
+export interface RingLine {
+  readonly id: string;
+  readonly kind: AutomationKind;
+  readonly name: string;
+  /** "07:10 · Wake up, User" */
+  readonly line: string;
+  /** one quieter second line: the echo's tail or the next fire ("Monday · standup notes at 9") */
+  readonly calm?: string;
+  readonly at: number;
+  readonly lateMs?: number;
+  readonly presses: readonly AutomationPress[];
+  readonly more: number;
+}
+
+/** One change on one row; broadcast like thread.event, coalesced 50 ms per id. `state`, `missed` and `tick` fit 200 B (detail ≤ 70); `fired` carries its presses and a line capped at 80, ≈ 270 B, ≈ 280 B with `ring` (protocol.test.ts and contract-additions.test.ts measure them). */
+export type AutomationEvent = { readonly seq: number; readonly at: number; readonly id: string } & (
+  | { readonly kind: "set"; readonly automation: Automation }
+  /**
+   * `ring` (SL-14): true when this fire put a ring up (`Snapshot.ringing` names it); false when it only acted (a
+   * routine that opened an app), so no surface shows it as a ring. Absent from a daemon before the field.
+   */
+  | { readonly kind: "fired"; readonly actions: readonly AutomationActionKind[]; readonly line: string; readonly ok: boolean; readonly detail?: string; readonly lateMs?: number; readonly presses: readonly AutomationPress[]; readonly ring?: boolean }
+  | { readonly kind: "state"; readonly state: AutomationState; readonly nextAt?: number; readonly detail?: string }
+  | { readonly kind: "missed"; readonly dueAt: number; readonly lateMs?: number; readonly skipped?: boolean; readonly why: MissedWhy }
+  /** a running timer, ≤ 1/s, only while a client views the island/Console; never a snapshot */
+  | { readonly kind: "tick"; readonly remainingMs: number }
+);
+/**
+ * Why a fire was missed or skipped: Hormes was off (`daemon-down`, the master switch off included), the Mac slept
+ * through it, quiet hours held it, the brain budget was spent, or a time zone move put its wall clock behind now
+ * (`zone-moved`: the occurrence was still ahead in the old zone).
+ */
+export type MissedWhy = "daemon-down" | "mac-slept" | "quiet-hours" | "budget" | "zone-moved";
+
+/**
+ * A signal the app observes on User's behalf and forwards; the daemon has no NSWorkspace. Data,
+ * never a command. On the wire it is the app → daemon ClientMessage
+ * `{ type: "system.signal", signal: SystemSignal, at: number }` (daemon/src/wire.ts): the engine
+ * matches it against the armed watchers and resyncs on `mac.wake` / `clock.changed`; nothing wakes.
+ */
+export type SystemSignal =
+  | { readonly kind: "app.launch" | "app.quit"; readonly app: string; readonly bundleId?: string }
+  | { readonly kind: "mac.wake" | "mac.sleep" | "screen.unlock" | "screen.lock" | "display.connected" | "display.disconnected" | "clock.changed" };
+
+export interface ProactiveSuggestion {
+  readonly id: string;
+  readonly agentId: string;
+  readonly title: string;
+  readonly explanation: string;
+  readonly request: string;
+  readonly at: number;
+  readonly expiresAt: number;
+}
+
+export interface ShellRecipe {
+  /** ≤ 24 chars; what a row names in run-recipe / recipe.red */
+  readonly name: string;
+  readonly command: string;
+  readonly cwd?: string;
+  /** ≤ 600 */
+  readonly timeoutSeconds: number;
+  /** User's yes (voice set-up or the Console's Add); the shell gate re-judges the text at every fire anyway */
+  readonly approvedAt: number;
+  /** Moved to the Trash at this instant: kept in Settings for Restore, hidden from every picker, refused as a row's target. Never deleted. */
+  readonly trashedAt?: number;
+}
+
+/** The recipes that are not in the Trash: what pickers list, what a row may name, what fires. */
+export function liveRecipes(recipes: readonly ShellRecipe[]): readonly ShellRecipe[] {
+  return recipes.filter((r) => r.trashedAt === undefined);
+}
+
+/** The recipe a row names, by case-insensitive name — `live` (the default) skips the Trash; `any` finds a trashed one too (Restore, the refusal's wording). */
+export function recipeNamed(recipes: readonly ShellRecipe[], name: string, which: "live" | "any" = "live"): ShellRecipe | undefined {
+  const wanted = name.trim().toLowerCase();
+  return (which === "live" ? liveRecipes(recipes) : recipes).find((r) => r.name.toLowerCase() === wanted);
+}
+
+export interface AutomationSettings {
+  /** master; off = nothing fires, every row stays */
+  readonly enabled: boolean;
+  /** kinds allowed to fire while ASLEEP; default chime say notify open file */
+  readonly unattended: readonly AutomationActionKind[];
+  readonly quietHours?: { readonly from: ClockTime; readonly to: ClockTime };
+  /** the island's one Snooze press (default 10; timers use 5) */
+  readonly snoozeMinutes: number;
+  /** 0 = wake-brain refused at set-up */
+  readonly wakeBudgetMinutesPerDay: number;
+  readonly recipes: readonly ShellRecipe[];
+  /** the app registers itself to open at login on User's press */
+  readonly openAtLogin: boolean;
+}
+
+export const DEFAULT_AUTOMATIONS: AutomationSettings = {
+  enabled: true,
+  unattended: ["chime", "say", "notify", "open", "file"],
+  snoozeMinutes: 10,
+  wakeBudgetMinutesPerDay: 5,
+  recipes: [],
+  openAtLogin: false,
+};
+
+/**
+ * A row as the brain's tool, the Console form or the CLI sends it; the engine fills id, state, fires,
+ * missed, the stamps and createdBy. When it fires is either `when` (already normalised) or
+ * `whenPhrase` — User's clock words ("7:10", "tomorrow 07:10", "in 12 minutes", "weekdays 09:00",
+ * "every 2 h"), parsed by the ENGINE with core's `parseWhen`, the one grammar; a phrase it does not
+ * catch is refused with parseWhen's own words. One of the two is required; `when` wins when both ride.
+ */
+export type AutomationDraft = Omit<Automation, "id" | "state" | "fires" | "missed" | "createdAt" | "updatedAt" | "createdBy" | "confirmed" | "when"> & {
+  readonly id?: string;
+  readonly when?: AutomationWhen;
+  readonly whenPhrase?: string;
+};
+
 // --------------------------------------------------------------- settings ---
 
 /**
  * Which brain does the work behind the voice. Vendor-neutral: `auto` picks the
  * first backend that is signed in or configured on this Mac, in the order
  * codex → claude-code → anthropic-api → openai-compatible → openai-responses.
- * `codex` = the Codex CLI (bundled in ChatGPT.app or on PATH) with Kevin's ChatGPT
+ * `codex` = the Codex CLI (bundled in ChatGPT.app or on PATH) with User's ChatGPT
  * login and Hormes's tools over MCP; `claude-code` = the Agent SDK with his Claude
  * login; `anthropic-api` = the Messages API with ANTHROPIC_API_KEY;
  * `openai-responses` = the Live session's Responses delegation; `openai-compatible`
  * = any Chat Completions server (OpenAI, OpenRouter, Ollama, LM Studio, vLLM…) at
  * `Settings.brainBaseUrl` with HORMES_BRAIN_API_KEY.
  */
-export type BrainKind = "auto" | "codex" | "claude-code" | "anthropic-api" | "openai-responses" | "openai-compatible";
-export const BRAIN_KINDS: readonly BrainKind[] = ["auto", "codex", "claude-code", "anthropic-api", "openai-responses", "openai-compatible"];
-/** The order `auto` tries backends in. */
-export const AUTO_BRAIN_ORDER: readonly Exclude<BrainKind, "auto">[] = ["codex", "claude-code", "anthropic-api", "openai-compatible", "openai-responses"];
+/**
+ * `local` = a model on this Mac served by Ollama (127.0.0.1:11434), LM Studio (:1234) or
+ * llama.cpp (:8080), discovered by the engine or pinned by `Settings.brainBaseUrl`; explicit
+ * only — `auto` never picks it. `Settings.brainModel` is the server's own id (`qwen3.5:27b`),
+ * or empty for the best fit on this Mac (`setup.local.picked`).
+ */
+export type BrainKind = "auto" | "codex" | "claude-code" | "anthropic-api" | "openai-responses" | "openai-compatible" | "local";
+export const BRAIN_KINDS: readonly BrainKind[] = ["auto", "codex", "claude-code", "anthropic-api", "openai-responses", "openai-compatible", "local"];
+/** The order `auto` tries backends in. `local` is not here: a running server is not a choice User made. */
+export const AUTO_BRAIN_ORDER: readonly Exclude<BrainKind, "auto" | "local">[] = ["codex", "claude-code", "anthropic-api", "openai-compatible", "openai-responses"];
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -392,33 +717,84 @@ export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
  * How the wake word gate authenticates before it opens the (paid) voice session.
  * "touch-id" is LocalAuthentication's device-owner policy (Touch ID, Apple Watch,
  * or the Mac password); "passphrase" is a spoken or typed phrase enrolled in the
- * app and kept hashed in the keychain; "either" accepts whichever comes first.
+ * app and kept hashed locally; "either" accepts whichever comes first.
+ * "none" (the default) starts the session directly after the selected wake gesture.
  */
 export type WakeAuth = "touch-id" | "passphrase" | "either" | "none";
+export type WakeTrigger = "word" | "clap" | "both";
 
 /**
  * The local wake word. While the engine is asleep the native app listens with the
  * system's on-device speech recogniser — nothing leaves the Mac and no API is
- * billed — and only after authentication does it send `go`.
+ * billed. The selected gesture sends `go` directly unless wake authentication is enabled.
  */
 export interface WakeSettings {
   readonly enabled: boolean;
   /** Normalised lowercase phrases; any of them wakes it. */
   readonly phrases: readonly string[];
   readonly auth: WakeAuth;
+  /** Local gesture selection. A clap is a wake request, never authentication. */
+  readonly trigger?: WakeTrigger;
+}
+
+/**
+ * design12: the audio block. Nested like `wake`: merged field-wise at load, so a settings.json
+ * from before a field still validates. The daemon keeps it; the app reads it.
+ */
+export interface AudioSettings {
+  /**
+   * Recording a demo: no voice-processing unit, the ranked mic, the software echo guard;
+   * other apps keep their sound and every recorder gets a plain mic. Loud in the Console,
+   * the island and the status menu while on.
+   */
+  readonly recording: boolean;
+  /**
+   * Settings › Audio › Sounds: the palette's interface sounds (heard, awake, pause, sleep, snooze, opened,
+   * mark, cue, problem). Absent until User flips it: the app follows macOS's "Play user interface sound
+   * effects" (read, never written). The rings (a `local.say` with a `ring`: chime, timer, alarm) sound either way.
+   */
+  readonly sounds?: boolean;
+  /**
+   * Settings › Audio › Volume, 0…1, times the system output volume; absent = DEFAULT_SOUND_VOLUME. The alarm ignores it:
+   * its first ring is level with the system Hero it replaced (−19.5 LUFS), each repeat 1 dB louder up to the file's −16.
+   */
+  readonly soundVolume?: number;
+}
+
+export const DEFAULT_AUDIO: AudioSettings = { recording: false };
+export const DEFAULT_SOUND_VOLUME = 0.7;
+
+/**
+ * The audio block as the engine keeps it: DEFAULT_AUDIO under whatever the file or a patch says, with each
+ * field kept only when well typed (`soundVolume` finite and clamped to 0…1). The app's decoder is strict —
+ * a string where a number belongs would blank its whole snapshot — so nothing malformed is ever kept.
+ */
+export function audioSettingsOf(value: unknown): AudioSettings {
+  const v = typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const recording = typeof v["recording"] === "boolean" ? v["recording"] : DEFAULT_AUDIO.recording;
+  const sounds = typeof v["sounds"] === "boolean" ? { sounds: v["sounds"] } : {};
+  const raw = v["soundVolume"];
+  const soundVolume = typeof raw === "number" && Number.isFinite(raw) ? { soundVolume: Math.min(1, Math.max(0, raw)) } : {};
+  return { recording, ...sounds, ...soundVolume };
 }
 
 export interface Settings {
+  /** One-off confirmations require local device-owner authentication. Speech alone cannot arm them. */
+  readonly ownerApproval: boolean;
+  /** Local, bounded suggestions from existing status evidence. No background model calls. */
+  readonly proactive: boolean;
+  /** Voice transport; local Qwen remains a separate brain selection. */
+  readonly voiceProvider?: "openai" | "gemini";
+  readonly geminiModel?: string;
+  readonly geminiVoice?: string;
   readonly voice: string;
   readonly brain: BrainKind;
-  /** Model override for the chosen backend; empty = that backend's default. */
+  /** Model override for the chosen backend; empty = that backend's default. Under `local`: the server's listed id, verbatim; empty = the best fit on this Mac (see `LocalServerStatus.picked`). */
   readonly brainModel: string;
-  /** openai-compatible only: base URL of the Chat Completions server (no trailing /v1 needed). */
+  /** openai-compatible: base URL of the Chat Completions server. local: pin the server root instead of discovering it (a second Ollama on another port, a LAN box). No trailing /v1 needed. */
   readonly brainBaseUrl?: string;
   readonly effort: Effort;
-  /** First-run onboarding finished (keys, brain, permissions, wake word). */
-  readonly onboarded: boolean;
-  /** getUserMedia deviceId; undefined = system default. */
+  /** Core Audio device UID (not a getUserMedia id); undefined = ranked. */
   readonly micDeviceId?: string;
   readonly idleSleepMinutes: number;
   /** Start listening on launch (ignored while the wake word gate is enabled). */
@@ -440,7 +816,7 @@ export interface Settings {
   readonly language: string;
   /** How the English is spoken; rendered as one line of the session's instructions. */
   readonly accent: Accent;
-  /** Durable memory of Kevin across sessions (extraction, retrieval, the Memory rail). */
+  /** Durable memory of User across sessions (extraction, retrieval, the Memory rail). */
   readonly memory: boolean;
   /** Every acting tool answers with what is now in front (the observation line); off for the A/B. */
   readonly observe: boolean;
@@ -450,15 +826,41 @@ export interface Settings {
   readonly threadOverflow: "supersede" | "spawn";
   /** Warm codex app-server processes kept ready for threads (0..3). */
   readonly warmThreads: number;
+  /** Alarms, timers, reminders, routines and watchers the daemon carries out while asleep: the master switch, the unattended kinds, quiet hours, the recipes. */
+  readonly automations: AutomationSettings;
+  /** The audio block (design12): Recording on/off, and the palette's Sounds and Volume. The daemon keeps it; the app reads it. */
+  readonly audio: AudioSettings;
+  /**
+   * What the voice and the brain call the person they work for. "" = unset: the engine falls back to
+   * the account's full name (`effectiveUserName` in @hormes/core). Setup › Welcome pre-fills it with
+   * NSFullUserName() and writes it on Continue; Settings › Session has the same field.
+   */
+  readonly userName: string;
 }
 
 export const DEFAULT_WAKE: WakeSettings = {
   enabled: true,
-  phrases: ["hormes", "jar head", "hey hormes"],
-  auth: "either",
+  phrases: ["hormes", "hor mes", "hey hormes"],
+  auth: "none",
+  trigger: "word",
 };
 
+export function wakeSettingsOf(value: unknown): WakeSettings {
+  const v = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+  return {
+    enabled: typeof v["enabled"] === "boolean" ? v["enabled"] : DEFAULT_WAKE.enabled,
+    phrases: Array.isArray(v["phrases"]) && v["phrases"].every(p => typeof p === "string") ? v["phrases"] as string[] : DEFAULT_WAKE.phrases,
+    auth: ["touch-id", "passphrase", "either", "none"].includes(String(v["auth"])) ? v["auth"] as WakeAuth : DEFAULT_WAKE.auth,
+    trigger: ["word", "clap", "both"].includes(String(v["trigger"])) ? v["trigger"] as WakeTrigger : "word",
+  };
+}
+
 export const DEFAULT_SETTINGS: Settings = {
+  ownerApproval: true,
+  proactive: false,
+  voiceProvider: "gemini",
+  geminiModel: "gemini-3.8-live",
+  geminiVoice: "Kore",
   voice: "ballad",
   brain: "auto",
   brainModel: "",
@@ -466,7 +868,6 @@ export const DEFAULT_SETTINGS: Settings = {
   idleSleepMinutes: 10,
   autoWake: true,
   wake: DEFAULT_WAKE,
-  onboarded: false,
   reflexes: true,
   orbHome: "notch",
   ledgerRetentionDays: 0,
@@ -479,6 +880,9 @@ export const DEFAULT_SETTINGS: Settings = {
   typedWakes: false,
   threadOverflow: "supersede",
   warmThreads: 2,
+  automations: DEFAULT_AUTOMATIONS,
+  audio: DEFAULT_AUDIO,
+  userName: "",
 };
 
 /**
@@ -488,31 +892,111 @@ export const DEFAULT_SETTINGS: Settings = {
  * and both fail to compile until the key is listed.
  */
 export const SETTINGS_KEYS = [
-  "voice", "brain", "brainModel", "brainBaseUrl", "effort", "onboarded", "micDeviceId", "idleSleepMinutes", "autoWake", "orbPosition", "wake", "reflexes", "orbHome",
+  "ownerApproval", "proactive",
+  "voiceProvider", "geminiModel", "geminiVoice", "voice", "brain", "brainModel", "brainBaseUrl", "effort", "micDeviceId", "idleSleepMinutes", "autoWake", "orbPosition", "wake", "reflexes", "orbHome",
   "ledgerRetentionDays", "shotsRetentionDays", "threads", "language", "accent", "memory", "observe", "typedWakes", "threadOverflow", "warmThreads",
+  "automations", // design11: the automations block joins SETTINGS_KEYS so settings.json keeps it
+  "audio", // design12: the audio block joins SETTINGS_KEYS so settings.json keeps it
+  "userName", // release F1: the user's name is a setting ("" = the account's full name)
 ] as const satisfies readonly (keyof Settings)[];
 type SettingsKeysCover = Record<(typeof SETTINGS_KEYS)[number], 0>;
 const settingsKeysCoverEverything: Record<keyof Settings, 0> = {} as SettingsKeysCover;
 void settingsKeysCoverEverything;
 
 /**
- * What onboarding and the doctor need to know about the configuration, without
+ * What Console and the doctor need to know about the configuration, without
  * ever carrying a secret: presence of keys, and the last probe results.
  */
 export interface SetupStatus {
-  /** Result of the last `config.probe` for the OpenAI key that runs the voice. */
-  readonly openaiKey: "ok" | "missing" | "invalid" | "unchecked";
+  /**
+   * Result of the last `config.probe` for the OpenAI key that runs the voice. `noLiveModel`: the key
+   * answered (it is valid) but GET /v1/models/<liveModel> was 404 — the Live model is not enabled on
+   * that project, so the first wake would fail with the voice.key problem; Setup and the doctor say so.
+   */
+  readonly openaiKey: "ok" | "missing" | "invalid" | "noLiveModel" | "unchecked";
+  readonly voiceProvider?: "openai" | "gemini";
+  readonly voiceKey?: "ok" | "missing" | "invalid" | "noLiveModel" | "unchecked";
   readonly brain: "ok" | "unavailable" | "unchecked";
   readonly brainDetail: string;
   /** The backend actually running (what `auto` resolved to), if any. */
   readonly brainResolved?: Exclude<BrainKind, "auto">;
   readonly liveModel: string;
   /** Which secrets are present in ~/.hormes/env or the environment (never the values). */
-  readonly secrets: { readonly openai: boolean; readonly anthropic: boolean; readonly brainApiKey: boolean };
+  readonly secrets: { readonly openai: boolean; readonly anthropic: boolean; readonly brainApiKey: boolean; readonly gemini?: boolean };
+  /** The local model server, whatever `brain` is: refreshed by config.probe, restartBrain and the local heal timer. */
+  readonly local: LocalServerStatus;
+  /** Where words go right now, computed by @hormes/core `dataPaths()`; the doctor computes the same rows. */
+  readonly dataPaths: readonly DataPath[];
+}
+
+// ---- local model servers: discovery data the engine puts on the snapshot -------------------
+
+/** Which local server answered. `ollama`: GET /api/version; `lmstudio`: GET /api/v0/models; `llamacpp`: GET /health. */
+export type LocalFlavor = "ollama" | "lmstudio" | "llamacpp";
+export const LOCAL_FLAVORS: readonly LocalFlavor[] = ["ollama", "lmstudio", "llamacpp"];
+/** Ollama's /api/show capabilities the brain reads; other flavours infer `completion`+`tools` (assumed) and `vision`/`embedding` from the model type. */
+export type LocalCapability = "completion" | "tools" | "vision" | "thinking" | "embedding";
+/**
+ * Weights against this Mac's memory — display data the engine computes, a rule of thumb, not a
+ * measurement: usable = 0.75 × RAM; `good` ≤ 50 % of usable, `tight` ≤ 85 %, else `no`;
+ * `unknown` when the server reports no size (LM Studio, llama.cpp).
+ */
+export type LocalFit = "good" | "tight" | "no" | "unknown";
+export interface LocalModel {
+  /** Verbatim as the server lists it ("qwen3.5:27b", "qwen3.5:27b-mlx"); always sent as-is. */
+  readonly id: string;
+  readonly capabilities: readonly LocalCapability[];
+  /** Bytes on disk (Ollama /api/tags `size`); absent when the server does not say. */
+  readonly sizeBytes?: number;
+  /** Trained maximum (Ollama model_info "<arch>.context_length"; LM Studio max_context_length; llama.cpp n_ctx). */
+  readonly contextLength?: number;
+  readonly family?: string;
+  readonly parameterSize?: string;
+  /** Ollama `modified_at`, wall-clock ms; the newest pull is the best intent signal for `bestFit`. */
+  readonly modifiedAt?: number;
+  readonly fit: LocalFit;
+  /** Loaded in memory right now (Ollama /api/ps; LM Studio state === "loaded"; llama.cpp always). */
+  readonly loaded: boolean;
+  /** Ollama `remote_host` set: runs on ollama.com, not this Mac. Never offered as a brain or an embedder. */
+  readonly cloud: boolean;
+}
+/** Tool-capable models the picker may show, per server; more are cut newest-first. */
+export const LOCAL_MODELS_MAX = 32;
+export interface LocalServerStatus {
+  readonly reachable: boolean;
+  readonly flavor?: LocalFlavor;
+  /** Ollama /api/version; others when they say. */
+  readonly version?: string;
+  /** The root in use (discovered or pinned), "" when none answered. */
+  readonly baseUrl: string;
+  /** Every non-cloud model with `completion` (tools-less ones included, so the picker can grey them), best fit first, ≤ LOCAL_MODELS_MAX. */
+  readonly models: readonly LocalModel[];
+  /** The id the engine chose when `Settings.brainModel` is empty under `local`; absent when a model is picked or nothing fits. */
+  readonly picked?: string;
+  /** The embedding model memory uses (first of EMBED_PREFERENCE present on the server); absent = keyword matching. */
+  readonly embedModel?: string;
+  /** What to suggest pulling for this Mac when nothing tool-capable is listed, e.g. { id: "qwen3.5:27b", sizeBytes: 17e9, command: "ollama pull qwen3.5:27b" }. Never run by Hormes. */
+  readonly suggested?: { readonly id: string; readonly sizeBytes: number; readonly command: string };
+  /** Total memory of this Mac, so a surface can say "17 GB of 128 GB". */
+  readonly ramBytes: number;
+  /** Wall-clock ms of the last look; 0 = never. */
+  readonly checkedAt: number;
+}
+/** The value before any look, and the empty value when nothing answers. */
+export const LOCAL_NONE: LocalServerStatus = { reachable: false, baseUrl: "", models: [], ramBytes: 0, checkedAt: 0 };
+
+/** One row of "where words go". The voice is always `cloud`; the brain and memory move with the settings; the web is the sites User asks for. */
+export type DataPathWhat = "voice" | "brain" | "memory" | "web";
+export type DataPathWhere = "cloud" | "mac" | "lan" | "off";
+export interface DataPath {
+  readonly what: DataPathWhat;
+  readonly where: DataPathWhere;
+  /** One mono line: "OpenAI gpt-live-1 — every word heard and said; billed per second", "qwen3.5:27b on Ollama 0.34.0 — nothing leaves". */
+  readonly detail: string;
 }
 
 /** Secret keys the surface may write through `config.set-secrets`. Nothing else goes in the env file. */
-export const SECRET_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY"] as const;
+export const SECRET_KEYS = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY", "GEMINI_API_KEY"] as const;
 export type SecretKey = (typeof SECRET_KEYS)[number];
 
 // ------------------------------------------------------------ permissions ---
@@ -521,7 +1005,7 @@ export type Grant = "granted" | "denied" | "unknown";
 
 /**
  * Every macOS permission Hormes asks for. The first four are what the voice and the
- * hands need to work at all; the rest let the brain reach what Kevin asks about
+ * hands need to work at all; the rest let the brain reach what User asks about
  * (his files, his apps, his contacts and calendar, the network) without a wall.
  * TCC keys every grant on the app bundle (the daemon and the hands helper are its
  * children), so the app is the one that asks and the one that reads.
@@ -577,6 +1061,257 @@ export interface AudioLevels {
   readonly output: number;
 }
 
+/** One Core Audio device as the app read it. `transport` is the HAL's word: bluetooth · built-in · hdmi · continuity · aggregate · usb (a four-char code is also accepted by the readers). */
+export interface AudioDeviceInfo {
+  readonly name: string;
+  readonly uid: string;
+  /** Nominal sample rate in Hz — on a Bluetooth headset the tell for hands-free (16 000 / 8 000) versus AAC (44 100+). */
+  readonly rate: number;
+  readonly channels: number;
+  readonly transport: string;
+}
+
+/**
+ * design12: the app's audio graph as it read itself back (`AudioStateReadback` in Swift), plain
+ * strings and numbers only. Sent app → daemon as the `audio-state` frame on start, stop, a route
+ * change and every 5 s with the counters (≤ 1 Hz, coalesced to changes); kept in the snapshot
+ * while the app is connected. The daemon does nothing with it but keep it: `status`, the doctor
+ * and the Console read it. Nothing here is a setting — `Settings.audio` is.
+ */
+export interface AudioState {
+  readonly running: boolean;
+  /** `input.isVoiceProcessingEnabled`, read after start / after stop. */
+  readonly voiceProcessing: boolean;
+  /** AUVoiceIOOtherAudioDuckingLevel: 0 default · 10 min · 20 mid · 30 max; absent when the unit is off. */
+  readonly duckLevel?: number;
+  readonly advancedDucking?: boolean;
+  readonly agc?: boolean;
+  readonly bypassed?: boolean;
+  /** The rung of the start ladder that won (1-based); 0 when the graph is down. */
+  readonly rung: number;
+  /** The output wiring word of that rung: automatic · input-rate · hardware. */
+  readonly wiring: string;
+  /** What the graph listens to: the system default input under echo cancellation, the ranked mic on the plain path. */
+  readonly hears?: AudioDeviceInfo;
+  /** The default output — its `rate` is the hands-free tell. */
+  readonly speaks?: AudioDeviceInfo;
+  readonly tapFormat: string;
+  /** `Settings.audio.recording` as the graph applied it. */
+  readonly recording: boolean;
+  /** The last rung won: echo cancellation was refused and the plain graph runs guarded. */
+  readonly fallback: boolean;
+  readonly guardOn: boolean;
+  readonly guardTailMs: number;
+  /** Total milliseconds the guard has held the wire since start (the `held 3.2 s` figure); absent from a build that does not count it. */
+  readonly guardHeldMs?: number;
+  /** Milliseconds of wire the `awake` earcon held since the graph was asked to start (either policy: the sound is outside the echo reference); absent from a build before the palette. */
+  readonly earconHeldMs?: number;
+  /** Chunks zero-filled / chunks sent / break-throughs since start. */
+  readonly gated: number;
+  readonly chunks: number;
+  readonly breakthroughs: number;
+  /** Names of other processes running input on `hears` (the app maps bundle ids to names); undefined = the HAL cannot say, never []. */
+  readonly sharedWith?: readonly string[];
+  /** `AVAudioApplication.shared.isInputMuted`. */
+  readonly inputMuted: boolean;
+  /** The voice-processing unit's own aggregate (`VPAUAggregateAudioDevice-*`) is in the device list; it must be gone after stop. (`CADefaultDeviceAggregate-*` is AVAudioEngine's own and is not this.) */
+  readonly aggregatePresent: boolean;
+  /** Stamped by the engine: wall-clock ms when `running` was last seen going true; absent while down. */
+  readonly since?: number;
+  /** Voice PLAN W1.5: the speaker player since the graph started; absent from a build that does not count it. */
+  readonly playout?: AudioPlayout;
+  /** Voice PLAN W1.5: the barge-in duck since the graph started. */
+  readonly duck?: AudioDuck;
+  /** Voice PLAN W1.5: what reached the speaker. */
+  readonly output?: AudioOutput;
+}
+
+// Voice PLAN W1.5: the playback telemetry. The app counts `playout`, `duck` and `output` (Audio/Playout.swift,
+// BargeInDuck.swift, AudioEngine.swift) and sends them in the `audio-state` frame; the daemon counts `liveAudio`.
+// Numbers and three closed-vocabulary words only: nothing here quotes what User or Hormes said. A level in
+// dBFS is absent when there was nothing to measure (silence is -inf, which JSON cannot carry).
+
+/** The speaker player since the graph started. `…Ms` are milliseconds of audio at 24 kHz. */
+export interface AudioPlayout {
+  /** Chunks played. */
+  readonly chunks: number;
+  /** The player ran dry mid-stream: how often, for how long in all, and the longest hole. */
+  readonly underruns: number;
+  readonly underrunMs: number;
+  readonly longestUnderrunMs: number;
+  /** The shadow zero-cushion count: the player of before the cushion, measured in the same session. */
+  readonly wouldBeUnderruns: number;
+  /** Start, flush, restart, after a gate. */
+  readonly resets: number;
+  /** The current pre-roll target. */
+  readonly targetMs: number;
+  /** The backlog at the last schedule. */
+  readonly queuedMs: number;
+  /** The smallest backlog this window; absent when nothing was scheduled in it. */
+  readonly queuedMinMs?: number;
+  /**
+   * The longest enqueue-to-run wait of a play block on the audio queue this window. A window is the time since
+   * the app's previous frame went out, so one wait behind a restart is in one frame, not every frame after it.
+   */
+  readonly lateMaxMs: number;
+  /** The longest such wait since the graph started, beside the cumulative underruns it may explain (the doctor reads it). Absent from an app before the field. */
+  readonly lateMaxGraphMs?: number;
+  /** Arrived while the graph was down. */
+  readonly droppedChunks: number;
+  readonly droppedMs: number;
+}
+
+/** The newest duck, for the `duck` line. `source`: what started it (`gate`; the word paths only confirm). */
+export interface AudioDuckLast {
+  readonly source: string;
+  readonly confirmed: boolean;
+  /** How deep it went: -6 unconfirmed, -20 confirmed. */
+  readonly depthDb: number;
+  /** The mic run that tripped it, and the threshold it crossed. */
+  readonly runDbfs?: number;
+  readonly thresholdDbfs?: number;
+  /** Back at unity this long after the duck; absent while it holds. */
+  readonly releasedAfterMs?: number;
+  /** Why it released: `quiet after gate`, `capped at 4 s`. */
+  readonly reason?: string;
+}
+
+/** The barge-in duck since the graph started (counts by kind, time ducked, the residual echo). */
+export interface AudioDuck {
+  readonly ducks: number;
+  /** Ducks the energy gate started. */
+  readonly gate: number;
+  readonly confirmed: number;
+  readonly unconfirmed: number;
+  /** Unconfirmed ducks held past 700 ms because the mic stayed hot. */
+  readonly held: number;
+  /** Partials refused as confirmation (Hormes's own words, or words from before the duck). */
+  readonly refusedWords: number;
+  /** Live items for User refused as confirmation (opened before the duck, or too soon after it). */
+  readonly refusedLive?: number;
+  /** Words with recent energy while nothing was ducked: what used to start a duck and now waits for the gate. */
+  readonly wordOnsetsSkipped: number;
+  /** Time at a gain under 0.9, and at -14 dB or deeper. */
+  readonly duckedMs: number;
+  readonly deepMs: number;
+  /** Mic slices while Hormes is audible and the duck is idle: the number that decides whether the gate trips on his own echo. */
+  readonly residualP50Dbfs?: number;
+  readonly residualP99Dbfs?: number;
+  /** The learned echo floor. */
+  readonly echoFloorDbfs?: number;
+  readonly last?: AudioDuckLast;
+}
+
+/** What reached the speaker: voiced chunks before the duck, after its gain, the mixer's format, the device volume. */
+export interface AudioOutput {
+  readonly rmsDbfs?: number;
+  readonly peakDbfs?: number;
+  readonly heardRmsDbfs?: number;
+  /** Voiced audio played (chunks at or over the audible level): the doctor's per-minute rules divide by it. Absent from an app before the field. */
+  readonly audibleMs?: number;
+  /** The mainMixer-to-output connection: `48000 Hz ×2`. */
+  readonly mixFormat?: string;
+  /** The default output's volume scalar, 0..1 (HAL); absent when the HAL cannot say. */
+  readonly volume?: number;
+}
+
+/** The daemon's own view of the voice's audio (`Snapshot.liveAudio`), since the session opened. */
+export interface LiveAudio {
+  /** Audio deltas from Live, and their size in milliseconds. */
+  readonly deltas: number;
+  readonly deltaMsP50?: number;
+  readonly deltaMsMax?: number;
+  /** Inter-arrival times. */
+  readonly arrivalP99Ms?: number;
+  readonly arrivalMaxMs?: number;
+  /** How far Live sends ahead of real time: the spread of (cumulative audio minus wall time) since the first delta. */
+  readonly aheadMs?: number;
+  /** Frames the output gate dropped. */
+  readonly gatedFrames: number;
+  /** The event loop's longest delay per 5 s (`monitorEventLoopDelay`). */
+  readonly loopDelayMaxMs?: number;
+  /** The rate echoed in session.started. */
+  readonly formatRate?: number;
+}
+
+/** Shape checks for one telemetry object: present and finite where required, finite or absent where optional, a string where named. */
+function telemetryOk(value: unknown, required: readonly string[], optional: readonly string[], strings: readonly string[] = []): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const o = value as Record<string, unknown>;
+  const finite = (k: string): boolean => typeof o[k] === "number" && Number.isFinite(o[k] as number);
+  return required.every(finite) && optional.every((k) => o[k] === undefined || finite(k)) && strings.every((k) => o[k] === undefined || typeof o[k] === "string");
+}
+
+const PLAYOUT_REQUIRED = ["chunks", "underruns", "underrunMs", "longestUnderrunMs", "wouldBeUnderruns", "resets", "targetMs", "queuedMs", "lateMaxMs", "droppedChunks", "droppedMs"] as const;
+const DUCK_REQUIRED = ["ducks", "gate", "confirmed", "unconfirmed", "held", "refusedWords", "wordOnsetsSkipped", "duckedMs", "deepMs"] as const;
+const DUCK_OPTIONAL = ["refusedLive", "residualP50Dbfs", "residualP99Dbfs", "echoFloorDbfs"] as const;
+
+function duckLastOk(value: unknown): boolean {
+  if (!telemetryOk(value, ["depthDb"], ["runDbfs", "thresholdDbfs", "releasedAfterMs"], ["reason"])) return false;
+  const l = value as Record<string, unknown>;
+  return typeof l["source"] === "string" && typeof l["confirmed"] === "boolean";
+}
+
+/** What `isAudioState` may shed from a frame it passes: a telemetry object, or only the duck's `last`. */
+export type AudioTelemetryShed = "playout" | "duck" | "duck.last" | "output";
+
+/** The duck's check. A malformed `last` costs only itself: it is deleted (and named in `shed`) and the duck's own counts pass. */
+function duckOk(value: unknown, shed: AudioTelemetryShed[] | undefined): boolean {
+  if (!telemetryOk(value, DUCK_REQUIRED, DUCK_OPTIONAL)) return false;
+  const d = value as Record<string, unknown>;
+  if (d["last"] === undefined || duckLastOk(d["last"])) return true;
+  if (!Reflect.deleteProperty(d, "last")) return false;
+  shed?.push("duck.last");
+  return true;
+}
+
+/** The telemetry objects an `audio-state` frame may carry, each with its own check. */
+const TELEMETRY_CHECKS: readonly (readonly [key: "playout" | "duck" | "output", ok: (value: unknown, shed: AudioTelemetryShed[] | undefined) => boolean])[] = [
+  ["playout", (v) => telemetryOk(v, PLAYOUT_REQUIRED, ["queuedMinMs", "lateMaxGraphMs"])],
+  ["duck", duckOk],
+  ["output", (v) => telemetryOk(v, [], ["rmsDbfs", "peakDbfs", "heardRmsDbfs", "audibleMs", "volume"], ["mixFormat"])],
+];
+
+/**
+ * The wire's shape check for an `audio-state` frame: the booleans and counters the readers index on must be there
+ * and typed; a frame that fails is dropped, never kept. The playback telemetry (`playout`, `duck`, `output`) is
+ * checked as strictly, but a malformed one costs only itself: it is deleted from the frame (a parsed object the
+ * caller owns) and the rest passes, so the devices, the guard counters and the `audio.guard` row still land.
+ *
+ * `shed`, when given, gets the name of each object deleted (`AudioTelemetryShed`), so the caller can log what a
+ * passing frame lost. Without it the loss is silent: the frame passes and the object is absent.
+ */
+export function isAudioState(value: unknown, shed?: AudioTelemetryShed[]): value is AudioState {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  const bool = (k: string): boolean => typeof v[k] === "boolean";
+  const num = (k: string): boolean => typeof v[k] === "number" && Number.isFinite(v[k] as number);
+  const optBool = (k: string): boolean => v[k] === undefined || typeof v[k] === "boolean";
+  const optNum = (k: string): boolean => v[k] === undefined || num(k);
+  const device = (k: string): boolean => {
+    const d = v[k];
+    if (d === undefined) return true;
+    if (typeof d !== "object" || d === null) return false;
+    const o = d as Record<string, unknown>;
+    return typeof o["name"] === "string" && typeof o["uid"] === "string" && typeof o["rate"] === "number" && typeof o["channels"] === "number" && typeof o["transport"] === "string";
+  };
+  if (!(bool("running") && bool("voiceProcessing") && bool("recording") && bool("fallback") && bool("guardOn") && bool("inputMuted") && bool("aggregatePresent"))) return false;
+  if (!(num("rung") && num("guardTailMs") && num("gated") && num("chunks") && num("breakthroughs"))) return false;
+  if (!(typeof v["wiring"] === "string" && typeof v["tapFormat"] === "string")) return false;
+  if (!(optNum("duckLevel") && optBool("advancedDucking") && optBool("agc") && optBool("bypassed") && optNum("guardHeldMs") && optNum("earconHeldMs") && optNum("since"))) return false;
+  if (!(device("hears") && device("speaks"))) return false;
+  const shared = v["sharedWith"];
+  if (!(shared === undefined || (Array.isArray(shared) && shared.every((s) => typeof s === "string")))) return false;
+  // Only a frame that passed sheds anything. A frozen frame that cannot shed is dropped whole. `shed` names only
+  // what was deleted.
+  for (const [key, ok] of TELEMETRY_CHECKS) {
+    if (v[key] === undefined || ok(v[key], shed)) continue;
+    if (!Reflect.deleteProperty(v, key)) return false;
+    shed?.push(key);
+  }
+  return true;
+}
+
 export type Accent = "american" | "british" | "none";
 export const ACCENTS: readonly Accent[] = ["american", "british", "none"];
 /** GPT-Live-1's built-in voices (mirror of `BuiltInVoice` in @hormes/live; a type-level test keeps them equal). All speak English. */
@@ -587,6 +1322,7 @@ export const VOICES = [
 export type Voice = (typeof VOICES)[number];
 
 export interface SessionInfo {
+  readonly voiceProvider?: "openai" | "gemini";
   readonly id: string;
   /** The voice and accent this session was opened with (a change is heard at the next wake). */
   readonly voice?: string;
@@ -606,13 +1342,15 @@ export interface Snapshot {
   readonly agents: readonly AgentInfo[];
   readonly connectors: readonly ConnectorHealth[];
   readonly settings: Settings;
+  readonly approval?: { readonly id: string; readonly threadId: string; readonly description: string; readonly requiresOwner: boolean };
+  readonly suggestions?: readonly ProactiveSuggestion[];
   readonly permissions: Permissions;
   /** Most recent problems, newest last: what kind, one line, and the one action that fixes it. Cleared by the user. */
   readonly problems: readonly Problem[];
   readonly brainReady: boolean;
   readonly handsReady: boolean;
   readonly setup: SetupStatus;
-  /** Regions Kevin circled, newest last; the next delegation sees the unconsumed ones. */
+  /** Regions User circled, newest last; the next delegation sees the unconsumed ones. */
   readonly marks: readonly ScreenMark[];
   /**
    * Present while paused: a pause closes the Live session (the meter stops) and holds
@@ -623,25 +1361,48 @@ export interface Snapshot {
   readonly usageToday?: UsageToday;
   /** What the trash holds, for the Console ("3 days · 129 MB"; Reveal in Finder). */
   readonly trash?: TrashInfo;
-  /** Agents Kevin hid from the rail (agent.hidden rows). */
+  /** Agents User hid from the rail (agent.hidden rows). */
   readonly hiddenAgents?: readonly string[];
-  /** What Hormes remembers about Kevin: counts, mode, the last run, what the last turn used. */
+  /** What Hormes remembers about User: counts, mode, the last run, what the last turn used. */
   readonly memory?: MemorySummary;
   /** Every live thread (main first) and those finished within THREAD_LINGER_MS; ≤ THREADS_MAX. */
   readonly threads: readonly Thread[];
+  /**
+   * The live rows, ≤ AUTOMATIONS_MAX (armed/snoozed/deferred by nextAt, then the rest by updatedAt), then
+   * the trashed rows, ≤ AUTOMATIONS_TRASHED_MAX newest first, `state: "trashed"` — the Console's Trash fold
+   * reads those and every rail filters by state; nothing else lists a trashed row.
+   */
+  readonly automations: readonly Automation[];
+  /** The newest `fired` row with a line, while one is up (`calm`, `lateMs` and `more` filled by the projection). */
+  readonly ringing?: RingLine;
+  /** The foot's "next Timer 12:00 · pasta". */
+  readonly nextFire?: { readonly id: string; readonly kind: AutomationKind; readonly name: string; readonly at: number };
+  /** The recipes the shell gate now rates `confirm` (by name): the Console's `asks` badge, never pickable for a row. Re-judged at every snapshot. */
+  readonly recipesAsking: readonly string[];
+  /** design12: the app's audio graph as it last read itself back; absent when no app is connected. */
+  readonly audioState?: AudioState;
+  /** Voice PLAN W1.5: the daemon's own counts of the open session's audio; absent while no session is open. */
+  readonly liveAudio?: LiveAudio;
 }
 
 /** `dock`: Hormes twice in the Dock (a recent tile next to the pin, or two pins); the engine's read-only audit raises it, Fix the Dock repairs it. */
+/** `brain.local`: the local server or model needs User — not running, nothing pulled that can call tools, the picked id is gone, a cloud tag, a window too small. Amber, with the command to run in `remedy.copy`. */
+/** `automation.*`: a row fired late or was skipped (`missed`, remedy Run now), an action kind is off in Settings (`blocked`), the wake-brain minutes are spent (`budget`), banners are denied (`notifications`), a watched folder cannot be read (`watch`, remedy Ask), an unattended fire failed (`failed`, SL-15: a red recipe exit is there in the morning; remedy Open Console or Run now; the row's next ok fire clears it). */
+/** `app.version` (APP-3): the app and the daemon were built from different checkouts (their hellos' PROTOCOL_VERSION differ, or a snapshot did not decode). The text says to restart the daemon (the remedy, Restart daemon) and, if the skew stays, to run pnpm build:mac (`remedy.copy`): a respawn fixes a daemon older than the app, only a rebuild fixes an app older than the daemon. Go is refused until it clears. */
 export type ProblemKind =
   | "permission.accessibility" | "permission.screenRecording" | "permission.microphone" | "permission.fullDiskAccess" | "permission.other"
-  | "brain.unavailable" | "brain.probe" | "voice.limit" | "voice.connection" | "voice.key" | "hands.helper" | "disk.low" | "dock" | "daemon" | "crash" | "other";
+  | "brain.unavailable" | "brain.probe" | "brain.local" | "voice.limit" | "voice.connection" | "voice.key" | "hands.helper" | "disk.low" | "dock" | "daemon" | "crash" | "other"
+  | "automation.missed" | "automation.blocked" | "automation.budget" | "automation.notifications" | "automation.watch" | "automation.failed"
+  | "app.version";
 
 export interface ProblemRemedy {
-  /** Button text: "Open pane", "Request", "Retry", "Reveal", "Restart daemon", "Fix the Dock". */
+  /** Button text: "Open pane", "Request", "Retry", "Reveal", "Restart daemon", "Fix the Dock"; the automation problems say "Run now" (missed), "Open Console" (blocked), "Ask" (watch). */
   readonly label: string;
   /** What the button does: an EngineCommand the surface sends, or a URL/path the surface opens. */
   readonly command?: EngineCommand;
   readonly open?: string;
+  /** Text the surface offers to copy (a shell command User runs himself: `ollama pull qwen3.5:27b`). Never executed by any surface. */
+  readonly copy?: string;
 }
 
 export interface Problem {
@@ -672,6 +1433,23 @@ export interface UsageToday {
 }
 
 /**
+ * LM-6: one day of the `ledger.days` reply's `totals`, for the Ledger tab's day rows and month heads. Each session
+ * counts once, the way the meter (`usageToday`) and the Ledger tab's page stats count it.
+ */
+export interface LedgerDayTotals {
+  /** YYYY-MM-DD local, as the day list spells it. */
+  readonly day: string;
+  /** The day file's `session.started` rows. */
+  readonly sessions: number;
+  /**
+   * Each session's seconds, once, in the day file of the row that carries them. A session with a `session.closed`
+   * row (a SESSION_LOST_REASON close included) counts that row's `usageSeconds`. Only a session with no closed row
+   * yet counts its last `session.usage` row. Never both: a lost close repeats its last usage row's seconds.
+   */
+  readonly billedSeconds: number;
+}
+
+/**
  * One of Hormes's own Live sessions as the ledger recorded it — the Console's
  * "Hormes" section. A resume opens a new session continuing the paused one;
  * `resumedFrom` links the chain into one conversation.
@@ -688,12 +1466,12 @@ export interface HormesSessionSummary {
   readonly heard: number;
   readonly said: number;
   readonly delegations: number;
-  /** The first thing Kevin said in it, trimmed; "" when nothing was heard. */
+  /** The first thing User said in it, trimmed; "" when nothing was heard. */
   readonly title: string;
   readonly resumedFrom?: string;
   /** Conversation (chain) state from the tombstone rows; absent = active. */
   readonly state?: ConversationState;
-  /** Kevin's own name for the conversation ("" or absent = the auto title). */
+  /** User's own name for the conversation ("" or absent = the auto title). */
   readonly name?: string;
   readonly pinned?: boolean;
   readonly trashedAt?: number;
@@ -703,8 +1481,22 @@ export type ConversationState = "active" | "archived" | "trashed";
 
 // --------------------------------------------------------- shell messages ---
 
+/**
+ * APP-3: the contract's version. The daemon and the app each send it in their hello (daemon/src/wire.ts); the
+ * Swift mirror is `ProtocolVersion.current` and a test pins the two equal. A peer whose number differs, or that
+ * sends none (a build from before the field), was built from another checkout: a pull, or a respawn from new
+ * source under an old binary. That is `app.version`. Bump it when a change would make the other side fail or
+ * misread a frame: a required field added, renamed or retyped, a frame or a command renamed. An optional
+ * addition normally does not bump it; changed approval semantics also require a
+ * bump so an older app or daemon cannot silently retain weaker authorization.
+ */
+// Owner-authenticated approvals require the matching app/daemon contract.
+export const PROTOCOL_VERSION = 4;
+
 /** Engine → surface. Snapshots are full and cheap; levels are high-frequency and separate. */
 export type EngineEvent =
+  | { readonly type: "calendar.read"; readonly request: CalendarReadRequest }
+  | { readonly type: "work.state"; readonly reply: WorkReply }
   | { readonly type: "snapshot"; readonly snapshot: Snapshot }
   | { readonly type: "levels"; readonly levels: AudioLevels }
   | { readonly type: "toast"; readonly text: string; readonly tone: "info" | "warn" | "error" }
@@ -715,7 +1507,16 @@ export type EngineEvent =
   /** One change on one thread (broadcast, ≤ 200 B); a spawned thread's steps never rebuild the snapshot. */
   | { readonly type: "thread.event"; readonly event: ThreadEvent }
   /** A page of a thread's conversation (`replace`), new rows (`append`) or older ones (`prepend`); viewers only. */
-  | { readonly type: "thread.transcript"; readonly transcript: ThreadTranscript; readonly mode: "replace" | "append" | "prepend" };
+  | { readonly type: "thread.transcript"; readonly transcript: ThreadTranscript; readonly mode: "replace" | "append" | "prepend" }
+  /** One change on one automation row (broadcast, coalesced 50 ms per id; ≤ 200 B except `fired`, ≈ 270 B with its presses). */
+  | { readonly type: "automation.event"; readonly event: AutomationEvent }
+  /**
+   * The app plays the earcon and the local speaker reads `text`; never model text except a redacted wake-brain line ≤ AUTOMATION_LINE_CHARS.
+   * `sound` picks the file; `ring` (a chime's, set from the row's kind) makes it a ring. An app before `ring` reads the name alone.
+   */
+  | { readonly type: "local.say"; readonly text?: string; readonly sound?: "Pop" | "Glass" | "Ping" | "Hero"; readonly ring?: LocalSayRing; readonly automationId: string }
+  /** A banner with the ring's presses; a press lands on the same row as the island's. */
+  | { readonly type: "notify"; readonly id: string; readonly title: string; readonly body?: string; readonly presses: readonly AutomationPress[]; readonly automationId: string };
 
 /**
  * A settings change. `null` clears an optional field (JSON has no way to send
@@ -725,7 +1526,10 @@ export type SettingsPatch = { readonly [K in keyof Settings]?: Settings[K] | nul
 
 /** Surface → engine. */
 export type EngineCommand =
-  /** Sleep: return to the notch and close the session. `cause` says why (absent = `command`); `phrase` is the cue Kevin said. */
+  | { readonly type: "calendar.result"; readonly result: CalendarReadResult }
+  | { readonly type: "work.command"; readonly command: WorkCommand }
+  | { readonly type: "suggestion.accept" | "suggestion.dismiss"; readonly id: string }
+  /** Sleep: return to the notch and close the session. `cause` says why (absent = `command`); `phrase` is the cue User said. */
   | { readonly type: "sleep"; readonly cause?: SleepCause; readonly phrase?: string }
   | { readonly type: "mute" }
   | { readonly type: "unmute" }
@@ -781,7 +1585,7 @@ export type EngineCommand =
   /** `viewer` names the pane that opened it (the daemon prefixes its client id) so opens are per pane and a dead client's tails close. */
   | { readonly type: "agent.open"; readonly agentId: string; readonly viewer?: string }
   | { readonly type: "agent.close"; readonly agentId: string; readonly viewer?: string }
-  /** Kevin pressed Switch now after picking a voice or accent: pause, then resume with the new voice (never while work runs). */
+  /** User pressed Switch now after picking a voice or accent: pause, then resume with the new voice (never while work runs). */
   | { readonly type: "voice.reopen" }
   // ---- memory (the Console's Memory rail and the CLI). Forget is a state, never a deletion.
   | { readonly type: "memory.forget"; readonly id: string }
@@ -800,13 +1604,38 @@ export type EngineCommand =
   | { readonly type: "thread.pause"; readonly threadId: string }
   | { readonly type: "thread.resume"; readonly threadId: string }
   /** Allow / Deny the question a thread holds the floor with; refused when the floor is another thread's. */
-  | { readonly type: "thread.answer"; readonly threadId: string; readonly yes: boolean }
-  /** A follow-up turn on that thread's own brain, in Kevin's words. */
+  | { readonly type: "thread.answer"; readonly threadId: string; readonly yes: boolean; readonly pendingId?: string }
+  /** A follow-up turn on that thread's own brain, in User's words. */
   | { readonly type: "thread.say"; readonly threadId: string; readonly text: string }
+  // ---- automations (the Console's rail, the island's presses, the CLI). Never a deletion: Move to Trash / Restore.
+  /** Console form / CLI; the engine fills id, state, fires, createdAt and stamps createdBy.by from `by` (absent = console; the CLI sends "cli"). */
+  | { readonly type: "automation.set"; readonly automation: AutomationDraft; readonly by?: "console" | "cli" }
+  | { readonly type: "automation.snooze"; readonly id: string; readonly minutes: number }
+  | { readonly type: "automation.done"; readonly id: string }
+  /** repeater: roll the next occurrence · one-shot: done without firing */
+  | { readonly type: "automation.skip"; readonly id: string }
+  | { readonly type: "automation.pause"; readonly id: string }
+  | { readonly type: "automation.resume"; readonly id: string }
+  /** `by` names the surface, as on automation.set (absent = console; the CLI sends "cli"); the ledger's automation.set row wears it. */
+  | { readonly type: "automation.rename"; readonly id: string; readonly name: string; readonly by?: "console" | "cli" }
+  | { readonly type: "automation.trash"; readonly id: string }
+  | { readonly type: "automation.restore"; readonly id: string }
+  /** fire it now — refused unless a Live session is open (User hears it) or the command came from the Console/CLI with User present (presence.recent) */
+  | { readonly type: "automation.run"; readonly id: string }
+  /** the Console's Recipes list; the engine writes settings.json */
+  | { readonly type: "recipe.set"; readonly recipe: ShellRecipe }
+  /** Move to Trash: the recipe stays in Settings with `trashedAt`, hidden and unpickable; `recipe.restore` clears it. Never a deletion. */
+  | { readonly type: "recipe.trash"; readonly name: string }
+  | { readonly type: "recipe.restore"; readonly name: string }
   /** Older turns before message `before`. */
   | { readonly type: "agent.history"; readonly agentId: string; readonly before: string }
-  /** Kevin circled a region of the screen for Hormes (global points; `path` is his stroke). */
+  /** User circled a region of the screen for Hormes (global points; `path` is his stroke). */
   | { readonly type: "mark.add"; readonly rect: Rect; readonly path?: readonly Point[] }
+  /** Forget one circled region — the × on a thumbnail on the notch or in the Console. An unknown or malformed id changes nothing. The PNG stays a day's shot. */
+  | { readonly type: "mark.remove"; readonly id: string }
+  /** Capture the frontmost window as a mark — the notch's Window box. The window's frame is the rect (no snap), `element` is {role:"window", title, app}, `source` is "window". Works asleep. No front window: a warn toast, no mark. */
+  | { readonly type: "mark.window" }
+  /** Forget every circled region. */
   | { readonly type: "mark.clear" }
   /** Exit the daemon with code 75 so the app respawns it on the new code (after a self-edit passed its checks). */
   | { readonly type: "daemon.restart" }
@@ -829,7 +1658,7 @@ export interface Point {
 }
 
 /** Engine → annotation layer. Global points. */
-/** Colour family of an annotation: accent (Hormes pointing), ok/warn (feedback), mark (Kevin's own circles). */
+/** Colour family of an annotation: accent (Hormes pointing), ok/warn (feedback), mark (User's own circles). */
 export type OverlayTone = "accent" | "ok" | "warn" | "mark";
 
 export type OverlayCommand =
@@ -842,21 +1671,38 @@ export type OverlayCommand =
   | { readonly cmd: "arrow"; readonly from: Point; readonly to: Point; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
   | { readonly cmd: "rect"; readonly rect: Rect; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
   | { readonly cmd: "text"; readonly x: number; readonly y: number; readonly text: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
-  /** A freehand stroke (Kevin's circle echoed back, or a brain drawing). */
+  /** A freehand stroke (User's circle echoed back, or a brain drawing). */
   | { readonly cmd: "stroke"; readonly points: readonly Point[]; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone }
-  /** The blob flies to a point and hovers there for dwellMs (default 2 s) before drifting home. */
-  | { readonly cmd: "orb.fly"; readonly x: number; readonly y: number; readonly dwellMs?: number; readonly reason?: string; readonly thread?: string }
-  /**
-   * The blob draws: it flies to the first point, becomes a cursor, and drags the
-   * stroke along the points (closing it when `closed`), then goes home. The stroke
-   * stays on the layer for ttlMs. This is how Hormes points at things and how it
-   * outlines what Kevin circled — a hand-drawn line, not a stamped shape.
-   */
-  | { readonly cmd: "orb.trace"; readonly points: readonly Point[]; readonly closed?: boolean; readonly label?: string; readonly ttlMs?: number; readonly tone?: OverlayTone; readonly reason?: string; readonly thread?: string }
-  | { readonly cmd: "orb.home" }
   | { readonly cmd: "clear" };
 
 // ----------------------------------------------------------------- ledger ---
+
+/**
+ * V8 / LM-2: the `session.closed` reason for a session the daemon died in. The next start sweeps the ledger before
+ * it appends anything, and writes that close with:
+ * - `usageSeconds`: the session's last `session.usage` row's (0 s when it has none).
+ * - `at`: the newest `at` the dead daemon wrote, the largest in the newest day file. That is never earlier than any
+ *   row of the session, its last usage row included.
+ *
+ * The `at` picks the day file (`Ledger.append`), so the close lands where a normal close would have: in the dead
+ * daemon's last day, however many midnights the restart comes after. It sits after the session's rows by position
+ * and sorts after them by `at`, so a view that orders by `at` shows the close last. That is still an append.
+ */
+export const SESSION_LOST_REASON = "lost";
+
+/**
+ * A decision a ledger day's move to the Trash carried (core's `Ledger.carry`): a `conversation.*`, `now.*` or
+ * `agent.hidden` row still in force when its day left, written again into the day file of the move (append-only;
+ * the original moved with its day) with `carried: true`, `at` the move's instant and `decidedAt` the instant User
+ * decided. A part of a conversation that stays gets its own copy under its own root (`chainId`). `ledger.session`
+ * and `ledger.chain` answer a copy at `decidedAt`, and leave out one whose original is in the same answer; a day's
+ * rows (`ledger.read`) hold the copy where the move wrote it, so a surface showing a day says it was carried rather
+ * than show a fresh decision at the move's time.
+ */
+export interface CarriedDecision {
+  readonly carried?: true;
+  readonly decidedAt?: number;
+}
 
 /**
  * One line of ~/.hormes/ledger/<date>.jsonl. Append-only; the Console is a view
@@ -867,7 +1713,10 @@ export type OverlayCommand =
  */
 export type LedgerRow =
   | { readonly at: number; readonly type: "session.started"; readonly sessionId: string; readonly voice: string; readonly resumedFrom?: string; readonly language?: string; readonly accent?: Accent }
+  /** `reason` is the close's own word (`sleep:said`, Live's), or SESSION_LOST_REASON for a session the daemon died in (its seconds are its last usage row's; its `at` is the newest the dead daemon wrote). */
   | { readonly at: number; readonly type: "session.closed"; readonly sessionId: string; readonly reason: string; readonly usageSeconds: number }
+  /** V8 / LM-2: the open session's billed seconds so far, coalesced every 60 s and at detach. A daemon that dies with the session open leaves this as its last word. */
+  | { readonly at: number; readonly type: "session.usage"; readonly sessionId: string; readonly usageSeconds: number }
   /** A pause closed `sessionId` to stop the meter; the conversation is held. */
   | { readonly at: number; readonly type: "pause"; readonly sessionId: string; readonly usageSeconds: number }
   /** A resume opened `sessionId` continuing `resumedFrom` after `pausedMs`. */
@@ -886,9 +1735,9 @@ export type LedgerRow =
   // ---- memory audit rows: ids only (an item's text lives in the memory store, so a forgotten item's words never sit in a day file).
   | { readonly at: number; readonly type: "memory.added"; readonly id: string; readonly kind: MemoryKind; readonly origin: MemoryOrigin }
   | { readonly at: number; readonly type: "memory.updated"; readonly id: string }
-  | { readonly at: number; readonly type: "memory.forgotten"; readonly id: string; readonly by: "kevin" | "reflex" | "cli" }
+  | { readonly at: number; readonly type: "memory.forgotten"; readonly id: string; readonly by: "user" | "reflex" | "cli" }
   | { readonly at: number; readonly type: "memory.restored"; readonly id: string }
-  | { readonly at: number; readonly type: "memory.run"; readonly sessionId?: string; readonly extractor: "responses" | "rules"; readonly added: number; readonly updated: number; readonly noop: number; readonly refused: number; readonly ms: number }
+  | { readonly at: number; readonly type: "memory.run"; readonly sessionId?: string; readonly extractor: "responses" | "local" | "rules"; readonly added: number; readonly updated: number; readonly noop: number; readonly refused: number; readonly ms: number }
   // ---- threads: the table rebuilds from these at daemon start. Status rows only for starting / waiting-* / paused, never thinking↔acting.
   | { readonly at: number; readonly type: "thread.started"; readonly thread: Thread }
   | { readonly at: number; readonly type: "thread.status"; readonly threadId: string; readonly status: ThreadStatus; readonly threadStatus?: ThreadStatus; readonly detail?: string }
@@ -899,33 +1748,56 @@ export type LedgerRow =
   // conversation stay where they were written. `chainId` is any session id of the chain
   // (the walk resolves it to the root); the last row by `at` wins; `restored` undoes both
   // `trashed` and `archived`. Nothing is ever deleted: whole day files MOVE to
-  // <stateDir>/trash by rename(2) (`ledger.moved`), and move back on restore.
-  | { readonly at: number; readonly type: "conversation.trashed"; readonly chainId: string; readonly by: "kevin" | "retention" }
-  | { readonly at: number; readonly type: "conversation.restored"; readonly chainId: string }
-  | { readonly at: number; readonly type: "conversation.archived"; readonly chainId: string }
-  | { readonly at: number; readonly type: "conversation.renamed"; readonly chainId: string; readonly name: string }
-  | { readonly at: number; readonly type: "conversation.pinned"; readonly chainId: string; readonly pinned: boolean }
-  /** Kevin cleared the Now stream: items at or before `at` of `sessionId` are hidden from the live view (the ledger keeps them). */
-  | { readonly at: number; readonly type: "now.cleared"; readonly sessionId: string }
-  | { readonly at: number; readonly type: "now.restored"; readonly sessionId: string }
-  /** A whole day's ledger file or shots folder moved between the live dirs and <stateDir>/trash (never unlinked). */
-  | { readonly at: number; readonly type: "ledger.moved"; readonly day: string; readonly what: "ledger" | "shots"; readonly to: "trash" | "live"; readonly path: string; readonly by: "kevin" | "retention" }
-  | { readonly at: number; readonly type: "agent.hidden"; readonly agentId: string; readonly hidden: boolean }
-  /** A confirmation Kevin gave that stays good for the rest of the conversation (same app, same action class); `until` is wall-clock ms. */
-  | { readonly at: number; readonly type: "grant"; readonly chainId: string; readonly app: string; readonly actionClass: string; readonly until: number };
+  // <stateDir>/trash by rename(2) (`ledger.moved`), and move back on restore. A decision
+  // still in force when its day moves is carried into that day's file (CarriedDecision).
+  | ({ readonly at: number; readonly type: "conversation.trashed"; readonly chainId: string; readonly by: "user" | "retention" } & CarriedDecision)
+  | ({ readonly at: number; readonly type: "conversation.restored"; readonly chainId: string } & CarriedDecision)
+  | ({ readonly at: number; readonly type: "conversation.archived"; readonly chainId: string } & CarriedDecision)
+  | ({ readonly at: number; readonly type: "conversation.renamed"; readonly chainId: string; readonly name: string } & CarriedDecision)
+  | ({ readonly at: number; readonly type: "conversation.pinned"; readonly chainId: string; readonly pinned: boolean } & CarriedDecision)
+  /** User cleared the Now stream: items at or before `at` of `sessionId` are hidden from the live view (the ledger keeps them). */
+  | ({ readonly at: number; readonly type: "now.cleared"; readonly sessionId: string } & CarriedDecision)
+  | ({ readonly at: number; readonly type: "now.restored"; readonly sessionId: string } & CarriedDecision)
+  /**
+   * A whole day's ledger file or shots folder moved between the live dirs and <stateDir>/trash (never unlinked).
+   * `lineage` (a ledger day's move to the Trash): per session id that stays and continues a conversation, the
+   * session ids that leave (or left before) whose conversation it continues. Memory hides by it (decision D5), so
+   * what was learned from a conversation follows the part of it that stays, whichever day moved.
+   */
+  | { readonly at: number; readonly type: "ledger.moved"; readonly day: string; readonly what: "ledger" | "shots"; readonly to: "trash" | "live"; readonly path: string; readonly by: "user" | "retention"; readonly lineage?: Readonly<Record<string, readonly string[]>> }
+  | ({ readonly at: number; readonly type: "agent.hidden"; readonly agentId: string; readonly hidden: boolean } & CarriedDecision)
+  /** A confirmation User gave that stays good for the rest of the conversation (same app, same action class); `until` is wall-clock ms. */
+  | { readonly at: number; readonly type: "grant"; readonly chainId: string; readonly app: string; readonly actionClass: string; readonly until: number }
+  | { readonly at: number; readonly type: "proactive.decision"; readonly id: string; readonly agentId: string; readonly decision: "offered" | "accepted" | "dismissed" }
+  // ---- automations: the record, never a session's rows (META_TYPES). The schedule itself lives in automations/jobs.ndjson.
+  | { readonly at: number; readonly type: "automation.set"; readonly automation: Automation; readonly by: "brain" | "console" | "cli" }
+  | { readonly at: number; readonly type: "automation.fired"; readonly id: string; readonly actions: readonly AutomationActionKind[]; readonly ok: boolean; readonly line: string; readonly detail?: string; readonly lateMs?: number; readonly ms: number; readonly delegationId?: string; readonly brainSeconds?: number }
+  | { readonly at: number; readonly type: "automation.state"; readonly id: string; readonly state: AutomationState; readonly by: "user" | "brain" | "engine"; readonly until?: number; readonly detail?: string }
+  | { readonly at: number; readonly type: "automation.missed"; readonly id: string; readonly dueAt: number; readonly lateMs?: number; readonly skipped?: boolean; readonly why: MissedWhy }
+  | { readonly at: number; readonly type: "recipe.set"; readonly recipe: ShellRecipe; readonly by: "user" | "brain" }
+  | { readonly at: number; readonly type: "recipe.trashed"; readonly name: string }
+  | { readonly at: number; readonly type: "recipe.restored"; readonly name: string }
+  // ---- audio (design12): one row per User turn while the software echo guard holds the wire (Recording, or the fallback rung) — the counters as the app last reported them, so a self-talk loop reads as rising `gated` with no `breakthroughs`.
+  | { readonly at: number; readonly type: "audio.guard"; readonly sessionId?: string; readonly tailMs: number; readonly heldMs?: number; readonly gated: number; readonly chunks: number; readonly breakthroughs: number; readonly fallback: boolean }
+  /** Voice PLAN W1.5: one row at session close with the last playback counters, so `status` and the doctor can read the last session while Hormes sleeps. No transcript text. */
+  | { readonly at: number; readonly type: "audio.playout"; readonly sessionId?: string; readonly playout?: AudioPlayout; readonly duck?: AudioDuck; readonly output?: AudioOutput; readonly liveAudio?: LiveAudio };
 
 // ------------------------------------------------------------ type guards ---
 
 const ENGINE_COMMAND_TYPES: ReadonlySet<string> = new Set([
+  "work.command", "calendar.result",
+  "suggestion.accept", "suggestion.dismiss",
   "sleep", "mute", "unmute", "stop", "go", "interrupt", "say-text", "set-settings", "clear-problems",
-  "agent.send", "agent.refresh", "open-console", "open-ledger", "request-permission", "config.set-secrets", "config.probe", "agent.open", "agent.close", "agent.history", "mark.add", "mark.clear", "daemon.restart", "pause", "resume",
+  "agent.send", "agent.refresh", "open-console", "open-ledger", "request-permission", "config.set-secrets", "config.probe", "agent.open", "agent.close", "agent.history", "mark.add", "mark.remove", "mark.window", "mark.clear", "daemon.restart", "pause", "resume",
   "conversation.trash", "conversation.restore", "conversation.archive", "conversation.rename", "conversation.pin", "conversation.new", "now.clear", "now.restore", "ledger.trash-day", "ledger.restore-day", "ledger.sweep", "agent.hide", "problem.retry",
   "voice.reopen", "memory.forget", "memory.restore", "memory.edit", "memory.add", "memory.run",
   "thread.open", "thread.close", "thread.history", "thread.stop", "thread.pause", "thread.resume", "thread.answer", "thread.say",
+  "automation.set", "automation.snooze", "automation.done", "automation.skip", "automation.pause", "automation.resume", "automation.rename", "automation.trash", "automation.restore", "automation.run", "recipe.set", "recipe.trash", "recipe.restore",
 ]);
 
 export function isEngineCommand(value: unknown): value is EngineCommand {
   if (typeof value !== "object" || value === null) return false;
   const t = (value as { type?: unknown }).type;
+  if (t === "calendar.result") return isCalendarReadResult((value as { result?: unknown }).result);
   return typeof t === "string" && ENGINE_COMMAND_TYPES.has(t);
 }
