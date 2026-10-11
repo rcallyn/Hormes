@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, readlinkSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DaemonServer, type EngineLike } from "@hormes/daemon";
 import type { ToolResult } from "@hormes/hands";
@@ -16,21 +16,26 @@ import { runToolOverSocket } from "../mcp-bridge.ts";
 import { resultText } from "../runner.ts";
 import { makeRunner, makeSink, makeTask } from "./fakes.ts";
 
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
+
 const FIXTURE = fileURLToPath(new URL("./fixtures/codex-exec.jsonl", import.meta.url));
 
 /**
  * A stand-in for the Codex CLI: answers --version and `login status`, and on
  * `exec` replays the recorded `codex exec --json` events (fixtures/codex-exec.jsonl,
- * a real run on Kevin's Mac with the bridge attached) or misbehaves per
+ * a real run on User's Mac with the bridge attached) or misbehaves per
  * FAKE_CODEX_MODE: hang | fail | turn-failed | crash | signed-out.
  */
 function fakeCodex(dir: string): string {
   const script = join(dir, "fake-codex.mjs");
   writeFileSync(
     script,
-    `import { readFileSync, writeFileSync } from "node:fs";
+    `import { readFileSync, writeFileSync, renameSync } from "node:fs";
 const args = process.argv.slice(2);
 const env = process.env;
+// The tests poll the logs while this fake is still writing them: write beside, then rename over, so a reader never sees a half-written file.
+const putLog = (path, o) => { writeFileSync(path + ".tmp", JSON.stringify(o)); renameSync(path + ".tmp", path); };
 const out = (o) => process.stdout.write(JSON.stringify(o) + "\\n");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 if (args[0] === "--version") { console.log("codex-cli 0.153.4-fake"); process.exit(0); }
@@ -48,7 +53,7 @@ if (args[0] === "app-server") {
   const foreign = mode === "foreign";
   const leaked = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY"].filter((k) => env[k] !== undefined);
   const requests = [];
-  const record = () => { if (env.FAKE_CODEX_LOG) writeFileSync(env.FAKE_CODEX_LOG + ".appserver", JSON.stringify({ args, cwd: process.cwd(), codexHome: env.CODEX_HOME ?? null, leaked, requests })); };
+  const record = () => { if (env.FAKE_CODEX_LOG) putLog(env.FAKE_CODEX_LOG + ".appserver", { args, cwd: process.cwd(), codexHome: env.CODEX_HOME ?? null, leaked, requests }); };
   record();
   let threadN = 0, turnN = 0, interrupted = false, buf = "";
   const notif = (method, params) => out({ jsonrpc: "2.0", method, params });
@@ -94,7 +99,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (d) => (prompt += d));
 process.stdin.on("end", async () => {
   const leaked = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "HORMES_BRAIN_API_KEY"].filter((k) => env[k] !== undefined);
-  if (env.FAKE_CODEX_LOG) writeFileSync(env.FAKE_CODEX_LOG, JSON.stringify({ args, prompt, cwd: process.cwd(), codexHome: env.CODEX_HOME ?? null, leaked }));
+  if (env.FAKE_CODEX_LOG) putLog(env.FAKE_CODEX_LOG, { args, prompt, cwd: process.cwd(), codexHome: env.CODEX_HOME ?? null, leaked });
   const mode = env.FAKE_CODEX_MODE ?? "ok";
   out({ type: "thread.started", thread_id: "01a0ffff-0000-7000-8000-00000000c0de" });
   out({ type: "turn.started" });
@@ -118,9 +123,9 @@ process.stdin.on("end", async () => {
   return bin;
 }
 
-/** Kevin's CODEX_HOME stand-in (auth.json with fake tokens, optionally a config.toml naming a model); the brain builds its own `<stateDir>/codex-home` beside it. */
+/** User's CODEX_HOME stand-in (auth.json with fake tokens, optionally a config.toml naming a model); the brain builds its own `<stateDir>/codex-home` beside it. */
 function fakeCodexHome(dir: string, opts: { signedIn?: boolean; authFile?: boolean; model?: string } = {}): string {
-  const home = join(dir, "kevin-codex");
+  const home = join(dir, "user-codex");
   mkdirSync(home, { recursive: true });
   if (opts.authFile !== false) {
     const auth = opts.signedIn === false ? { auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: null } : { auth_mode: "chatgpt", OPENAI_API_KEY: null, tokens: { id_token: "id", access_token: "acc", refresh_token: "ref", account_id: "acct" }, last_refresh: "2026-09-10T00:00:00Z" };
@@ -148,7 +153,7 @@ interface AppServerLog {
   requests: Array<{ id?: number; method: string; params?: Record<string, unknown> }>;
 }
 
-function makeBrain(t: TestContext, opts: { mode?: string; model?: string; socketPath?: string; ownPid?: number; maxSteps?: number; maxWallMs?: number; killGraceMs?: number; configModel?: string; signedIn?: boolean; authFile?: boolean; appServer?: string; appServerStartTimeoutMs?: number; appServerPatienceMs?: number; appServerDelayMs?: number; tokens?: number; lastTokens?: number; transport?: "auto" | "app-server" | "exec"; prime?: boolean; worker?: string; effort?: "low" | "medium"; simpleEffort?: "low"; env?: Record<string, string> }) {
+function makeBrain(t: TestContext, opts: { mode?: string; model?: string; socketPath?: string; ownPid?: number; maxSteps?: number; maxWallMs?: number; killGraceMs?: number; configModel?: string; signedIn?: boolean; authFile?: boolean; appServer?: string; appServerStartTimeoutMs?: number; appServerPatienceMs?: number; appServerDelayMs?: number; tokens?: number; lastTokens?: number; transport?: "auto" | "app-server" | "exec"; prime?: boolean; thread?: string; userName?: string; effort?: "low" | "medium"; simpleEffort?: "low"; env?: Record<string, string> }) {
   const dir = mkdtempSync(join(tmpdir(), "jh-codex-"));
   const bin = fakeCodex(dir);
   const codexHome = fakeCodexHome(dir, { ...(opts.configModel ? { model: opts.configModel } : {}), ...(opts.signedIn !== undefined ? { signedIn: opts.signedIn } : {}), ...(opts.authFile !== undefined ? { authFile: opts.authFile } : {}) });
@@ -170,7 +175,8 @@ function makeBrain(t: TestContext, opts: { mode?: string; model?: string; socket
     appServerStartTimeoutMs: opts.appServerStartTimeoutMs,
     appServerPatienceMs: opts.appServerPatienceMs,
     transport: opts.transport,
-    worker: opts.worker,
+    thread: opts.thread,
+    userName: opts.userName,
     // The primer is one more turn on the fake; the tests that want it say so.
     primeThreads: opts.prime ?? false,
     // Hormes's secrets are in the daemon's environment; none of them may reach Codex.
@@ -195,12 +201,25 @@ test("codex: the finder walks HORMES_CODEX_BIN, PATH, then the app bundles; auth
   mkdirSync(bundled, { recursive: true });
   writeFileSync(join(bundled, "codex"), "#!/bin/sh\necho codex-cli 9.9.9\n");
   chmodSync(join(bundled, "codex"), 0o755);
-  assert.deepEqual(codexBundleCandidates("/Users/k").slice(0, 2), ["/Applications/ChatGPT.app/Contents/Resources/codex", "/Applications/Codex.app/Contents/Resources/codex"]);
+  assert.deepEqual(codexBundleCandidates("/Users/k").slice(0, 4), [
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    "/Applications/Codex.app/Contents/Resources/codex-cli/bin/codex",
+  ], "ChatGPT.app's launcher first, then its binary, then the layout before September 2026");
   const found = findCodexBinary(undefined, { env: { PATH: "/nowhere", HOME: home }, bundles: codexBundleCandidates(home).filter((p) => p.startsWith(home)) });
   assert.equal(found?.path, join(bundled, "codex"));
   assert.equal(found?.source, "bundle");
   assert.equal(found?.label, "ChatGPT.app");
   assert.equal(findCodexBinary(undefined, { env: { PATH: "/nowhere", HOME: join(dir, "empty") }, bundles: [] }), undefined);
+  // ChatGPT.app's layout since the end of September 2026: the launcher under codex-cli/bin, the binary in CodexCLI.app.
+  const now = join(dir, "now");
+  const launcher = join(now, "Applications", "ChatGPT.app", "Contents", "Resources", "codex-cli", "bin", "codex");
+  mkdirSync(dirname(launcher), { recursive: true });
+  writeFileSync(launcher, "#!/bin/sh\necho codex-cli 0.160.0\n");
+  chmodSync(launcher, 0o755);
+  const current = findCodexBinary(undefined, { env: { PATH: "/nowhere", HOME: now }, bundles: codexBundleCandidates(now).filter((p) => p.startsWith(now)) });
+  assert.deepEqual(current, { path: launcher, source: "bundle", label: "ChatGPT.app" }, "the current ChatGPT.app is found by its launcher");
 
   assert.equal(codexSignedIn(fakeCodexHome(join(dir, "a"))), true);
   assert.equal(codexSignedIn(fakeCodexHome(join(dir, "b"), { signedIn: false })), false);
@@ -253,9 +272,12 @@ test("codex brain: one delegation replays a recorded run through the sink and th
   const started = await brain.start();
   assert.equal(started.ready, true, started.detail);
   assert.match(started.detail, /Codex 0\.153\.4-fake via HORMES_CODEX_BIN, signed in with ChatGPT; model gpt-6-astra \(from ~\/\.codex\/config\.toml\), effort low; tools over a private socket/);
-  // No daemon answered, so the brain serves the tool socket itself.
-  assert.ok(existsSync(join(dir, "codex-tools.sock")));
-  assert.equal(await socketAnswers(join(dir, "codex-tools.sock")), true);
+  // No daemon answered, so the brain serves the tool socket itself: one of its own (W1-8, F-CODEX-SOCKET).
+  const sock = brain.toolSocketPath!;
+  assert.match(sock, /\/codex-tools-main-\d+-\d+\.sock$/);
+  assert.equal(join(sock, ".."), dir);
+  assert.ok(existsSync(sock));
+  assert.equal(await socketAnswers(sock), true);
 
   const log = makeSink();
   const result = await brain.handle(makeTask("what app is open"), log.sink);
@@ -270,11 +292,11 @@ test("codex brain: one delegation replays a recorded run through the sink and th
   assert.equal(exec.args[0], "exec");
   assert.equal(exec.args[exec.args.indexOf("-m") + 1], "gpt-6-astra", "brainModel empty → the model from Codex's own config");
   assert.ok(exec.args.includes('model_reasoning_effort="low"'));
-  assert.ok(exec.args.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(join(dir, "codex-tools.sock"))}}`));
+  assert.ok(exec.args.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(sock)}}`));
   assert.ok(exec.args.some((a) => a.startsWith("mcp_servers.hormes.args=[") && a.includes("mcp-bridge.ts")));
   // process.cwd() reports the real path (/private/var…) for a /var temp dir.
   assert.equal(exec.cwd, realpathSync(join(dir, "codex-cwd")), "Codex works in an empty directory of its own");
-  // The exec fallback runs from Hormes's own CODEX_HOME too: the login linked in from Kevin's, nothing else of his.
+  // The exec fallback runs from Hormes's own CODEX_HOME too: the login linked in from User's, nothing else of his.
   assert.equal(exec.codexHome, join(dir, "codex-home"));
   assert.equal(readlinkSync(join(dir, "codex-home", "auth.json")), join(codexHome, "auth.json"));
   assert.ok(exec.args.includes("skills.include_instructions=false") && exec.args.includes("features.plugins=false"), "the prompt trims ride exec's argv (--ignore-user-config skips the config.toml)");
@@ -283,22 +305,24 @@ test("codex brain: one delegation replays a recorded run through the sink and th
   assert.deepEqual(scrubbed, { PATH: "/bin", CODEX_HOME: "/ch" });
   assert.ok(exec.prompt.startsWith(brainSystemPrompt().slice(0, 60)), "the shared standing orders come first");
   assert.ok(exec.prompt.includes(codexAddendum()));
-  assert.match(codexAddendum(), /must not be used to act on it or to read from it/, "the read-only sandbox does not stop reads; the orders do");
-  assert.match(codexAddendum(), /does not stop you reading ~\/\.hormes\/env, ~\/\.ssh/);
+  // Codex's own shell and image reader are off in the argv (RAIL-4), so the addendum no longer admits a gap the orders had to cover.
+  assert.match(codexAddendum(), /Your own shell and file tools are switched off\. Every read and every action on this Mac goes through the tools of the "hormes" MCP server/);
+  assert.doesNotMatch(codexAddendum(), /does not stop you reading/);
+  assert.ok(exec.args.includes("features.shell_tool=false") && exec.args.includes("features.view_image=false"), "exec's argv switches Codex's own shell and image reader off");
   assert.match(codexAddendum(), /the same tool and exactly the same arguments/);
-  assert.ok(exec.prompt.includes('Kevin said: "what app is open"'));
+  assert.ok(exec.prompt.includes('User said: "what app is open"'));
   assert.ok(!exec.prompt.includes("Earlier in this session"));
 
   // The next delegation carries the last exchange as text.
   const again = await brain.handle(makeTask("and now?"), makeSink().sink);
   assert.equal(again.status, "done");
   const second = execLog();
-  // Compacted (renderCarry): Kevin's words whole, a short result as it was, the screenshot (280 bytes with its image) as a size line.
-  assert.ok(second.prompt.includes('Earlier in this session:\nKevin said: "what app is open"\n  frontmost_app → Finder — window: Desktop\n  screenshot → [tool result, 0.3 KB]\nYou answered: Finder is in front.'), second.prompt.slice(-600));
-  assert.ok(second.prompt.endsWith('Kevin said: "and now?"'));
+  // Compacted (renderCarry): User's words whole, a short result as it was, the screenshot (280 bytes with its image) as a size line.
+  assert.ok(second.prompt.includes('Earlier in this session:\nUser said: "what app is open"\n  frontmost_app → Finder — window: Desktop\n  screenshot → [tool result, 0.3 KB]\nYou answered: Finder is in front.'), second.prompt.slice(-600));
+  assert.ok(second.prompt.endsWith('User said: "and now?"'));
 
   await brain.stop();
-  assert.equal(existsSync(join(dir, "codex-tools.sock")), false, "the private socket goes with the brain");
+  assert.equal(existsSync(sock), false, "the private socket goes with the brain");
 });
 
 test("codex brain: a step budget, an error event, turn.failed, a crash, a cancel and the wall clock all end the task honestly", async (t) => {
@@ -353,9 +377,13 @@ test("codex brain: not ready without a login or a binary, and reports why", asyn
 
 class ToolOnlyEngine extends EventEmitter implements EngineLike {
   calls: string[] = [];
-  ledger = { read: () => [], days: () => [], sessions: () => [], readSession: () => [] };
+  ledger = { read: () => [], days: () => [], sessions: () => [], readSession: () => [], search: () => [], readChain: () => ({ rows: [], truncated: false }) };
+  memory = { list: () => [], search: async () => [] };
   config = { stateDir: "/tmp/jh-test" };
   runner = { run: async (name: string): Promise<{ result: ToolResult }> => (this.calls.push(name), { result: { kind: "text", text: `${name} ok` } }) };
+  runnerFor(): EngineLike["runner"] | undefined {
+    return undefined;
+  }
   snapshot(): unknown {
     return {};
   }
@@ -363,6 +391,9 @@ class ToolOnlyEngine extends EventEmitter implements EngineLike {
   feedMic(): void {}
   reportInputLevel(): void {}
   setMicrophonePermission(): void {}
+  setPermission(): void {}
+  setPermissions(): void {}
+  dropViewers(): void {}
   registerOwnPid(): void {}
   ear(): void {}
   problem(): void {}
@@ -380,7 +411,8 @@ test("codex brain: when this process's daemon answers on the socket, the bridge 
   const started = await brain.start();
   assert.equal(started.ready, true, started.detail);
   assert.match(started.detail, /tools over the daemon socket/);
-  assert.equal(existsSync(join(stateDir, "codex-tools.sock")), false);
+  assert.equal(brain.toolSocketPath, socketPath);
+  assert.deepEqual(readdirSync(stateDir).filter((f) => f.startsWith("codex-tools")), [], "no private socket");
   assert.equal((await brain.handle(makeTask("x"), makeSink().sink)).status, "done");
   assert.ok(execLog().args.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(socketPath)}}`));
 });
@@ -398,39 +430,43 @@ test("codex brain: a daemon that belongs to another process is not trusted with 
   const started = await brain.start();
   assert.equal(started.ready, true, started.detail);
   assert.match(started.detail, /tools over a private socket/);
-  assert.ok(existsSync(join(stateDir, "codex-tools.sock")));
+  const sock = brain.toolSocketPath!;
+  assert.equal(join(sock, ".."), stateDir);
+  assert.ok(existsSync(sock));
   assert.equal((await brain.handle(makeTask("x"), makeSink().sink)).status, "done");
-  assert.ok(execLog().args.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(join(stateDir, "codex-tools.sock"))}}`));
+  assert.ok(execLog().args.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(sock)}}`));
   assert.deepEqual(foreign.calls, [], "nothing was routed into the other daemon");
 });
 
-test("codex brain: a worker's brain on its private socket still serves its own worker's tool.run — the server there knows exactly that lane; another id is refused; nothing reaches the foreign daemon", async (t) => {
+test("codex brain: a thread's brain on its private socket still serves its own thread's tool.run — the host there knows exactly that lane; another id is refused; nothing reaches the foreign daemon", async (t) => {
   // The pid check failed (a foreign daemon, or the 1 s self-ping timed out under wake load): the
-  // worker's brain serves its own socket. Its bridge stamps every call with the worker id, and
+  // thread's brain serves its own socket. Its bridge stamps every call with the thread id, and
   // the daemon routes a stamped call through `runnerFor` only — without a lane for that id the
-  // worker would be refused every tool for its whole life.
-  const dir = mkdtempSync(join(tmpdir(), "jh-codex-worker-private-"));
+  // thread would be refused every tool for its whole life.
+  const dir = mkdtempSync(join(tmpdir(), "jh-codex-thread-private-"));
   const socketPath = join(dir, "d.sock");
   const foreign = new ToolOnlyEngine();
   const server = new DaemonServer(foreign, socketPath);
   await server.listen();
   t.after(() => server.close());
-  const { brain, dir: stateDir, runner } = makeBrain(t, { socketPath, ownPid: process.pid + 1, worker: "w_spotify" });
+  const { brain, dir: stateDir, runner } = makeBrain(t, { socketPath, ownPid: process.pid + 1, thread: "t_spotify" });
   const started = await brain.start();
   assert.equal(started.ready, true, started.detail);
   assert.match(started.detail, /tools over a private socket/);
-  const sock = join(stateDir, "codex-tools.sock");
-  // The worker's turn is running: its lane runner has the task.
+  const sock = brain.toolSocketPath!;
+  assert.match(sock, /\/codex-tools-thread-\d+-\d+\.sock$/);
+  assert.equal(join(sock, ".."), stateDir);
+  // The thread's turn is running: its lane runner has the task.
   runner.attach(makeSink().sink, makeTask("play Focus on Spotify"));
   try {
-    const mine = await runToolOverSocket(sock, "frontmost_app", {}, 3000, "w_spotify");
-    assert.equal(mine.kind, "text", `the worker's own call runs on its lane: ${resultText(mine)}`);
-    const other = await runToolOverSocket(sock, "frontmost_app", {}, 3000, "w_other");
-    assert.match(resultText(other), /^error: refused: no worker w_other is running in Hormes; frontmost_app was not run/);
+    const mine = await runToolOverSocket(sock, "frontmost_app", {}, 3000, "t_spotify");
+    assert.equal(mine.kind, "text", `the thread's own call runs on its lane: ${resultText(mine)}`);
+    const other = await runToolOverSocket(sock, "frontmost_app", {}, 3000, "t_other");
+    assert.match(resultText(other), /^error: refused: no thread t_other is running in Hormes; frontmost_app was not run/);
   } finally {
     runner.attach(undefined);
   }
-  const after = await runToolOverSocket(sock, "frontmost_app", {}, 3000, "w_spotify");
+  const after = await runToolOverSocket(sock, "frontmost_app", {}, 3000, "t_spotify");
   assert.match(resultText(after), /^error: refused: no task is running in Hormes/, "the turn is over: the same refusal the main runner gives");
   assert.deepEqual(foreign.calls, [], "nothing was routed into the other daemon");
 });
@@ -443,8 +479,8 @@ test("codex brain: circled regions are attached with -i and named in the prompt;
   const task = {
     ...makeTask("what is this"),
     attachments: [
-      { path: png, mediaType: "image/png" as const, note: "Kevin circled this region of his screen: 10,20 100×50 (global points)" },
-      { path: join(dir, "gone.png"), mediaType: "image/png" as const, note: "Kevin circled this region of his screen: 0,0 5×5 (global points)" },
+      { path: png, mediaType: "image/png" as const, note: "User circled this region of the screen: 10,20 100×50 (global points)" },
+      { path: join(dir, "gone.png"), mediaType: "image/png" as const, note: "User circled this region of the screen: 0,0 5×5 (global points)" },
     ],
   };
   const result = await brain.handle(task, makeSink().sink);
@@ -453,7 +489,7 @@ test("codex brain: circled regions are attached with -i and named in the prompt;
   assert.deepEqual(exec.args.filter((_, i) => exec.args[i - 1] === "-i"), [png], "one -i per image that exists");
   assert.ok(exec.args.indexOf("-i") < exec.args.indexOf("-c"), "images come before the -c flags, so the variadic -i never swallows the stdin marker");
   assert.equal(exec.args[exec.args.length - 1], "-");
-  assert.ok(exec.prompt.includes('Kevin said: "what is this"\n\nAttached image 1: Kevin circled this region of his screen: 10,20 100×50 (global points)\nTreat the circled region'), exec.prompt.slice(-600));
+  assert.ok(exec.prompt.includes('User said: "what is this"\n\nAttached image 1: User circled this region of the screen: 10,20 100×50 (global points)\nTreat what User circled or captured'), exec.prompt.slice(-600));
   assert.ok(!exec.prompt.includes("Attached image 2"), "the prompt numbers only the images that went in with -i");
   assert.ok(!exec.prompt.includes("0,0 5×5"), exec.prompt.slice(-600));
 
@@ -475,20 +511,22 @@ test("codex brain: with an app-server the brain is warm — one thread, develope
   let log = appServerLog();
   assert.deepEqual(log.args.slice(0, 3), ["app-server", "--listen", "stdio://"]);
   assert.ok(!log.args.includes("--ignore-user-config"), "the app-server has no such flag");
-  assert.equal(log.args[log.args.indexOf("--disable") + 1], "apps", "the plugin runtime (Kevin's ChatGPT connectors: Drive, Sites, agents — 134 tools) is a feature and is switched off");
+  assert.equal(log.args[log.args.indexOf("--disable") + 1], "apps", "the plugin runtime (User's ChatGPT connectors: Drive, Sites, agents — 134 tools) is a feature and is switched off");
   const configs = log.args.filter((_, i) => log.args[i - 1] === "-c");
-  assert.ok(configs.includes("notify=[]"), "Kevin's turn-ended notify hook does not fire for Hormes's turns");
+  assert.ok(configs.includes("notify=[]"), "User's turn-ended notify hook does not fire for Hormes's turns");
   assert.ok(configs.some((c) => c.startsWith("mcp_servers.hormes.command=")));
-  assert.ok(configs.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(join(dir, "codex-tools.sock"))}}`));
+  assert.ok(configs.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(brain.toolSocketPath)}}`));
+  assert.equal(join(brain.toolSocketPath!, ".."), dir);
   assert.ok(configs.includes('mcp_servers.hormes.default_tools_approval_mode="approve"'));
-  // Kevin's config.toml never loads: CODEX_HOME is Hormes's, whose config.toml declares no servers — so there is nothing to switch off.
-  assert.ok(!configs.some((c) => c.startsWith("mcp_servers.node_repl")), `no server of Kevin's to disable: ${configs.join(" | ")}`);
+  assert.ok(configs.includes("features.shell_tool=false") && configs.includes("features.view_image=false"), "Codex's own shell and image reader are off on the warm path too");
+  // User's config.toml never loads: CODEX_HOME is Hormes's, whose config.toml declares no servers — so there is nothing to switch off.
+  assert.ok(!configs.some((c) => c.startsWith("mcp_servers.node_repl")), `no server of User's to disable: ${configs.join(" | ")}`);
   for (const trim of codexPromptTrimArgs().filter((a) => a !== "-c")) assert.ok(configs.includes(trim), `${trim} rides the argv`);
   assert.ok(configs.includes('model_reasoning_effort="low"'));
   assert.equal(log.cwd, realpathSync(join(dir, "codex-cwd")));
   assert.equal(log.codexHome, privateHome, "CODEX_HOME is <stateDir>/codex-home");
   assert.equal(brain.codexHome?.isolated, true);
-  assert.equal(readlinkSync(join(privateHome, "auth.json")), join(codexHome, "auth.json"), "the login is Kevin's, linked");
+  assert.equal(readlinkSync(join(privateHome, "auth.json")), join(codexHome, "auth.json"), "the login is User's, linked");
   const written = readFileSync(join(privateHome, "config.toml"), "utf8");
   assert.match(written, /^model = "gpt-6-astra"$/m, "his model line, copied");
   assert.match(written, /^model_reasoning_effort = "xhigh"$/m);
@@ -520,7 +558,7 @@ test("codex brain: with an app-server the brain is warm — one thread, develope
   assert.equal(turn["effort"], "low");
   const input = turn["input"] as Array<{ type: string; text?: string }>;
   assert.equal(input.length, 1);
-  assert.ok(input[0]!.text!.includes('Kevin said: "what app is open"'));
+  assert.ok(input[0]!.text!.includes('User said: "what app is open"'));
   assert.ok(!input[0]!.text!.includes(brainSystemPrompt().slice(0, 60)), "the orders are not repeated per turn");
   assert.ok(!input[0]!.text!.includes("Earlier in this session"), "the thread itself is the context");
 
@@ -543,16 +581,16 @@ test("codex brain: circled regions ride a warm turn as localImage inputs; a full
   assert.equal((await brain.start()).ready, true);
   const png = join(dir, "mark_1.png");
   writeFileSync(png, "PNG");
-  const task = { ...makeTask("what is this"), memory: "- Kevin prefers short answers.", attachments: [{ path: png, mediaType: "image/png" as const, note: "Kevin circled this region of his screen: 10,20 100×50 (global points)" }, { path: join(dir, "gone.png"), mediaType: "image/png" as const, note: "gone" }] };
+  const task = { ...makeTask("what is this"), memory: "- User prefers short answers.", attachments: [{ path: png, mediaType: "image/png" as const, note: "User circled this region of the screen: 10,20 100×50 (global points)" }, { path: join(dir, "gone.png"), mediaType: "image/png" as const, note: "gone" }] };
   assert.equal((await brain.handle(task, makeSink().sink)).status, "done");
   let log = appServerLog();
   const input = log.requests.find((r) => r.method === "turn/start")!.params!["input"] as Array<{ type: string; text?: string; path?: string }>;
   assert.deepEqual(input.map((i) => i.type), ["text", "localImage"], "one localImage per file that exists");
   assert.equal(input[1]!.path, png);
-  assert.ok(input[0]!.text!.includes("Attached image 1: Kevin circled"));
+  assert.ok(input[0]!.text!.includes("Attached image 1: User circled"));
   assert.ok(!input[0]!.text!.includes("Attached image 2"));
   // The durable-memory part rides the warm turn's text (behaviourally, not by a source pin): the label, then the rendered items.
-  assert.ok(input[0]!.text!.includes(`${MEMORY_PROMPT_LABEL}\n- Kevin prefers short answers.`), "the labelled memory part is in the warm turn the app-server got");
+  assert.ok(input[0]!.text!.includes(`${MEMORY_PROMPT_LABEL}\n- User prefers short answers.`), "the labelled memory part is in the warm turn the app-server got");
 
   // The context stands past the rollover point: thread_2 was started right after that turn (in the
   // background, not at the next task), and the next task rides it with the exchange as text.
@@ -564,8 +602,8 @@ test("codex brain: circled regions ride a warm turn as localImage inputs; a full
   const turns = log.requests.filter((r) => r.method === "turn/start");
   assert.equal(turns[1]!.params!["threadId"], "thread_2", "the task rode the replacement thread (this fake reports a full context after every turn, so a third thread may already be starting)");
   const text = (turns[1]!.params!["input"] as Array<{ text?: string }>)[0]!.text!;
-  assert.ok(text.includes('Earlier in this session:\nKevin said: "what is this"\n  frontmost_app → Finder — window: Desktop\n  screenshot → [tool result, 0.3 KB]\nYou answered: Finder is in front.'), text.slice(0, 400));
-  assert.ok(text.endsWith('Kevin said: "do it again"'));
+  assert.ok(text.includes('Earlier in this session:\nUser said: "what is this"\n  frontmost_app → Finder — window: Desktop\n  screenshot → [tool result, 0.3 KB]\nYou answered: Finder is in front.'), text.slice(0, 400));
+  assert.ok(text.endsWith('User said: "do it again"'));
 
   // Three trivial turns whose bill grows 25k each while the context stays at 23k never roll over (the bug: total was judged).
   const steady = makeBrain(t, { appServer: "ok", tokens: 25_000, lastTokens: 23_000 });
@@ -580,11 +618,11 @@ test("codex brain: circled regions ride a warm turn as localImage inputs; a full
 
 test("codex brain: Hormes's CODEX_HOME — built and refreshed at start, links the login, copies only the model lines, falls back to ~/.codex without an auth.json, never links a home onto itself", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "jh-codex-home-"));
-  const source = join(dir, "kevin-codex");
+  const source = join(dir, "user-codex");
   mkdirSync(source, { recursive: true });
   writeFileSync(join(source, "auth.json"), JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "acc" } }));
   writeFileSync(join(source, "config.toml"), `notify = ["/x/SkyComputerUseClient", "turn-ended"]\nmodel = "gpt-6-astra"\nmodel_reasoning_effort = "high"\nservice_tier = "default"\n\n[marketplaces.openai-bundled]\nsource = "x"\n\n[plugins."chrome@openai-bundled"]\nenabled = true\n\n[mcp_servers.node_repl]\ncommand = "y"\n`);
-  writeFileSync(join(source, "AGENTS.md"), "# Kevin Codex Preset");
+  writeFileSync(join(source, "AGENTS.md"), "# User Codex Preset");
   mkdirSync(join(source, "skills", "one"), { recursive: true });
   const stateDir = join(dir, "state");
   const home = prepareCodexHome({ stateDir, sourceHome: source });
@@ -592,12 +630,12 @@ test("codex brain: Hormes's CODEX_HOME — built and refreshed at start, links t
   assert.equal(home.path, join(stateDir, "codex-home"));
   assert.ok(lstatSync(join(home.path, "auth.json")).isSymbolicLink());
   assert.equal(readlinkSync(join(home.path, "auth.json")), join(source, "auth.json"));
-  assert.equal(JSON.parse(readFileSync(join(home.path, "auth.json"), "utf8")).tokens.access_token, "acc", "reads through to Kevin's login");
+  assert.equal(JSON.parse(readFileSync(join(home.path, "auth.json"), "utf8")).tokens.access_token, "acc", "reads through to User's login");
   const config = readFileSync(join(home.path, "config.toml"), "utf8");
   assert.equal(config.split("\n").filter((l) => l && !l.startsWith("#")).join("\n"), 'model = "gpt-6-astra"\nmodel_reasoning_effort = "high"\nservice_tier = "default"', `only the model lines: ${config}`);
   assert.equal(existsSync(join(home.path, "AGENTS.md")), false);
   assert.deepEqual(readdirSync(join(home.path, "skills")), []);
-  assert.match(home.detail, /private CODEX_HOME .*codex-home: auth\.json → .*kevin-codex\/auth\.json, model gpt-6-astra from .*kevin-codex, no AGENTS\.md, no skills/);
+  assert.match(home.detail, /private CODEX_HOME .*codex-home: auth\.json → .*user-codex\/auth\.json, model gpt-6-astra from .*user-codex, no AGENTS\.md, no skills/);
   assert.equal(codexUserMcpServers(home.path).names.length, 0, "nothing of his to disable in the app-server argv");
 
   // Refresh: an AGENTS.md that appeared is removed, a changed model line is copied, a regular auth.json (a Codex that renamed over the link) is moved aside and re-linked.
@@ -631,7 +669,7 @@ test("codex brain: Hormes's CODEX_HOME — built and refreshed at start, links t
   assert.equal(self.path, home.path);
   assert.ok(lstatSync(join(home.path, "auth.json")).isSymbolicLink() && readlinkSync(join(home.path, "auth.json")) === join(source, "auth.json"), "the link is untouched");
 
-  // Through the brain: without an auth.json the fallback home is Kevin's, so his servers are switched off in the argv as before.
+  // Through the brain: without an auth.json the fallback home is User's, so his servers are switched off in the argv as before.
   const viaStatus = makeBrain(t, { appServer: "ok", authFile: false, configModel: "gpt-6-astra" });
   assert.equal((await viaStatus.brain.start()).ready, true);
   assert.equal(viaStatus.brain.codexHome?.isolated, false);
@@ -653,7 +691,7 @@ test("codex brain: a primed thread — one tiny background turn after thread/sta
   log = primed.appServerLog();
   const turns = log.requests.filter((r) => r.method === "turn/start");
   assert.equal(turns.length, 2, "primer, then the task");
-  assert.ok((turns[1]!.params!["input"] as Array<{ text: string }>)[0]!.text.includes('Kevin said: "what app is open"'));
+  assert.ok((turns[1]!.params!["input"] as Array<{ text: string }>)[0]!.text.includes('User said: "what app is open"'));
   assert.ok(!log.requests.some((r) => r.method === "turn/interrupt"), "a primer that had finished is not interrupted");
 
   // A task during the primer: the primer is interrupted first, then the task's turn starts.
@@ -776,7 +814,7 @@ test("codex brain: a slow app-server never sits on a task's path — start() rep
   assert.equal(started.ready, true, started.detail);
   // The detail is the proof: had start() waited for thread/start it would read "warm app-server". (The probe subprocesses before it take a few hundred ms under load, so the wall time is only sanity-checked.)
   assert.match(started.detail, /; codex exec per task until the app-server is up \(still starting\)$/);
-  assert.ok(startMs < 3000, `start() returned in ${startMs} ms`);
+  assert.ok(startMs < 3000 * RUNNER_SLACK, `start() returned in ${startMs} ms (under ${3000 * RUNNER_SLACK})`);
   assert.match(brain.detail, /still starting/);
   assert.equal(brain.activeTransport, "exec");
   // A task now runs on exec at once, not after the warm start.
@@ -784,7 +822,7 @@ test("codex brain: a slow app-server never sits on a task's path — start() rep
   const r1 = await brain.handle(makeTask("what app is open"), makeSink().sink);
   assert.equal(r1.status, "done");
   assert.equal(execLog().args[0], "exec", "the task ran on exec while the app-server was still starting");
-  assert.ok(Date.now() - a < 2000);
+  assert.ok(Date.now() - a < 2000 * RUNNER_SLACK, `the exec task ran at once: under ${2000 * RUNNER_SLACK} ms (${Date.now() - a} ms)`);
   // The warm start lands in the background; the next task is a turn on the thread, and the detail line follows.
   await new Promise((r) => setTimeout(r, 900));
   assert.equal(brain.activeTransport, "app-server", "warm now");
@@ -795,23 +833,47 @@ test("codex brain: a slow app-server never sits on a task's path — start() rep
   assert.match(brain.detail, /warm app-server/);
 });
 
-test("codex brain: a worker's brain — the worker id rides to the bridge as HORMES_WORKER on both transports, and its thread is never primed even when asked", async (t) => {
-  // exec argv: the bridge env names the worker; the main brain's line is byte-identical to before.
+test("codex brain: the user's name rides to the bridge as HORMES_USER_NAME on both transports, after the socket and the thread, so the table Codex reads says it; a brain with no name carries the socket alone", async (t) => {
+  // exec argv: the env names the user; a thread's brain carries both keys in the same order codexBridgeEnv writes them.
+  const base = { cwd: "/c", node: "n", tsxCli: "t", bridgePath: "b", socketPath: "/s.sock" };
+  const configs = (args: string[]): string[] => args.filter((_, i, a) => a[i - 1] === "-c");
+  const plain = configs(codexExecArgs(base));
+  const named = configs(codexExecArgs({ ...base, userName: "Sam" }));
+  const both = configs(codexExecArgs({ ...base, thread: "t_spotify", userName: "Sam" }));
+  assert.ok(plain.includes('mcp_servers.hormes.env={HORMES_SOCKET="/s.sock"}'), plain.join(" | "));
+  assert.ok(named.includes('mcp_servers.hormes.env={HORMES_SOCKET="/s.sock", HORMES_USER_NAME="Sam"}'), named.join(" | "));
+  assert.ok(both.includes('mcp_servers.hormes.env={HORMES_SOCKET="/s.sock", HORMES_THREAD="t_spotify", HORMES_USER_NAME="Sam"}'), both.join(" | "));
+  assert.equal(plain.length, named.length, "the same -c pairs, only the env differs");
+  assert.deepEqual(configs(codexExecArgs({ ...base, userName: "" })), plain, "an empty name is no key");
+
+  // The warm transport: the app-server's argv carries it too.
+  const { brain, dir, appServerLog } = makeBrain(t, { appServer: "ok", userName: "Sam" });
+  assert.equal((await brain.start()).ready, true);
+  await new Promise((r) => setTimeout(r, 150));
+  const log = appServerLog();
+  assert.equal(join(brain.toolSocketPath!, ".."), dir);
+  assert.ok(configs(log.args).includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(brain.toolSocketPath)}, HORMES_USER_NAME="Sam"}`), configs(log.args).join(" | "));
+  await brain.stop();
+});
+
+test("codex brain: a spawned thread's brain — the thread id rides to the bridge as HORMES_THREAD on both transports, and its Codex thread is never primed even when asked", async (t) => {
+  // exec argv: the bridge env names the thread; the main brain's line carries the socket alone.
   const base = { cwd: "/c", node: "n", tsxCli: "t", bridgePath: "b", socketPath: "/s.sock" };
   const main = codexExecArgs(base).filter((_, i, a) => a[i - 1] === "-c");
-  const worker = codexExecArgs({ ...base, worker: "w_spotify" }).filter((_, i, a) => a[i - 1] === "-c");
+  const thread = codexExecArgs({ ...base, thread: "t_spotify" }).filter((_, i, a) => a[i - 1] === "-c");
   assert.ok(main.includes('mcp_servers.hormes.env={HORMES_SOCKET="/s.sock"}'), main.join(" | "));
-  assert.ok(worker.includes('mcp_servers.hormes.env={HORMES_SOCKET="/s.sock", HORMES_WORKER="w_spotify"}'), worker.join(" | "));
-  assert.equal(main.length, worker.length, "the same -c pairs, only the env differs");
+  assert.ok(thread.includes('mcp_servers.hormes.env={HORMES_SOCKET="/s.sock", HORMES_THREAD="t_spotify"}'), thread.join(" | "));
+  assert.equal(main.length, thread.length, "the same -c pairs, only the env differs");
 
   // The warm transport: the app-server's argv carries it too, and thread/start is not followed by a primer turn.
-  const { brain, dir, appServerLog } = makeBrain(t, { appServer: "ok", worker: "w_spotify", prime: true });
+  const { brain, dir, appServerLog } = makeBrain(t, { appServer: "ok", thread: "t_spotify", prime: true });
   assert.equal((await brain.start()).ready, true);
   await new Promise((r) => setTimeout(r, 150));
   const log = appServerLog();
   const configs = log.args.filter((_, i) => log.args[i - 1] === "-c");
-  assert.ok(configs.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(join(dir, "codex-tools.sock"))}, HORMES_WORKER="w_spotify"}`), configs.join(" | "));
-  assert.deepEqual(log.requests.map((r) => r.method), ["initialize", "initialized", "thread/start"], "no primer: a worker's thread runs one task and costs nothing more");
+  assert.equal(join(brain.toolSocketPath!, ".."), dir);
+  assert.ok(configs.includes(`mcp_servers.hormes.env={HORMES_SOCKET=${JSON.stringify(brain.toolSocketPath)}, HORMES_THREAD="t_spotify"}`), configs.join(" | "));
+  assert.deepEqual(log.requests.map((r) => r.method), ["initialize", "initialized", "thread/start"], "no primer: a spawned thread's brain runs one task and costs nothing more");
   // One task, one turn, as for the main brain; still no primer after it.
   const result = await brain.handle(makeTask("play Focus on Spotify"), makeSink().sink);
   assert.equal(result.status, "done");
@@ -821,7 +883,7 @@ test("codex brain: a worker's brain — the worker id rides to the bridge as HOR
   await brain.stop();
 });
 
-test("carried history is compacted: a tool result over 200 chars (or bytes, images included) becomes one size line, Kevin's words stay verbatim, the block is capped near 2 KB with the oldest exchanges dropped first and the newest request never cut", () => {
+test("carried history is compacted: a tool result over 200 chars (or bytes, images included) becomes one size line, User's words stay verbatim, the block is capped near 2 KB with the oldest exchanges dropped first and the newest request never cut", () => {
   // The result lines: short ones as they were (one line), long ones as their size.
   const short = carriedResult("frontmost_app", { content: [{ type: "text", text: "Finder — window: Desktop" }] });
   assert.equal(short.bytes, 65);
@@ -849,31 +911,31 @@ test("carried history is compacted: a tool result over 200 chars (or bytes, imag
     { request: "what app is open", answer: "Finder is in front.", results: [short, shot] },
     { request: "send the invoice to dana", answer: "Send the invoice to dana@example.com? Say yes to send it.", results: [page] },
   ]);
-  assert.equal(block, ['Earlier in this session:', 'Kevin said: "what app is open"', "  frontmost_app → Finder — window: Desktop", carriedResultLine(shot), "You answered: Finder is in front.", 'Kevin said: "send the invoice to dana"', "  web_fetch → [tool result, 3.1 KB]", "You answered: Send the invoice to dana@example.com? Say yes to send it."].join("\n"));
+  assert.equal(block, ['Earlier in this session:', 'User said: "what app is open"', "  frontmost_app → Finder — window: Desktop", carriedResultLine(shot), "You answered: Finder is in front.", 'User said: "send the invoice to dana"', "  web_fetch → [tool result, 3.1 KB]", "You answered: Send the invoice to dana@example.com? Say yes to send it."].join("\n"));
   assert.ok(block!.length < CARRY_MAX_CHARS);
 
   // The cap: 3 exchanges of ~900 chars each do not fit in 2 KB — the oldest goes first, whole.
   const big = (i: number) => ({ request: `request ${i}`, answer: `answer ${i} ${"a".repeat(880)}`, results: [] });
   const capped = renderCarry([big(1), big(2), big(3)])!;
   assert.ok(capped.length <= CARRY_MAX_CHARS, `${capped.length} chars`);
-  assert.ok(!capped.includes('Kevin said: "request 1"'), "the oldest exchange was dropped whole");
-  assert.ok(capped.includes('Kevin said: "request 2"') && capped.includes('Kevin said: "request 3"'));
+  assert.ok(!capped.includes('User said: "request 1"'), "the oldest exchange was dropped whole");
+  assert.ok(capped.includes('User said: "request 2"') && capped.includes('User said: "request 3"'));
   assert.ok(capped.endsWith("a".repeat(880)), "the newest answer is intact when it fits");
-  // The newest exchange alone over the cap: its results go first (as placeholders, then gone), then its answer is cut; Kevin's words never are.
+  // The newest exchange alone over the cap: its results go first (as placeholders, then gone), then its answer is cut; User's words never are.
   const words = "please file the invoice from dana under april and tell me the total ".repeat(6).trim();
-  const huge = renderCarry([{ request: words, answer: "b".repeat(5000), results: [short, page] }], "Kevin", 1024)!;
+  const huge = renderCarry([{ request: words, answer: "b".repeat(5000), results: [short, page] }], "User", 1024)!;
   assert.ok(huge.length <= 1024, `${huge.length} chars`);
-  assert.ok(huge.includes(`Kevin said: "${words}"`), "Kevin's words, whole");
+  assert.ok(huge.includes(`User said: "${words}"`), "User's words, whole");
   assert.ok(!huge.includes("frontmost_app") && !huge.includes("web_fetch"), "no room for result lines");
   assert.match(huge, /You answered: b+…$/, "the answer cut to what is left");
   // Over budget by a few chars: the results become placeholders, each naming its TRUE size — never inflated to force the swap.
   assert.equal(carriedResultLine(short, true), "  frontmost_app → [tool result, 0.1 KB]");
-  const nearly = renderCarry([{ request: "what app is open", answer: "c".repeat(100), results: [short] }], "Kevin", 211)!;
+  const nearly = renderCarry([{ request: "what app is open", answer: "c".repeat(100), results: [short] }], "User", 211)!;
   assert.ok(nearly.length <= 211, `${nearly.length} chars`);
   assert.ok(nearly.includes("  frontmost_app → [tool result, 0.1 KB]"), "a 65-byte result is told as 0.1 KB, not 0.2");
   assert.ok(nearly.includes(`You answered: ${"c".repeat(100)}`), "the answer intact once the placeholder made room");
   // A request longer than the whole budget still rides whole: the block runs over rather than cut his words.
-  const long = renderCarry([{ request: "w".repeat(1500), answer: "ok.", results: [] }], "Kevin", 1024)!;
-  assert.ok(long.includes(`Kevin said: "${"w".repeat(1500)}"`));
+  const long = renderCarry([{ request: "w".repeat(1500), answer: "ok.", results: [] }], "User", 1024)!;
+  assert.ok(long.includes(`User said: "${"w".repeat(1500)}"`));
   assert.match(long, /You answered: …$/);
 });

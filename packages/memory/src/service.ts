@@ -4,11 +4,11 @@ import { consolidate, type ConsolidateOptions, type ConsolidateResult } from "./
 import { EmbeddingCache } from "./embed/cache.ts";
 import { querySimilarityOf, type Embedder } from "./embed/embedder.ts";
 import { tokenWeights } from "./embed/keyword.ts";
-import { EmbedError } from "./embed/openai.ts";
+import { EmbedError } from "./embed/errors.ts";
 import { ExtractUnavailableError, type Decider, type Extractor } from "./extract/extractor.ts";
 import { buildExtractInput } from "./extract/input.ts";
 import { RulesDecider, RulesExtractor, subjectsOf } from "./extract/rules.ts";
-import { DEFER_MAX_TRIES, FORGET_RECENT_MS, MIN_NEW_KEVIN_LINES } from "./limits.ts";
+import { DEFER_MAX_TRIES, FORGET_RECENT_MS, MIN_NEW_USER_LINES } from "./limits.ts";
 import { mergeCandidates, postFilter } from "./merge.ts";
 import { refuseReason, type Redact } from "./redact.ts";
 import { renderBrainBlock, renderVoiceBlock, type Rendered } from "./render.ts";
@@ -19,7 +19,7 @@ import { l2normalize } from "./vec.ts";
 
 /** The delegation-time race: past this the block is built from words alone and the vector lands in the cache for next time. */
 export const RETRIEVE_TIMEOUT_MS = 250;
-/** Query vectors kept in memory by sha (Kevin's last heard lines are primed here as they land). */
+/** Query vectors kept in memory by sha (User's last heard lines are primed here as they land). */
 export const QUERY_LRU = 64;
 /** A long delta is read in this many slices per call; `more` on the result says the rest waits for another call. */
 export const MAX_SLICES = 4;
@@ -43,13 +43,15 @@ export interface MemoryServiceOptions {
   readonly fallbackExtractor?: Extractor;
   readonly maxChars?: number;
   readonly retrieveTimeoutMs?: number;
+  /** What the rendered blocks and the rules' sentences call the user (release F1); default "User". */
+  readonly userName?: string;
 }
 
 export type IngestReason = "nothing-new" | "too-few-lines" | "trashed" | "embedding-failed";
 
 export interface IngestOptions {
   readonly signal?: AbortSignal;
-  /** Skip the MIN_NEW_KEVIN_LINES gate (Kevin pressed "Learn now"). */
+  /** Skip the MIN_NEW_USER_LINES gate (User pressed "Learn now"). */
   readonly force?: boolean;
   /** The chain is trashed: nothing is read. */
   readonly trashed?: boolean;
@@ -77,6 +79,22 @@ export interface RememberResult {
   readonly op: "added" | "updated" | "noop";
 }
 
+/**
+ * What a read leaves out. `hidden`: session ids whose conversation is in the Trash — an
+ * item every source of which is one of them is not read back (decision D5: Move to Trash
+ * hides what was learned only from that conversation; Restore brings it back). Nothing is
+ * written: the item stays live in the store, and a source from any other conversation, or
+ * User's own "remember that", keeps it.
+ */
+export interface ReadOptions {
+  readonly hidden?: ReadonlySet<string>;
+}
+
+export interface SearchOptions extends ReadOptions {
+  /** False: rank by words only, with no embedding call (memory off; a query the redactor changed). */
+  readonly vectors?: boolean;
+}
+
 interface Deferred {
   tries: number;
   readonly candidates: Candidate[];
@@ -99,8 +117,10 @@ const byRecent = (a: MemoryItem, b: MemoryItem): number => b.lastSeenAt - a.last
  * behind each other): a merge snapshots the live pool and then awaits the
  * decider, so a concurrent add would land as a twin it never saw. The sync
  * verbs (forget, restore, edit, forgetRecent) apply at once; a merge in flight
- * refreshes an item it touches from the store, so a forget between its awaits
- * is not undone.
+ * reads the pool again once the decider answers, and a target that is no longer
+ * live, or whose words User edited, becomes a plain add (`mergeCandidates`), so
+ * a Forget or an Edit between its awaits is not undone — and the store never
+ * merges an item that is not live.
  */
 export class MemoryService {
   readonly store: MemoryStore;
@@ -114,6 +134,7 @@ export class MemoryService {
   private readonly log: Pick<Logger, "info" | "warn">;
   private readonly maxChars: number | undefined;
   private readonly retrieveTimeoutMs: number;
+  private readonly userName: string;
   private readonly deferred = new Map<string, Deferred>();
   /** Sessions whose approved run has rows left to read (`more`): the gate does not judge them again. */
   private readonly continuing = new Set<string>();
@@ -131,7 +152,8 @@ export class MemoryService {
     this.store.load();
     this.embedder = opts.embedder;
     this.extractor = opts.extractor;
-    this.fallback = opts.fallbackExtractor ?? new RulesExtractor();
+    this.userName = opts.userName || "User";
+    this.fallback = opts.fallbackExtractor ?? new RulesExtractor(this.userName);
     this.decider = opts.decider ?? new RulesDecider();
     this.redact = opts.redact;
     this.onRow = opts.onRow;
@@ -141,9 +163,10 @@ export class MemoryService {
     this.retrieveTimeoutMs = opts.retrieveTimeoutMs ?? RETRIEVE_TIMEOUT_MS;
   }
 
-  /** How items are matched, for the Console: vectors (a key is present) or words. */
-  embeddings(): "openai" | "keyword" {
-    return this.embedder.dims > 0 ? "openai" : "keyword";
+  /** How items are matched, for the Console: the embedder's kind — OpenAI vectors, a local model's, or words. The test embedder reports `openai` (it pins OpenAI-scale cosines). */
+  embeddings(): "openai" | "local" | "keyword" {
+    if (this.embedder.dims === 0) return "keyword";
+    return this.embedder.kind === "local" ? "local" : "openai";
   }
 
   private emit(row: LedgerRow): void {
@@ -175,7 +198,7 @@ export class MemoryService {
   /**
    * Read one session's ledger rows past its watermark and learn from them.
    * Idempotent: a second call over the same rows finds nothing new. Runs only
-   * when ≥ MIN_NEW_KEVIN_LINES of Kevin's are new (unless forced, or the call
+   * when ≥ MIN_NEW_USER_LINES of User's are new (unless forced, or the call
    * continues an approved run). An embedding failure defers the run — the
    * candidates are kept in memory and retried on the next call (≤
    * DEFER_MAX_TRIES), then land without vectors; slices committed before the
@@ -221,7 +244,7 @@ export class MemoryService {
       }
       // The gate judges the whole pending delta once, at the first slice of a fresh run; the rest of an
       // approved run — later slices, a continuation after `more`, a landed deferral — is never gated.
-      if (slice === 0 && !opts.force && !this.continuing.has(sessionId) && input.pendingKevinLines < MIN_NEW_KEVIN_LINES) {
+      if (slice === 0 && !opts.force && !this.continuing.has(sessionId) && input.pendingUserLines < MIN_NEW_USER_LINES) {
         return { ...zero, status: "skipped", reason: "too-few-lines", ms: this.now() - t0 };
       }
 
@@ -276,20 +299,20 @@ export class MemoryService {
     return { ...totals, status: "ran", extractor: kind, ms, ...(upToAt !== undefined ? { upToAt } : {}), ...(more ? { more: true } : {}) };
   }
 
-  /** The post-filter over one slice's raw candidates; each keeps the Kevin line it cites as its source. */
+  /** The post-filter over one slice's raw candidates; each keeps the User line it cites as its source. */
   private filter(sessionId: string, input: ExtractInput, raw: readonly Candidate[]): { candidates: Candidate[]; refused: number } {
-    const kevinLines = new Set(input.lines.filter((l) => l.speaker === "Kevin").map((l) => l.n));
+    const userLines = new Set(input.lines.filter((l) => l.speaker === "User").map((l) => l.n));
     const lineAt = new Map(input.lines.map((l) => [l.n, l.at] as const));
     const candidates: Candidate[] = [];
     let refused = 0;
     for (const c of raw) {
-      const f = postFilter(c, { kevinLines });
+      const f = postFilter(c, { userLines });
       if ("refused" in f) {
         refused++;
         continue;
       }
-      const firstKevin = f.ok.evidence.find((n) => kevinLines.has(n));
-      const at = firstKevin !== undefined ? (lineAt.get(firstKevin) ?? input.upToAt) : input.upToAt;
+      const firstUser = f.ok.evidence.find((n) => userLines.has(n));
+      const at = firstUser !== undefined ? (lineAt.get(firstUser) ?? input.upToAt) : input.upToAt;
       candidates.push({ ...f.ok, source: { sessionId, at, type: "heard" }, origin: f.ok.origin ?? "extracted" });
     }
     return { candidates, refused };
@@ -363,7 +386,7 @@ export class MemoryService {
     }
   }
 
-  /** Embed a line Kevin just said so the delegation-time query is a cache hit; never throws. */
+  /** Embed a line User just said so the delegation-time query is a cache hit; never throws. */
   async prime(text: string): Promise<void> {
     const q = text.trim();
     if (!q || this.embedder.dims === 0) return;
@@ -377,16 +400,27 @@ export class MemoryService {
     }
   }
 
-  private retrievable(): Retrievable[] {
-    return this.store.items("live").map((it) => {
+  /** Live items a read may return: every one, less those learned only from sessions in `hidden`. */
+  private live(hidden?: ReadonlySet<string>): MemoryItem[] {
+    const items = this.store.items("live");
+    return hidden && hidden.size > 0 ? items.filter((it) => MemoryService.visible(it, hidden)) : items;
+  }
+
+  /** An item stays visible while one source is not in `hidden` (another conversation, User's own words, a tool). */
+  private static visible(it: MemoryItem, hidden: ReadonlySet<string>): boolean {
+    return it.sources.length === 0 || it.sources.some((s) => s.sessionId === undefined || !hidden.has(s.sessionId));
+  }
+
+  private retrievable(hidden?: ReadonlySet<string>): Retrievable[] {
+    return this.live(hidden).map((it) => {
       const vec = this.store.vectorFor(it.id, this.embedder);
       return vec ? { ...it, vec } : it;
     });
   }
 
   /**
-   * The delegator asks with `${request}\n${kevinRecent}` — the request (often
-   * one heard line, sometimes several joined) above Kevin's recent lines, one
+   * The delegator asks with `${request}\n${userRecent}` — the request (often
+   * one heard line, sometimes several joined) above User's recent lines, one
    * per line — and the bridge primed every heard line as it landed. The primed
    * lines compose the query's vector (the normalised sum), so the delegation
    * path touches no network; only a query with no primed line races the embedder.
@@ -436,30 +470,30 @@ export class MemoryService {
   }
 
   /**
-   * The per-delegation block (≤ BRAIN_MEMORY_TOKENS) for `query` = Kevin's
+   * The per-delegation block (≤ BRAIN_MEMORY_TOKENS) for `query` = User's
    * request and recent lines. Bounded: the query vector comes from the LRU (a
    * primed line, or the lines' composition) or a race against
    * `retrieveTimeoutMs`; past it the block is ranked by words and the vector
    * lands for the next turn. Records what was used for the Now rail.
    */
-  async retrieveForBrain(query: string, opts: { readonly signal?: AbortSignal; readonly timeoutMs?: number } = {}): Promise<Rendered> {
-    const items = this.retrievable();
+  async retrieveForBrain(query: string, opts: { readonly signal?: AbortSignal; readonly timeoutMs?: number } & ReadOptions = {}): Promise<Rendered> {
+    const items = this.retrievable(opts.hidden);
     if (items.length === 0) return { tokens: 0, ids: [] };
     const q = query.trim();
     const vec = q ? await this.queryVector(q, opts.timeoutMs ?? this.retrieveTimeoutMs, opts.signal) : undefined;
     const r = retrieve(items, { ...(q ? { query: { text: q, vec } } : {}), embedder: this.embedder, now: this.now(), budgetTokens: BRAIN_MEMORY_TOKENS });
-    const block = renderBrainBlock(r.picked, BRAIN_MEMORY_TOKENS);
+    const block = renderBrainBlock(r.picked, BRAIN_MEMORY_TOKENS, this.userName);
     this.lastUsedIds = block.ids.slice(0, 8);
     this.budgetUsed = { ...this.budgetUsed, brain: block.tokens };
     return block;
   }
 
   /** The once-per-session voice block (≤ VOICE_MEMORY_TOKENS); synchronous, from the index. */
-  retrieveForVoice(): Rendered {
-    const items = this.retrievable();
+  retrieveForVoice(opts: ReadOptions = {}): Rendered {
+    const items = this.retrievable(opts.hidden);
     if (items.length === 0) return { tokens: 0, ids: [] };
     const r = retrieve(items, { embedder: this.embedder, now: this.now(), budgetTokens: VOICE_MEMORY_TOKENS });
-    const block = renderVoiceBlock(r.picked, VOICE_MEMORY_TOKENS);
+    const block = renderVoiceBlock(r.picked, VOICE_MEMORY_TOKENS, this.userName);
     this.budgetUsed = { ...this.budgetUsed, voice: block.tokens };
     return block;
   }
@@ -467,26 +501,26 @@ export class MemoryService {
   // ------------------------------------------------------------------ verbs ---
 
   /**
-   * "Remember that …" (spoken, origin kevin) or a Console/CLI add: classified
+   * "Remember that …" (spoken, origin user) or a Console/CLI add: classified
    * by the rules, redacted and refused like every candidate, then merged so a
    * repeat is a touch, not a twin. Undefined = refused (a secret shape, or the
    * redactor changed it).
    */
-  remember(text: string, kind?: MemoryKind, origin: MemoryOrigin = "kevin"): Promise<RememberResult | undefined> {
+  remember(text: string, kind?: MemoryKind, origin: MemoryOrigin = "user"): Promise<RememberResult | undefined> {
     return this.serial(() => this.rememberNow(text, kind, origin));
   }
 
   private async rememberNow(text: string, kind: MemoryKind | undefined, origin: MemoryOrigin): Promise<RememberResult | undefined> {
     const line = text.trim().replace(/\s+/g, " ");
     if (!line || this.redact(line) !== line) return undefined;
-    const classified = RulesExtractor.classify(line);
+    const classified = RulesExtractor.classify(line, this.userName);
     const c: Candidate = classified
       ? { ...classified, ...(kind ? { kind } : {}), origin }
       : { kind: kind ?? "fact", text: line, subjects: subjectsOf(line), importance: 0.9, confidence: 0.9, evidence: [], origin };
     const f = postFilter(c, { requireEvidence: false });
     if ("refused" in f) return undefined;
     const at = this.now();
-    const source: MemorySource = { at, type: origin === "kevin" ? "kevin" : "tool" };
+    const source: MemorySource = { at, type: origin === "user" ? "user" : "tool" };
     let merged: MergeResult;
     try {
       merged = await mergeCandidates(this.store, [{ ...f.ok, source }], this.embedder, this.decider, { now: at, source });
@@ -541,7 +575,7 @@ export class MemoryService {
     return true;
   }
 
-  /** Kevin's own words for an item; the same redaction and refusal as an add. */
+  /** User's own words for an item; the same redaction and refusal as an add. */
   edit(id: string, text: string, kind?: MemoryKind): boolean {
     const it = this.store.get(id);
     if (!it) return false;
@@ -554,18 +588,22 @@ export class MemoryService {
     return true;
   }
 
-  /** Newest first; never carries a vector. */
-  list(state: MemoryState | "all" = "live", limit = 50): MemoryItem[] {
-    return this.store.items(state).sort(byRecent).slice(0, Math.max(0, limit));
+  /** Newest first; never carries a vector. `live` leaves out what `hidden` hides; `all` is the whole record. */
+  list(state: MemoryState | "all" = "live", limit = 50, opts: ReadOptions = {}): MemoryItem[] {
+    return (state === "live" ? this.live(opts.hidden) : this.store.items(state)).sort(byRecent).slice(0, Math.max(0, limit));
   }
 
-  /** Ranked by similarity (vector when the query embeds in time, else the query's coverage of the item's words) plus an exact-substring bonus. */
-  async search(query: string, limit = 30, state: MemoryState | "all" = "live"): Promise<MemoryItem[]> {
+  /**
+   * Ranked by similarity (vector when the query embeds in time, else the query's coverage of
+   * the item's words) plus an exact-substring bonus. `vectors: false` ranks by words alone and
+   * never calls the embedder.
+   */
+  async search(query: string, limit = 30, state: MemoryState | "all" = "live", opts: SearchOptions = {}): Promise<MemoryItem[]> {
     const q = query.trim();
-    if (!q) return this.list(state, limit);
-    const vec = await this.queryVector(q, SEARCH_TIMEOUT_MS);
+    if (!q) return this.list(state, limit, opts);
+    const vec = opts.vectors === false ? undefined : await this.queryVector(q, SEARCH_TIMEOUT_MS);
     const needle = q.toLowerCase();
-    const pool = this.store.items(state);
+    const pool = state === "live" ? this.live(opts.hidden) : this.store.items(state);
     const weight = tokenWeights(pool.map((it) => it.text));
     const scored = pool.map((it) => {
       const sim = querySimilarityOf(this.embedder, { text: q, vec }, { text: it.text, vec: this.store.vectorFor(it.id, this.embedder) }, weight);
@@ -579,13 +617,15 @@ export class MemoryService {
       .map((s) => s.it);
   }
 
-  summary(): Omit<MemorySummary, "enabled" | "pending"> {
+  /** Counts and mode; `count` is what a read returns (the live items less those `hidden` hides). */
+  summary(opts: ReadOptions = {}): Omit<MemorySummary, "enabled" | "pending"> {
     const c = this.store.counts();
     return {
-      count: c.live,
+      count: opts.hidden && opts.hidden.size > 0 ? this.live(opts.hidden).length : c.live,
       forgotten: c.forgotten,
       archived: c.archived,
       embeddings: this.embeddings(),
+      ...(this.embedder.dims > 0 ? { embeddingModel: this.embedder.model, embeddingDims: this.embedder.dims } : {}),
       ...(this.lastRunAt !== undefined ? { lastRunAt: this.lastRunAt } : {}),
       ...(this.lastRun ? { lastRun: this.lastRun } : {}),
       budgetUsed: { ...this.budgetUsed },
@@ -600,6 +640,23 @@ export class MemoryService {
       this.consolidateCursor = r.done ? 0 : r.cursor;
       if (r.wrote) this.store.flush();
       return r;
+    });
+  }
+
+  /**
+   * After an embedder change: live items with no vector in the current space
+   * are embedded through the cache, `limit` at a time (only the misses reach
+   * the model; every hit is kept). Returns how many were embedded, 0 when every
+   * live item has a vector — the bridge calls this at quiet ticks until then, so
+   * a switch of brain heals in minutes. Throws what the embedder throws.
+   */
+  reembed(limit = 96): Promise<number> {
+    return this.serial(async () => {
+      if (this.embedder.dims === 0) return 0;
+      const missing = this.store.items("live").filter((it) => !this.store.vectorFor(it.id, this.embedder)).slice(0, Math.max(0, limit));
+      if (missing.length === 0) return 0;
+      await this.store.embed(this.embedder, missing.map((it) => it.text));
+      return missing.filter((it) => this.store.vectorFor(it.id, this.embedder)).length;
     });
   }
 

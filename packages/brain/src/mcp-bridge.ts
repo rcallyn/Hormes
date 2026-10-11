@@ -6,7 +6,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema, type CallToolResult, typ
 import { logger, newId, readConfig, replaceDefaultSink } from "@hormes/core";
 import type { ToolResult } from "@hormes/hands";
 import { DaemonClient } from "@hormes/daemon";
-import { ALL_TOOL_SPECS, specByName, type ToolSpec } from "./tools.ts";
+import { ALL_TOOL_SPECS, specByName, toolSpecsFor, type ToolSpec } from "./tools.ts";
 import { resultText } from "./runner.ts";
 
 /**
@@ -21,10 +21,12 @@ import { resultText } from "./runner.ts";
  *
  * Run it as: node node_modules/tsx/dist/cli.mjs packages/brain/src/mcp-bridge.ts
  *
- * A worker's brain gets its own bridge process, started with `HORMES_WORKER=<id>`
+ * A thread's brain gets its own bridge process, started with `HORMES_THREAD=<t_…>`
  * (codex-config.ts puts it in the MCP server's env): every tool.run then names the
- * worker and the daemon routes it to that worker's lane runner — never to the main
+ * thread and the daemon routes it to that thread's lane runner — never to the main
  * brain's, which holds the pointer. Without it the bridge is the main brain's.
+ * `HORMES_USER_NAME=<name>` (codex-config.ts puts that in the env too) is what the
+ * tool descriptions and the server's instructions call the user; unset, they say the default.
  *
  * stdout is the MCP transport, so this process must never log there; the
  * default log sink is replaced with stderr before anything can speak.
@@ -35,10 +37,16 @@ const log = logger("brain.mcp-bridge");
 /** agent_wait may legitimately take ten minutes; everything else is far below this. */
 export const DEFAULT_TOOL_TIMEOUT_MS = 660_000;
 
-/** The worker id a bridge process acts for, from its environment; unset, empty or blank = the main brain. */
-export function workerFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  const worker = env["HORMES_WORKER"]?.trim();
-  return worker ? worker : undefined;
+/** The thread id a bridge process acts for, from its environment; unset, empty or blank = the main brain. */
+export function threadFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const thread = env["HORMES_THREAD"]?.trim();
+  return thread ? thread : undefined;
+}
+
+/** The user's name a bridge process says, from its environment; unset, empty or blank = the default. */
+export function userNameFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const name = env["HORMES_USER_NAME"]?.trim();
+  return name ? name : undefined;
 }
 
 /** The spec's JSON Schema goes to the client verbatim; MCP's Tool shape is the same vocabulary. */
@@ -82,26 +90,26 @@ export function toMcpContent(r: ToolResult): CallToolResult {
  * point, never lets a call fail because the daemon was between two connects.
  */
 export interface SocketToolClientOptions {
-  /** The worker this client acts for: rides on every tool.run so the daemon routes to that worker's lane runner. Absent or empty: the main brain. */
-  readonly worker?: string | undefined;
+  /** The thread this client acts for: rides on every tool.run so the daemon routes to that thread's lane runner. Absent or empty: the main brain. */
+  readonly thread?: string | undefined;
 }
 
 export class SocketToolClient {
   private client: DaemonClient | undefined;
   private connecting: Promise<DaemonClient> | undefined;
   private readonly waiting = new Map<string, { resolve: (r: ToolResult) => void; timer: NodeJS.Timeout }>();
-  private readonly worker: string | undefined;
+  private readonly thread: string | undefined;
 
   constructor(
     private readonly socketPath: string,
     opts: SocketToolClientOptions = {},
   ) {
-    this.worker = opts.worker || undefined;
+    this.thread = opts.thread || undefined;
   }
 
-  /** The worker every call names, if any. */
-  get workerId(): string | undefined {
-    return this.worker;
+  /** The thread every call names, if any. */
+  get threadId(): string | undefined {
+    return this.thread;
   }
 
   get connected(): boolean {
@@ -177,7 +185,7 @@ export class SocketToolClient {
         resolve({ kind: "error", message: `${name} did not answer within ${Math.round(timeoutMs / 1000)}s` });
       }, timeoutMs);
       this.waiting.set(id, { resolve, timer });
-      client.sendJson({ type: "tool.run", id, name, input, ...(this.worker ? { worker: this.worker } : {}) });
+      client.sendJson({ type: "tool.run", id, name, input, ...(this.thread ? { thread: this.thread } : {}) });
     });
   }
 
@@ -194,7 +202,7 @@ export class SocketToolClient {
  * matching `tool.result`, disconnect. The bridge itself keeps one connection
  * (SocketToolClient); this stays for one-off callers and tests.
  */
-export function runToolOverSocket(socketPath: string, name: string, input: unknown, timeoutMs = DEFAULT_TOOL_TIMEOUT_MS, worker?: string): Promise<ToolResult> {
+export function runToolOverSocket(socketPath: string, name: string, input: unknown, timeoutMs = DEFAULT_TOOL_TIMEOUT_MS, thread?: string): Promise<ToolResult> {
   const client = new DaemonClient(socketPath);
   const id = newId("tool");
   return new Promise<ToolResult>((resolve) => {
@@ -214,7 +222,7 @@ export function runToolOverSocket(socketPath: string, name: string, input: unkno
     client.on("error", (e) => finish({ kind: "error", message: `could not reach the Hormes daemon at ${socketPath}: ${e.message}` }));
     client
       .connect({ pid: process.pid, audio: false })
-      .then(() => client.sendJson({ type: "tool.run", id, name, input, ...(worker ? { worker } : {}) }))
+      .then(() => client.sendJson({ type: "tool.run", id, name, input, ...(thread ? { thread } : {}) }))
       .catch(() => undefined); // the "error" listener above has already finished the call
   });
 }
@@ -222,23 +230,27 @@ export function runToolOverSocket(socketPath: string, name: string, input: unkno
 export interface BridgeOptions {
   readonly socketPath: string;
   readonly toolTimeoutMs?: number | undefined;
-  /** The worker this bridge acts for (the entry script passes `workerFromEnv()`); every tool.run carries it. */
-  readonly worker?: string | undefined;
+  /** The thread this bridge acts for (the entry script passes `threadFromEnv()`); every tool.run carries it. */
+  readonly thread?: string | undefined;
   /** Test seam: replaces the socket round-trip. */
   readonly run?: ((name: string, input: unknown) => Promise<ToolResult>) | undefined;
+  /** What the server's instructions and the tool descriptions call the person Hormes works for; default "User" (the entry script passes `userNameFromEnv()`). */
+  readonly userName?: string | undefined;
 }
 
 export function createBridgeServer(opts: BridgeOptions): Server {
-  const socket = opts.run ? undefined : new SocketToolClient(opts.socketPath, { worker: opts.worker });
+  const socket = opts.run ? undefined : new SocketToolClient(opts.socketPath, { thread: opts.thread });
   const run = opts.run ?? ((name: string, input: unknown) => socket!.run(name, input, opts.toolTimeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS));
+  const who = opts.userName ?? "User";
+  const specs = toolSpecsFor(who);
   const server = new Server(
     { name: "hormes", version: "2.0.0" },
     {
       capabilities: { tools: {} },
-      instructions: "Hormes's eyes, hands, and agents on Kevin's Mac. Take a screenshot before acting on anything you have not seen; a needs_confirmation result means: report the question and stop.",
+      instructions: `Hormes's eyes, hands, and agents on ${who}'s Mac. Take a screenshot before acting on anything you have not seen; a needs_confirmation result means: report the question and stop.`,
     },
   );
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: ALL_TOOL_SPECS.map(toMcpTool) }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: specs.map(toMcpTool) }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     if (!specByName(name)) return { content: [{ type: "text", text: `error: unknown tool ${name}` }], isError: true } satisfies CallToolResult;
@@ -265,8 +277,9 @@ function isEntryScript(): boolean {
 if (isEntryScript()) {
   replaceDefaultSink((level, scope, message) => process.stderr.write(`${new Date().toISOString().slice(11, 23)} ${level.padEnd(5)} ${scope}: ${message}\n`));
   const socketPath = readConfig().socketPath;
-  const worker = workerFromEnv();
-  const server = createBridgeServer({ socketPath, worker });
+  const thread = threadFromEnv();
+  const userName = userNameFromEnv();
+  const server = createBridgeServer({ socketPath, thread, userName });
   const onClose = server.onclose;
   server.onclose = () => {
     onClose?.();
@@ -274,5 +287,5 @@ if (isEntryScript()) {
   };
   process.stdin.on("end", () => process.exit(0));
   await server.connect(new StdioServerTransport());
-  log.debug(`serving ${ALL_TOOL_SPECS.length} tools over stdio; daemon at ${socketPath}${worker ? `; worker ${worker}` : ""}`);
+  log.debug(`serving ${ALL_TOOL_SPECS.length} tools over stdio; daemon at ${socketPath}${thread ? `; thread ${thread}` : ""}${userName ? `; for ${userName}` : ""}`);
 }

@@ -4,6 +4,9 @@ import { AnthropicBrain, anthropicReasoning, claudeGeneration, resolveAnthropicM
 import { ALL_TOOL_SPECS, specByName } from "../tools.ts";
 import { fakeServer, makeRunner, makeSink, makeTask } from "./fakes.ts";
 
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
+
 const MODEL_INFO = { id: "claude-opus-5", type: "model", display_name: "Claude Opus 5", created_at: "2026-04-01T00:00:00Z" };
 
 function message(content: unknown[], stop_reason: string): unknown {
@@ -67,7 +70,7 @@ test("anthropic brain: one tool round-trip through the runner, then the spoken a
     assert.deepEqual(first.output_config, { effort: "medium" });
     assert.deepEqual(first.tool_choice, { type: "auto", disable_parallel_tool_use: false }, "several calls per turn are allowed; batch.ts runs look-only ones together and acting ones in order");
     assert.equal(first.messages.length, 1);
-    assert.match(String(first.messages[0]!.content), /Kevin said: "what app is in front"/);
+    assert.match(String(first.messages[0]!.content), /User said: "what app is in front"/);
 
     const second = server.seen[2]!.body as { messages: Array<{ role: string; content: unknown }> };
     assert.deepEqual(second.messages.map((m) => m.role), ["user", "assistant", "user"]);
@@ -241,7 +244,7 @@ test("anthropic brain: each request is bounded by the wall budget, a hang is can
     const r = await brain.handle(makeTask("slow"), makeSink().sink);
     assert.equal(r.status, "failed");
     assert.match(r.error ?? "", /did not answer within [12] seconds/);
-    assert.ok(Date.now() - started < 5000, `took ${Date.now() - started}ms`);
+    assert.ok(Date.now() - started < 5000 * RUNNER_SLACK, `took ${Date.now() - started} ms (under ${5000 * RUNNER_SLACK})`);
     assert.equal(posts, 1, "no retry when the budget cannot fit another attempt");
 
     // Cancel while a request is genuinely in flight.
@@ -275,5 +278,30 @@ test("anthropic brain: each request is bounded by the wall budget, a hang is can
     assert.equal(gets, 1);
   } finally {
     await flaky.close();
+  }
+});
+
+test("anthropic brain: the tool table goes out in the user's name — a Sam brain's request carries no literal User, the same names in the same order; the default carries the table as written", async () => {
+  const server = await fakeServer((req) => {
+    if (req.method === "GET" && req.path.startsWith("/v1/models/")) return { status: 200, json: MODEL_INFO };
+    if (req.method === "POST" && req.path === "/v1/messages") return { status: 200, json: message([{ type: "text", text: "ok" }], "end_turn") };
+    return { status: 404, json: {} };
+  });
+  try {
+    const { runner } = makeRunner();
+    const sam = new AnthropicBrain({ runner, apiKey: "sk-ant-test", baseUrl: server.url, maxRetries: 0, userName: "Sam" });
+    assert.equal((await sam.start()).ready, true);
+    await sam.handle(makeTask("open the budget"), makeSink().sink);
+    const body = server.seen[1]!.body as { system: string; tools: Array<{ name: string; description: string }> };
+    assert.deepEqual(body.tools.map((t) => t.name), ALL_TOOL_SPECS.map((t) => t.name));
+    assert.doesNotMatch(JSON.stringify(body), /User/, "nothing in the request says User: not the orders, not the table, not the prompt");
+    assert.match(body.tools.find((t) => t.name === "run_shell")!.description, /^Run a shell command on Sam's Mac/);
+    const plain = new AnthropicBrain({ runner, apiKey: "sk-ant-test", baseUrl: server.url, maxRetries: 0 });
+    assert.equal((await plain.start()).ready, true);
+    await plain.handle(makeTask("x"), makeSink().sink);
+    const def = server.seen[3]!.body as { tools: Array<{ name: string; description: string }> };
+    assert.match(def.tools.find((t) => t.name === "run_shell")!.description, /on User's Mac/, "the default is the table as written");
+  } finally {
+    await server.close();
   }
 });

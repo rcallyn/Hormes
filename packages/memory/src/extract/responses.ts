@@ -1,7 +1,7 @@
-import type { MemoryKind } from "@hormes/protocol";
 import type { Candidate, Decision, ExtractInput, Neighbour } from "../types.ts";
 import { ExtractUnavailableError, type DecideContext, type Decider, type Extractor } from "./extractor.ts";
-import { DECIDE_INSTRUCTIONS, DECIDE_SCHEMA, DECIDE_SCHEMA_NAME, EXTRACT_INSTRUCTIONS, EXTRACT_MAX_ITEMS, EXTRACT_SCHEMA, EXTRACT_SCHEMA_NAME, renderDecideUser, renderExtractUser, stripBounds } from "./prompt.ts";
+import { parseCandidates, parseDecision } from "./parse.ts";
+import { DECIDE_INSTRUCTIONS, DECIDE_SCHEMA, DECIDE_SCHEMA_NAME, extractInstructions, EXTRACT_SCHEMA, EXTRACT_SCHEMA_NAME, renderDecideUser, renderExtractUser, stripBounds } from "./prompt.ts";
 import { RulesDecider } from "./rules.ts";
 
 /**
@@ -48,9 +48,10 @@ export interface ResponsesExtractorOptions {
   readonly baseUrl?: string;
   /** Sent as `reasoning.effort` for reasoning models (gpt-5*, o*); undefined = decide by the id. */
   readonly reasoningEffort?: "minimal" | "low" | "none";
+  /** What the transcript and the minted sentences call the user (release F1); default "User". */
+  readonly userName?: string;
 }
 
-const KINDS: ReadonlySet<string> = new Set<MemoryKind>(["preference", "fact", "episode", "procedure", "contact", "place"]);
 /** A 400 that names one of these is the strict validator refusing a schema bound; the bounds are the post-filter's job anyway. */
 const SCHEMA_BOUND_400 = /minItems|maxItems|minimum|maximum|schema/i;
 
@@ -63,7 +64,7 @@ interface ResponsesJson {
 /**
  * Extraction and band decisions over OpenAI's Responses API: strict
  * json_schema output, `store: false`, ≤ 900 output tokens, 20 s, one retry on
- * 429/5xx. Kevin's OpenAI key — dollars per token, bounded by the input cap;
+ * 429/5xx. User's OpenAI key — dollars per token, bounded by the input cap;
  * never the ChatGPT plan, never the resident Codex thread. Every failure is an
  * ExtractUnavailableError the service answers with the rules extractor. Two
  * 400s heal themselves for the life of the process: a model that takes no
@@ -95,39 +96,15 @@ export class ResponsesExtractor implements Extractor, Decider {
   }
 
   async extract(input: ExtractInput, signal?: AbortSignal): Promise<Candidate[]> {
-    const json = await this.call(EXTRACT_INSTRUCTIONS, renderExtractUser(input), EXTRACT_SCHEMA_NAME, EXTRACT_SCHEMA, signal);
-    const items = (json as { items?: unknown }).items;
-    if (!Array.isArray(items)) throw new ExtractUnavailableError("bad-json", "extractor: no items array");
-    const out: Candidate[] = [];
-    for (const raw of items.slice(0, EXTRACT_MAX_ITEMS)) {
-      const r = raw as Record<string, unknown>;
-      if (typeof r["kind"] !== "string" || !KINDS.has(r["kind"]) || typeof r["text"] !== "string") continue;
-      out.push({
-        kind: r["kind"] as MemoryKind,
-        text: r["text"],
-        subjects: Array.isArray(r["subjects"]) ? (r["subjects"] as unknown[]).filter((s): s is string => typeof s === "string") : [],
-        importance: typeof r["importance"] === "number" ? r["importance"] : 3,
-        confidence: typeof r["confidence"] === "number" ? r["confidence"] : 0.5,
-        evidence: Array.isArray(r["evidence"]) ? (r["evidence"] as unknown[]).filter((n): n is number => typeof n === "number") : [],
-        origin: "extracted",
-      });
-    }
-    return out;
+    const json = await this.call(extractInstructions(this.opts.userName), renderExtractUser(input, this.opts.userName), EXTRACT_SCHEMA_NAME, EXTRACT_SCHEMA, signal);
+    return parseCandidates(json);
   }
 
   /** The band decision; any failure falls back to rules mode so a merge never stalls on the network. */
   async decide(candidate: Candidate, neighbours: readonly Neighbour[], ctx: DecideContext): Promise<Decision> {
     try {
-      const json = (await this.call(DECIDE_INSTRUCTIONS, renderDecideUser(candidate, neighbours, ctx.now), DECIDE_SCHEMA_NAME, DECIDE_SCHEMA, ctx.signal)) as Record<string, unknown>;
-      const op = json["op"];
-      if (op !== "ADD" && op !== "UPDATE" && op !== "NOOP") throw new ExtractUnavailableError("bad-json", "decider: bad op");
-      const rawTarget = typeof json["target"] === "string" ? json["target"].trim() : "";
-      let target: string | undefined;
-      if (/^[A-J]$/.test(rawTarget)) target = neighbours[rawTarget.charCodeAt(0) - 65]?.item.id;
-      else if (neighbours.some((n) => n.item.id === rawTarget)) target = rawTarget;
-      const text = typeof json["text"] === "string" && json["text"].trim() ? json["text"].trim() : undefined;
-      const contradicts = json["contradicts"] === true;
-      return { op, ...(target ? { target } : {}), ...(text ? { text } : {}), contradicts };
+      const json = await this.call(DECIDE_INSTRUCTIONS, renderDecideUser(candidate, neighbours, ctx.now), DECIDE_SCHEMA_NAME, DECIDE_SCHEMA, ctx.signal);
+      return parseDecision(json, neighbours);
     } catch (e) {
       if (ctx.signal?.aborted) throw e;
       return this.rules.decide(candidate, neighbours, ctx);

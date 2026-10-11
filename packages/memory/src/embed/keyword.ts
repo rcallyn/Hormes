@@ -8,7 +8,7 @@ import { KEYWORD_THRESHOLDS } from "../limits.ts";
  * paraphrase lands around 0.5–0.75, so this embedder's thresholds are
  * {0.60, 0.40, 0.70}, not the cosine table). A QUERY against an item compares
  * by coverage — what share of the item's words the query mentions — because
- * the delegator's query is a request plus Kevin's recent lines (25+ tokens)
+ * the delegator's query is a request plus User's recent lines (25+ tokens)
  * while an item has 3–8: Jaccard would punish that length asymmetry to ~0.1
  * and nothing would ever clear the score floor.
  */
@@ -40,7 +40,7 @@ export function stem(word: string): string {
 }
 
 /**
- * The content tokens of a text, stemmed and folded. "kevin" is dropped: every
+ * The content tokens of a text, stemmed and folded. "user" is dropped: every
  * item carries it, and a shared constant token inflates the overlap of two
  * unrelated four-word facts to the update lane (a lost fact is worse than a
  * twin). Reversals that share every word but one are the rules decider's job.
@@ -51,7 +51,7 @@ export function tokens(text: string): Set<string> {
     if (!raw || raw.length < 2 || STOP.has(raw)) continue;
     let t = stem(raw);
     t = SYNONYMS[t] ?? t;
-    if (t === "kevin" || t.length < 2) continue;
+    if (t === "user" || t.length < 2) continue;
     out.add(t);
   }
   return out;
@@ -75,7 +75,7 @@ export type TokenWeight = (token: string) => number;
  * Inverse-frequency weights over a corpus of item texts: a word most items
  * carry ("like", folded from every "prefers") counts for little, a word one
  * item carries counts fully — weight = 1 / (1 + ln df). Computed once per
- * retrieval over the live set; cheap at Kevin's volume.
+ * retrieval over the live set; cheap at User's volume.
  */
 export function tokenWeights(texts: readonly string[]): TokenWeight {
   const df = new Map<string, number>();

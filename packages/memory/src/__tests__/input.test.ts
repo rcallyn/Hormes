@@ -6,31 +6,31 @@ import { fixtureRows, heard, redactFake, said, T0 } from "./helpers.ts";
 
 /**
  * Over fixtures/session-1.jsonl: what memory never reads is absent — grants,
- * tool payloads, the confirmation exchange, rows Kevin cleared, rows behind the
+ * tool payloads, the confirmation exchange, rows User cleared, rows behind the
  * watermark or inside a forget window, and every line the redactor or a shape
  * touched. Lines are numbered from 1 after filtering; the cap slices oldest first.
  */
 
 const base = { redact: redactFake, refuse: (s: string) => refuseReason(s) };
 
-test("input: the fixture yields Kevin's six durable lines and Hormes's context, numbered from 1, with the request and its outcome", () => {
+test("input: the fixture yields User's six durable lines and Hormes's context, numbered from 1, with the request and its outcome", () => {
   const rows = fixtureRows();
   const input = buildExtractInput(rows, base);
   const texts = input.lines.map((l) => `${l.speaker}: ${l.text}`);
   assert.deepEqual(texts, [
-    "Kevin: call me Kev",
+    "User: call me Kev",
     "Hormes: Sure, Kev.",
-    "Kevin: I prefer short answers",
+    "User: I prefer short answers",
     "Hormes: Noted.",
-    "Kevin: my dentist is Dr. Patel",
-    "Kevin: from now on read the diff before saying a PR is fine",
+    "User: my dentist is Dr. Patel",
+    "User: from now on read the diff before saying a PR is fine",
     "Hormes: Will do.",
-    "Kevin: remember that I like dark mode",
-    "Kevin: speak in english",
+    "User: remember that I like dark mode",
+    "User: speak in english",
     "Hormes: English it is.",
   ]);
   assert.deepEqual(input.lines.map((l) => l.n), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
-  assert.equal(input.kevinLines, 6);
+  assert.equal(input.userLines, 6);
   assert.equal(input.day, localDay(T0));
   assert.deepEqual(input.requests, [{ request: "open the diff for the auth branch and push it", status: "done", summary: "Pushed the auth branch.", at: T0 + 50_000 }]);
   assert.equal(input.upToAt, T0 + 80_000, "the watermark covers every row read, the closed row included");
@@ -47,7 +47,7 @@ test("input: the fixture yields Kevin's six durable lines and Hormes's context, 
 test("input: rows ≤ sinceAt and rows inside an exclusion window are absent; a now.restored after the clear brings the early rows back", () => {
   const rows = fixtureRows();
   const since = buildExtractInput(rows, { ...base, sinceAt: T0 + 30_000 });
-  assert.deepEqual(since.lines.filter((l) => l.speaker === "Kevin").map((l) => l.text), ["from now on read the diff before saying a PR is fine", "remember that I like dark mode", "speak in english"]);
+  assert.deepEqual(since.lines.filter((l) => l.speaker === "User").map((l) => l.text), ["from now on read the diff before saying a PR is fine", "remember that I like dark mode", "speak in english"]);
   assert.equal(since.requests.length, 1, "the request after the watermark is still read");
   const excluded = buildExtractInput(rows, { ...base, exclusions: [{ from: T0 + 69_000, to: T0 + 73_000, sessionId: "A" }] });
   assert.ok(!excluded.lines.some((l) => /dark mode|english/i.test(l.text)));
@@ -63,8 +63,8 @@ test("input: the char cap keeps the OLDEST lines and stops there (truncated, upT
   assert.equal(small.lines[0]?.text, "call me Kev");
   assert.ok(small.lines.length < 10);
   assert.equal(small.upToAt, small.lines[small.lines.length - 1]!.at);
-  assert.equal(small.pendingKevinLines, 6, "the gate sees the whole delta, not the slice");
-  assert.ok(small.kevinLines < 6);
+  assert.equal(small.pendingUserLines, 6, "the gate sees the whole delta, not the slice");
+  assert.ok(small.userLines < 6);
   assert.ok(small.requests.every((r) => r.at <= small.upToAt));
   const next = buildExtractInput(rows, { ...base, maxChars: 120, sinceAt: small.upToAt });
   assert.equal(next.lines[0]?.at, rows.find((r) => r.at > small.upToAt && (r.type === "heard" || r.type === "said"))?.at, "the next slice starts where this one stopped");
@@ -93,4 +93,23 @@ test("input: the injected `refuse` is the one applied — a stricter caller's sh
   assert.ok(!lax.lines.some((l) => /sk-proj|ghp_/.test(l.text)), "a refuser that refuses nothing still never sees what the redactor changed");
   assert.equal(lax.dropped, 1, "only the redactor-marked key line");
   assert.ok(lax.lines.some((l) => /4111/.test(l.text)), "with no refusal shapes the card line stays — the shapes are the caller's, not hidden in the builder");
+});
+
+test("before 2026-09-13: the old row type, a delegation.step whose step carries the old name key and a session.started without language are never a source and never a throw", () => {
+  const OLD_TYPE = "worker"; // before 2026-09-13: the row type the threads pass replaced
+  const OLD_KEY = "worker"; // before 2026-09-13: the step key that is `thread` now
+  const rows = [
+    { at: T0, type: "session.started", sessionId: "live_old", voice: "cedar" }, // before 2026-09-13: no language, no accent
+    heard(T0 + 1000, "call me Kev"),
+    { at: T0 + 2000, type: OLD_TYPE, [OLD_KEY]: { id: "w_old", name: "Spotify", delegationId: "dlg_old", task: "my dentist is Dr. Patel", lane: "background", status: "working", startedAt: T0 + 2000, steps: 1 } },
+    { at: T0 + 3000, type: "delegation.step", delegationId: "dlg_old", step: { id: "s_old", at: T0 + 3000, kind: "note", text: "remember that I like dark mode", [OLD_KEY]: "Spotify" } },
+    said(T0 + 4000, "Sure, Kev."),
+  ] as unknown as Parameters<typeof buildExtractInput>[0];
+  const input = buildExtractInput(rows, base);
+  assert.deepEqual(input.lines.map((l) => `${l.speaker}: ${l.text}`), ["User: call me Kev", "Hormes: Sure, Kev."]);
+  const joined = JSON.stringify(input);
+  assert.ok(!joined.includes("dentist"), "the old row's task is not a source");
+  assert.ok(!joined.includes("dark mode"), "nor the old step's text");
+  assert.equal(input.dropped, 0, "skipped, not dropped: they were never lines");
+  assert.equal(input.upToAt, T0 + 4000, "the watermark still covers every row read");
 });

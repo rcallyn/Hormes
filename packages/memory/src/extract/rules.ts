@@ -4,14 +4,14 @@ import { tokens } from "../embed/keyword.ts";
 import type { DecideContext, Decider, Extractor } from "./extractor.ts";
 
 /**
- * The extractor that costs nothing: regexes over Kevin's own lines. It runs
+ * The extractor that costs nothing: regexes over User's own lines. It runs
  * when there is no OpenAI key, when the Responses call fails for a run, and at
  * utterance time for an explicit "remember that …" whichever extractor is
  * configured. It never reads Hormes's lines and never marks contradictions
  * (a documented limit of rules mode: a reversal lands as newest-wins UPDATE).
  *
  * Shapes are deliberately narrow: this runs over ordinary voice chatter, and a
- * false memory steers the spoken prompt until Kevin notices — "never mind",
+ * false memory steers the spoken prompt until User notices — "never mind",
  * "call me back", "I like that" must produce nothing (see the deny lists).
  */
 
@@ -22,7 +22,7 @@ function clean(line: string): string {
   return line
     .trim()
     .replace(/\s+/g, " ")
-    .replace(/^(?:(?:hey|ok|okay|hi|yo)[,.!]?\s+)?(?:hormes|jar head|jarred|jared)[,.!]?\s*/i, "")
+    .replace(/^(?:(?:hey|ok|okay|hi|yo)[,.!]?\s+)?(?:hormes|hor mes|hormis|hermes)[,.!]?\s*/i, "")
     .replace(/^(?:please|could you|can you|would you)[,]?\s+/i, "")
     .replace(/[.!?,;:\s]+$/g, "")
     .replace(/,?\s+please$/i, "")
@@ -48,7 +48,7 @@ const NAME_DENY = new Set([
 ]);
 /** "I like that", "I don't like it", "I prefer this one": an object that only points at the conversation is nothing to remember. */
 const OBJECT_PRONOUNS = new Set(["that", "it", "this", "them", "those", "these", "so", "you", "him", "her", "one", "everything", "nothing"]);
-/** "I never said that", "I always forget", "I think so": speech and memory verbs describe the moment, not Kevin. */
+/** "I never said that", "I always forget", "I think so": speech and memory verbs describe the moment, not User. */
 const SPEECH_VERBS = new Set(["said", "say", "says", "saying", "forget", "forgot", "forgetting", "mean", "meant", "think", "thought", "know", "knew", "guess", "guessed", "remember", "remembered", "suppose", "supposed", "wonder", "wondered", "told", "tell", "asked", "ask", "figured", "assumed", "assume", "believe", "believed"]);
 
 const RE_REMEMBER = /^(?:remember|note|keep in mind)(?: that)?\s+(.{8,200})$/i;
@@ -87,57 +87,61 @@ function preferenceObjectOk(object: string): boolean {
   return tokens(object).size >= 1;
 }
 
-/** The first-person patterns as third-person sentences; undefined when none fits. */
-function shapeOf(t: string): Shape | undefined {
+/** The first-person patterns as third-person sentences about `who`; undefined when none fits. */
+function shapeOf(t: string, who: string): Shape | undefined {
   let m = RE_PREFER.exec(t);
   if (m && preferenceObjectOk(m[2]!)) {
     const verb = PREFER_VERBS[m[1]!.toLowerCase().replace(/'/g, "")] ?? PREFER_VERBS[m[1]!.toLowerCase()] ?? m[1]!;
-    return { kind: "preference", text: `Kevin ${verb} ${m[2]!}`, importance: 0.6, confidence: 0.7 };
+    return { kind: "preference", text: `${who} ${verb} ${m[2]!}`, importance: 0.6, confidence: 0.7 };
   }
   m = RE_NAME.exec(t);
-  if (m && !m[1]!.split(/\s+/).some((w) => NAME_DENY.has(w.toLowerCase()))) return { kind: "fact", text: `Kevin goes by ${capitalize(m[1]!.trim())}`, importance: 1.0, confidence: 0.9 };
+  if (m && !m[1]!.split(/\s+/).some((w) => NAME_DENY.has(w.toLowerCase()))) return { kind: "fact", text: `${who} goes by ${capitalize(m[1]!.trim())}`, importance: 1.0, confidence: 0.9 };
   m = RE_MY_X_IS.exec(t);
   if (m) {
     const noun = m[1]!.toLowerCase().trim();
     const kind: MemoryKind = CONTACT_NOUNS.has(noun) ? "contact" : PLACE_NOUNS.has(noun) ? "place" : "fact";
-    return { kind, text: `Kevin's ${noun} is ${m[2]!}`, importance: 0.6, confidence: 0.7 };
+    return { kind, text: `${who}'s ${noun} is ${m[2]!}`, importance: 0.6, confidence: 0.7 };
   }
   m = RE_FROM_NOW.exec(t);
-  if (m) return { kind: "procedure", text: `How Kevin likes it done: ${m[1]!}`, importance: 0.8, confidence: 0.8 };
+  if (m) return { kind: "procedure", text: `How ${who} likes it done: ${m[1]!}`, importance: 0.8, confidence: 0.8 };
   m = RE_ALWAYS.exec(t);
-  if (m && !/^mind\b/i.test(m[2]!) && tokens(m[2]!).size >= 2) return { kind: "procedure", text: `How Kevin likes it done: ${m[1]!.toLowerCase()} ${m[2]!}`, importance: 0.8, confidence: 0.8 };
+  if (m && !/^mind\b/i.test(m[2]!) && tokens(m[2]!).size >= 2) return { kind: "procedure", text: `How ${who} likes it done: ${m[1]!.toLowerCase()} ${m[2]!}`, importance: 0.8, confidence: 0.8 };
   m = RE_SPEAK.exec(t);
-  if (m) return { kind: "preference", text: `Kevin wants answers in ${capitalize(m[1]!.toLowerCase())}`, importance: 1.0, confidence: 0.9 };
+  if (m) return { kind: "preference", text: `${who} wants answers in ${capitalize(m[1]!.toLowerCase())}`, importance: 1.0, confidence: 0.9 };
   return undefined;
 }
 
 /** The "remember" capture, rewritten to the third person when a pattern fits, else recorded as asked. */
-function rememberShape(sub: string): Shape {
-  const s = shapeOf(sub);
+function rememberShape(sub: string, who: string): Shape {
+  const s = shapeOf(sub, who);
   if (s) return { ...s, importance: 0.9, confidence: 0.9 };
   let m = RE_I_AM_FULL.exec(sub);
-  if (m) return { kind: "fact", text: `Kevin is ${m[1]!}`, importance: 0.9, confidence: 0.9 };
+  if (m) return { kind: "fact", text: `${who} is ${m[1]!}`, importance: 0.9, confidence: 0.9 };
   m = RE_MY.exec(sub);
-  if (m) return { kind: "fact", text: `Kevin's ${m[1]!}`, importance: 0.9, confidence: 0.9 };
-  return { kind: "fact", text: `Kevin asked Hormes to remember: ${sub}`, importance: 0.9, confidence: 0.9 };
+  if (m) return { kind: "fact", text: `${who}'s ${m[1]!}`, importance: 0.9, confidence: 0.9 };
+  return { kind: "fact", text: `${who} asked Hormes to remember: ${sub}`, importance: 0.9, confidence: 0.9 };
 }
 
 export class RulesExtractor implements Extractor {
   readonly kind = "rules" as const;
 
+  /** `userName`: what the third-person sentences call him ("<Name> prefers …"); default "User". */
+  constructor(private readonly userName = "User") {}
+
   /**
-   * One of Kevin's lines → a candidate, or undefined when no rule fits. Kevin's
-   * words only: a line of Hormes's must never be passed here.
+   * One of User's lines → a candidate, or undefined when no rule fits. User's
+   * words only: a line of Hormes's must never be passed here. `userName` is the
+   * subject of the sentence minted.
    */
-  static classify(kevinLine: string): Candidate | undefined {
-    const t = clean(kevinLine);
+  static classify(userLine: string, userName = "User"): Candidate | undefined {
+    const t = clean(userLine);
     if (t.length < 4) return undefined;
     const rem = RE_REMEMBER.exec(t);
     if (rem) {
-      const s = rememberShape(rem[1]!.trim());
-      return { kind: s.kind, text: s.text, subjects: subjectsOf(s.text), importance: s.importance, confidence: s.confidence, evidence: [], origin: "kevin" };
+      const s = rememberShape(rem[1]!.trim(), userName);
+      return { kind: s.kind, text: s.text, subjects: subjectsOf(s.text), importance: s.importance, confidence: s.confidence, evidence: [], origin: "user" };
     }
-    const s = shapeOf(t);
+    const s = shapeOf(t, userName);
     if (!s) return undefined;
     return { kind: s.kind, text: s.text, subjects: subjectsOf(s.text), importance: s.importance, confidence: s.confidence, evidence: [], origin: "extracted" };
   }
@@ -145,8 +149,8 @@ export class RulesExtractor implements Extractor {
   async extract(input: ExtractInput): Promise<Candidate[]> {
     const out: Candidate[] = [];
     for (const line of input.lines) {
-      if (line.speaker !== "Kevin") continue;
-      const c = RulesExtractor.classify(line.text);
+      if (line.speaker !== "User") continue;
+      const c = RulesExtractor.classify(line.text, this.userName);
       if (!c) continue;
       out.push({ ...c, evidence: [line.n] });
       if (out.length >= MAX_CANDIDATES) break;

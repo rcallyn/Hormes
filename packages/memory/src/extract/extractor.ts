@@ -2,7 +2,7 @@ import type { Candidate, Decision, ExtractInput, ExtractorKind, Neighbour, Thres
 
 /**
  * Turns one conversation into candidates. The Responses extractor talks to
- * OpenAI (Kevin's key, dollars); the rules extractor is regexes and costs
+ * OpenAI (User's key, dollars); the rules extractor is regexes and costs
  * nothing. Both return raw candidates; the merge step filters and applies them.
  */
 export interface Extractor {

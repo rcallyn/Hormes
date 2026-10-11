@@ -38,8 +38,8 @@ export function unionSubjects(a: readonly string[], b: readonly string[]): strin
 }
 
 export interface PostFilterOptions {
-  /** Line numbers that are Kevin's; a candidate must cite one (extractor runs). */
-  readonly kevinLines?: ReadonlySet<number>;
+  /** Line numbers that are User's; a candidate must cite one (extractor runs). */
+  readonly userLines?: ReadonlySet<number>;
   /** False for an explicit "remember" or a Console add, which have no transcript. */
   readonly requireEvidence?: boolean;
 }
@@ -47,7 +47,7 @@ export interface PostFilterOptions {
 /**
  * The gate every candidate passes before the store sees it: a valid kind, a
  * sentence of ≤ 200 chars (cut at a sentence end or refused), evidence that
- * cites a Kevin line, importance on 0..1 (the schema's 1..5 divided), and none
+ * cites a User line, importance on 0..1 (the schema's 1..5 divided), and none
  * of memory's refusal shapes. Returns the clean candidate or why it was refused.
  */
 export function postFilter(c: Candidate, opts: PostFilterOptions = {}): { readonly ok: Candidate } | { readonly refused: string } {
@@ -56,8 +56,8 @@ export function postFilter(c: Candidate, opts: PostFilterOptions = {}): { readon
   const text = trimSentence(c.text);
   if (!text || text.length < 4) return { refused: text === undefined ? `over ${MAX_TEXT_CHARS} chars` : "too short" };
   if (opts.requireEvidence !== false) {
-    const kevin = opts.kevinLines ?? new Set<number>();
-    if (!Array.isArray(c.evidence) || !c.evidence.some((n) => kevin.has(n))) return { refused: "no Kevin line cited" };
+    const user = opts.userLines ?? new Set<number>();
+    if (!Array.isArray(c.evidence) || !c.evidence.some((n) => user.has(n))) return { refused: "no User line cited" };
   }
   const why = refuseReason(text, { kind: c.kind, ...(c.origin ? { origin: c.origin } : {}) });
   if (why) return { refused: why };
@@ -114,7 +114,10 @@ function neighboursOf(pool: ReadonlyMap<string, Pooled>, c: Candidate, cand: Emb
  * evidence onto words nobody said. Items added during the run join the pool,
  * so two near-identical candidates in one batch collapse to one add and one
  * touch. Embedding runs first and its failure throws before anything is
- * written — the service defers the run rather than mixing vector spaces.
+ * written — the service defers the run rather than mixing vector spaces. The
+ * decider is the one await inside the loop: once it answers, the pool is read
+ * again, and a target that is no longer live (User pressed Forget meanwhile) or
+ * whose words he edited turns the decision into a plain ADD.
  */
 export async function mergeCandidates(store: MemoryStore, candidates: readonly Candidate[], embedder: Embedder, decider: Decider, opts: MergeOptions): Promise<MergeResult> {
   const texts = candidates.map((c) => c.text);
@@ -135,6 +138,12 @@ export async function mergeCandidates(store: MemoryStore, candidates: readonly C
     const it = store.get(id);
     if (it && it.state === "live") pool.set(id, { item: it, vec: store.vectorFor(id, embedder) });
     else pool.delete(id);
+  };
+  // The sync verbs (Forget, Edit) apply at once, also while the decider is out: after the
+  // decider answers, the pool is read again (an item the store replaced since), so no
+  // decision lands on an item that is no longer live, or on words User changed meanwhile.
+  const resync = (): void => {
+    for (const [id, p] of [...pool]) if (store.get(id) !== p.item) refresh(id);
   };
   let added = 0;
   let updated = 0;
@@ -175,8 +184,19 @@ export async function mergeCandidates(store: MemoryStore, candidates: readonly C
       continue;
     }
     let d: Decision = { op: "ADD" };
-    if (top && s >= T.band) d = await decider.decide(c, N, { thresholds: T, now: opts.now, ...(opts.signal ? { signal: opts.signal } : {}) });
-    const target = d.target && pool.has(d.target) ? d.target : top?.item.id;
+    let target: string | undefined;
+    if (top && s >= T.band) {
+      d = await decider.decide(c, N, { thresholds: T, now: opts.now, ...(opts.signal ? { signal: opts.signal } : {}) });
+      // The item the decider meant, as it saw the pool; then the pool as it is now. A target
+      // User forgot meanwhile (or one archived or merged) is gone from it, and one he edited
+      // reads other words than the decider judged: either way the decision becomes a plain
+      // ADD, and his words are neither rewritten, touched nor superseded.
+      target = d.target && pool.has(d.target) ? d.target : top.item.id;
+      const judged = pool.get(target)?.item;
+      resync();
+      const current = pool.get(target)?.item;
+      if (judged && current && normalizeText(current.text) !== normalizeText(judged.text)) target = undefined;
+    }
     const targetItem = target ? pool.get(target)?.item : undefined;
 
     if (d.op === "NOOP" && targetItem) {

@@ -55,7 +55,7 @@ export interface RefuseContext {
 /**
  * Why a line or a candidate must not be remembered, or undefined when it may.
  * Contact details survive only for an explicit "remember" of a contact
- * (kind contact, origin kevin) — anything else that carries an email or a phone
+ * (kind contact, origin user) — anything else that carries an email or a phone
  * is refused.
  */
 export function refuseReason(text: string, ctx: RefuseContext = {}): string | undefined {
@@ -71,7 +71,7 @@ export function refuseReason(text: string, ctx: RefuseContext = {}): string | un
   if (path) return `secret path (${path})`;
   const env = secretEnvReason(text);
   if (env) return "secret env name";
-  const contactOk = ctx.kind === "contact" && ctx.origin === "kevin";
+  const contactOk = ctx.kind === "contact" && ctx.origin === "user";
   if (!contactOk) {
     if (EMAIL.test(text)) return "email address";
     for (const m of text.matchAll(PHONE)) {

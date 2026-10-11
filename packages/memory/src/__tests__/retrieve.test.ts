@@ -15,7 +15,7 @@ import { atCosine, item, T0 } from "./helpers.ts";
 const DAY = 86_400_000;
 
 test("score: an episode last seen 30 days ago has recency 0.5 and 60 days 0.25; facts halve at 180 d; a preference never decays; importance 0 still scores (0.5); seen 6× → 1.5, capped", () => {
-  const ep = item({ id: "e", text: "Kevin shipped auth", kind: "episode", lastSeenAt: T0 });
+  const ep = item({ id: "e", text: "User shipped auth", kind: "episode", lastSeenAt: T0 });
   assert.ok(Math.abs(recency(ep, T0 + 30 * DAY) - 0.5) < 1e-9);
   assert.ok(Math.abs(recency(ep, T0 + 60 * DAY) - 0.25) < 1e-9);
   assert.ok(Math.abs(recency(item({ id: "f", text: "x", kind: "fact", lastSeenAt: T0 }), T0 + 180 * DAY) - 0.5) < 1e-9);
@@ -33,10 +33,10 @@ test("score: an episode last seen 30 days ago has recency 0.5 and 60 days 0.25; 
 
 test("pinned lane: strong preferences/procedures seen twice or asked for are always in, with no query, and take at most 40 % of the budget; ties by id", () => {
   const e = new KeywordEmbedder();
-  const pins = Array.from({ length: 12 }, (_, i) => item({ id: `p${String(i).padStart(2, "0")}`, text: `Kevin prefers option number ${i} for everything he does`, kind: "preference", importance: 0.9, seenCount: 2 }));
-  const asked = item({ id: "a1", text: "Kevin goes by Kev", kind: "preference", importance: 0.8, seenCount: 1, origin: "kevin" });
-  const weak = item({ id: "w1", text: "Kevin likes jazz", kind: "preference", importance: 0.5, seenCount: 5 });
-  const fact = item({ id: "f1", text: "Kevin's dentist is Dr. Patel", kind: "contact", importance: 0.9, seenCount: 4 });
+  const pins = Array.from({ length: 12 }, (_, i) => item({ id: `p${String(i).padStart(2, "0")}`, text: `User prefers option number ${i} for everything he does`, kind: "preference", importance: 0.9, seenCount: 2 }));
+  const asked = item({ id: "a1", text: "User goes by Kev", kind: "preference", importance: 0.8, seenCount: 1, origin: "user" });
+  const weak = item({ id: "w1", text: "User likes jazz", kind: "preference", importance: 0.5, seenCount: 5 });
+  const fact = item({ id: "f1", text: "User's dentist is Dr. Patel", kind: "contact", importance: 0.9, seenCount: 4 });
   assert.ok(isPinned(asked));
   assert.ok(!isPinned(weak));
   assert.ok(!isPinned(fact));
@@ -55,10 +55,10 @@ test("query lane: MMR (λ 0.7) ranks a diverse item of close relevance above an 
   const e = new FakeEmbedder({ table: {}, dims: 3 });
   const q = l2normalize(Float32Array.from([1, 0, 0]));
   const tv = l2normalize(Float32Array.from([0.8, 0.6, 0]));
-  const top = { ...item({ id: "t", text: "Kevin prefers dark mode", kind: "fact", importance: 0.8, confidence: 0.9 }), vec: tv };
-  const twin = { ...item({ id: "u", text: "Kevin likes dark mode", kind: "fact", importance: 0.8, confidence: 0.9 }), vec: tv };
-  const diverse = { ...item({ id: "d", text: "Kevin's dentist is Dr. Patel", kind: "fact", importance: 0.8, confidence: 0.9 }), vec: l2normalize(Float32Array.from([0.75, -0.4, 0.527])) };
-  const far = { ...item({ id: "x", text: "Kevin's office is in SoMa", kind: "fact", importance: 0.2, confidence: 0.5 }), vec: l2normalize(Float32Array.from([0, 0, 1])) };
+  const top = { ...item({ id: "t", text: "User prefers dark mode", kind: "fact", importance: 0.8, confidence: 0.9 }), vec: tv };
+  const twin = { ...item({ id: "u", text: "User likes dark mode", kind: "fact", importance: 0.8, confidence: 0.9 }), vec: tv };
+  const diverse = { ...item({ id: "d", text: "User's dentist is Dr. Patel", kind: "fact", importance: 0.8, confidence: 0.9 }), vec: l2normalize(Float32Array.from([0.75, -0.4, 0.527])) };
+  const far = { ...item({ id: "x", text: "User's office is in SoMa", kind: "fact", importance: 0.2, confidence: 0.5 }), vec: l2normalize(Float32Array.from([0, 0, 1])) };
   const r = retrieve([far, twin, diverse, top], { query: { text: "dark mode", vec: q }, embedder: e, now: T0, budgetTokens: 100 });
   assert.deepEqual(r.picked.map((i) => i.id), ["t", "d", "u"], "top first (id order between equals), then the diverse item, the twin last");
   assert.ok(!("vec" in r.picked[0]!), "no vector leaves retrieve()");
@@ -70,12 +70,12 @@ test("query lane: MMR (λ 0.7) ranks a diverse item of close relevance above an 
 
 test("budget: the picked texts never exceed the budget (chars / 3.2 + a newline each), items that do not fit are skipped for smaller ones, and equal scores come in id order", () => {
   const e = new KeywordEmbedder();
-  const items = Array.from({ length: 60 }, (_, i) => item({ id: `m_${String(i).padStart(3, "0")}`, text: `Kevin's fact number ${i} about his world and the way it works`, kind: "fact", importance: 0.6, confidence: 0.8, lastSeenAt: T0 }));
+  const items = Array.from({ length: 60 }, (_, i) => item({ id: `m_${String(i).padStart(3, "0")}`, text: `User's fact number ${i} about his world and the way it works`, kind: "fact", importance: 0.6, confidence: 0.8, lastSeenAt: T0 }));
   const r = retrieve(items, { embedder: e, now: T0, budgetTokens: 250 });
   assert.ok(r.tokens <= 250, `${r.tokens} > 250`);
   assert.equal(r.tokens, r.picked.reduce((n, it) => n + estimateTokens(it.text) + 1, 0));
   assert.deepEqual(r.picked.map((i) => i.id), [...r.picked.map((i) => i.id)].sort(), "ties by id");
-  const tiny = item({ id: "m_zzz", text: "Kevin is Kev", kind: "fact", importance: 0.6, confidence: 0.8, lastSeenAt: T0 });
+  const tiny = item({ id: "m_zzz", text: "User is Kev", kind: "fact", importance: 0.6, confidence: 0.8, lastSeenAt: T0 });
   const r2 = retrieve([...items, tiny], { embedder: e, now: T0, budgetTokens: 250 });
   assert.ok(r2.picked.some((i) => i.id === "m_zzz"), "a short item fills what a long one could not");
   assert.ok(r2.tokens <= 250);
@@ -85,21 +85,21 @@ test("budget: the picked texts never exceed the budget (chars / 3.2 + a newline 
   assert.deepEqual(retrieve([item({ id: "g", text: "gone", state: "forgotten" }), item({ id: "h", text: "old", state: "archived" })], { embedder: e, now: T0, budgetTokens: 250 }).picked, [], "only live items");
 });
 
-test("query lane by words: a realistic delegation query (request + Kevin's recent lines, ≥ 25 content tokens) against a keyword store surfaces the relevant procedure and not the dentist — Jaccard would have left the block empty", () => {
+test("query lane by words: a realistic delegation query (request + User's recent lines, ≥ 25 content tokens) against a keyword store surfaces the relevant procedure and not the dentist — Jaccard would have left the block empty", () => {
   const e = new KeywordEmbedder();
   const items = [
-    item({ id: "kev", text: "Kevin goes by Kev", kind: "fact", importance: 1, confidence: 0.9 }),
-    item({ id: "short", text: "Kevin prefers short answers", kind: "preference", importance: 0.6, confidence: 0.7 }),
-    item({ id: "dentist", text: "Kevin's dentist is Dr. Patel", kind: "contact", importance: 0.6, confidence: 0.7 }),
-    item({ id: "diff", text: "How Kevin likes it done: read the diff before saying a PR is fine", kind: "procedure", importance: 0.8, confidence: 0.8 }),
-    item({ id: "dark", text: "Kevin likes dark mode", kind: "preference", importance: 0.6, confidence: 0.7 }),
-    item({ id: "english", text: "Kevin wants answers in English", kind: "preference", importance: 1, confidence: 0.9 }),
-    item({ id: "office", text: "Kevin's office is in SoMa", kind: "place", importance: 0.6, confidence: 0.7 }),
-    item({ id: "barber", text: "Kevin's barber is Tony", kind: "contact", importance: 0.6, confidence: 0.7 }),
+    item({ id: "kev", text: "User goes by Kev", kind: "fact", importance: 1, confidence: 0.9 }),
+    item({ id: "short", text: "User prefers short answers", kind: "preference", importance: 0.6, confidence: 0.7 }),
+    item({ id: "dentist", text: "User's dentist is Dr. Patel", kind: "contact", importance: 0.6, confidence: 0.7 }),
+    item({ id: "diff", text: "How User likes it done: read the diff before saying a PR is fine", kind: "procedure", importance: 0.8, confidence: 0.8 }),
+    item({ id: "dark", text: "User likes dark mode", kind: "preference", importance: 0.6, confidence: 0.7 }),
+    item({ id: "english", text: "User wants answers in English", kind: "preference", importance: 1, confidence: 0.9 }),
+    item({ id: "office", text: "User's office is in SoMa", kind: "place", importance: 0.6, confidence: 0.7 }),
+    item({ id: "barber", text: "User's barber is Tony", kind: "contact", importance: 0.6, confidence: 0.7 }),
   ];
   const request = "open the pull request for the auth work, read through the diff and tell me if the PR is fine, then push it if it is";
-  const kevinRecent = ["okay so I merged the feature branch this morning and the CI was green", "I'd like you to open the pull request for the auth work and read through the diff", "then tell me if the PR is fine and push it if it is", "also the standup moved to ten so keep the summary short"].join("\n");
-  const query = `${request}\n${kevinRecent}`;
+  const userRecent = ["okay so I merged the feature branch this morning and the CI was green", "I'd like you to open the pull request for the auth work and read through the diff", "then tell me if the PR is fine and push it if it is", "also the standup moved to ten so keep the summary short"].join("\n");
+  const query = `${request}\n${userRecent}`;
   assert.ok(tokens(query).size >= 25, `query has ${tokens(query).size} content tokens`);
   const jaccardScore = keywordSimilarity(query, items[3]!.text) * baseScore(items[3]!, T0);
   assert.ok(jaccardScore < SCORE_FLOOR, `Jaccard × base = ${jaccardScore.toFixed(3)} sits under the floor ${SCORE_FLOOR} for the relevant item — the old dead lane`);

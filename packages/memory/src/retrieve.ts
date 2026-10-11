@@ -3,7 +3,7 @@ import { querySimilarityOf, similarityOf, type Embedded, type Embedder } from ".
 import { tokenWeights, type TokenWeight } from "./embed/keyword.ts";
 import { estimateTokens } from "./tokens.ts";
 
-/** Recency half-lives in days; undefined = never decays (how Kevin likes things does not go stale). */
+/** Recency half-lives in days; undefined = never decays (how User likes things does not go stale). */
 export const HALF_LIFE_DAYS: Readonly<Record<MemoryKind, number | undefined>> = {
   episode: 30,
   fact: 180,
@@ -40,9 +40,9 @@ export function baseScore(item: MemoryItem, now: number): number {
   return recency(item, now) * importanceFactor(item) * item.confidence * seenFactor(item);
 }
 
-/** Always worth carrying: a strong preference or procedure seen twice, or one Kevin asked to remember. */
+/** Always worth carrying: a strong preference or procedure seen twice, or one User asked to remember. */
 export function isPinned(item: MemoryItem): boolean {
-  return item.state === "live" && (item.kind === "preference" || item.kind === "procedure") && item.importance >= 0.8 && (item.seenCount >= 2 || item.origin === "kevin");
+  return item.state === "live" && (item.kind === "preference" || item.kind === "procedure") && item.importance >= 0.8 && (item.seenCount >= 2 || item.origin === "user");
 }
 
 /** One item's cost in the block: its text and a newline. */
@@ -53,7 +53,7 @@ export function itemTokens(item: MemoryItem): number {
 export type Retrievable = MemoryItem & { readonly vec?: Float32Array | undefined };
 
 export interface RetrieveOptions {
-  /** The words Kevin just said (and their vector when it is already known); absent for the voice block. */
+  /** The words User just said (and their vector when it is already known); absent for the voice block. */
   readonly query?: { readonly text: string; readonly vec?: Float32Array | undefined };
   readonly embedder: Embedder;
   readonly now: number;
@@ -86,7 +86,7 @@ function stripVec(r: Retrievable): MemoryItem {
  * `sim` is the query vector against the item's when both exist. Otherwise —
  * keyword mode, an item never embedded, a lost embedding race — it is how much
  * of the item's words the query mentions, weighted so a word every item shares
- * counts for little: the query is a request plus Kevin's recent lines and an
+ * counts for little: the query is a request plus User's recent lines and an
  * item is one sentence, so a symmetric overlap would sit under the floor for
  * everything and the lane would be dead without a key. Item ↔ item (MMR) stays
  * symmetric. Ties break by id, so the output is deterministic. Only live items

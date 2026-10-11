@@ -19,9 +19,9 @@ function seeded(dir: string): MemoryStore {
   const c = clock();
   const store = new MemoryStore({ dir, now: c.now, newId: ids() });
   store.load();
-  store.add({ kind: "fact", text: "Kevin goes by Kev", confidence: 0.9, importance: 1, origin: "kevin" }, src);
+  store.add({ kind: "fact", text: "User goes by Kev", confidence: 0.9, importance: 1, origin: "user" }, src);
   c.tick(10);
-  store.add({ kind: "preference", text: "Kevin prefers short answers", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
+  store.add({ kind: "preference", text: "User prefers short answers", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
   store.setWatermark("A", T0 + 80_000, "rules", { added: 2, updated: 0, noop: 0, refused: 1 });
   store.exclude(T0 + 60_000, T0 + 70_000, "A");
   store.flush();
@@ -47,7 +47,7 @@ test("store: a leftover index.json.tmp is ignored; a stale index (line count ≠
   const store = seeded(dir);
   writeFileSync(join(dir, "index.json.tmp"), "garbage");
   // stale: a row appended by a process that never flushed
-  store.add({ kind: "place", text: "Kevin's office is in SoMa", confidence: 0.7, importance: 0.5, origin: "extracted" }, src);
+  store.add({ kind: "place", text: "User's office is in SoMa", confidence: 0.7, importance: 0.5, origin: "extracted" }, src);
   const stale = new MemoryStore({ dir, now: () => T0, newId: ids() });
   stale.load();
   assert.equal(stale.replayed, true);
@@ -74,7 +74,7 @@ test("store: sources are capped at 8 — the first mention kept, then the newest
   const c = clock();
   const store = new MemoryStore({ dir, now: c.now, newId: ids() });
   store.load();
-  const it = store.add({ kind: "fact", text: "Kevin goes by Kev", subjects: ["Name", "name", "KEV", "a", "b", "c", "d"], confidence: 1.7, importance: -2, origin: "kevin" }, src);
+  const it = store.add({ kind: "fact", text: "User goes by Kev", subjects: ["Name", "name", "KEV", "a", "b", "c", "d"], confidence: 1.7, importance: -2, origin: "user" }, src);
   assert.deepEqual(it.subjects, ["name", "kev", "a", "b", "c"]);
   assert.equal(it.confidence, 1);
   assert.equal(it.importance, 0);
@@ -97,13 +97,13 @@ test("store: forget/restore/archive are states with rules (a merged item cannot 
   const dir = fresh();
   const store = new MemoryStore({ dir, now: () => T0, newId: ids() });
   store.load();
-  const a = store.add({ kind: "fact", text: "Kevin goes by Kev", confidence: 0.9, importance: 1, origin: "kevin" }, src);
-  const b = store.add({ kind: "fact", text: "Kevin goes by Kev.", confidence: 0.9, importance: 1, origin: "kevin" }, src);
+  const a = store.add({ kind: "fact", text: "User goes by Kev", confidence: 0.9, importance: 1, origin: "user" }, src);
+  const b = store.add({ kind: "fact", text: "User goes by Kev.", confidence: 0.9, importance: 1, origin: "user" }, src);
   assert.equal(store.restore(a.id), undefined, "a live item has nothing to restore");
   store.merge(a.id, b.id, false);
   assert.equal(store.get(a.id)?.state, "merged");
   assert.equal(store.get(b.id)?.seenCount, 1, "a supersession does not fold evidence");
-  assert.equal(store.forget(a.id, "kevin"), undefined);
+  assert.equal(store.forget(a.id, "user"), undefined);
   store.archive(b.id, "cap");
   assert.equal(store.get(b.id)?.state, "archived");
   assert.ok(store.forget(b.id, "cli"), "an archived item can still be forgotten");
@@ -116,22 +116,22 @@ test("store: embed() goes through embeddings.jsonl — misses hit the embedder o
   const store = new MemoryStore({ dir, now: () => T0, newId: ids() });
   store.load();
   const e = new FakeEmbedder({ dims: 8 });
-  const texts = ["Kevin goes by Kev", "Kevin prefers short answers", "Kevin goes by Kev"];
-  const v1 = await store.embed(e, texts);
+  const texts = ["User goes by Kev", "User prefers short answers", "User goes by Kev"];
+  const first = await store.embed(e, texts);
   assert.equal(e.calls.length, 1);
-  assert.deepEqual(e.calls[0], ["Kevin goes by Kev", "Kevin prefers short answers"], "duplicates within a batch embed once");
-  assert.equal(v1.length, 3);
-  assert.equal(v1[0]!.length, 8);
-  const v2 = await store.embed(e, ["kevin goes by kev.", "Kevin prefers short answers"]);
+  assert.deepEqual(e.calls[0], ["User goes by Kev", "User prefers short answers"], "duplicates within a batch embed once");
+  assert.equal(first.length, 3);
+  assert.equal(first[0]!.length, 8);
+  const second = await store.embed(e, ["user goes by kev.", "User prefers short answers"]);
   assert.equal(e.calls.length, 1, "case, whitespace and trailing punctuation share a sha");
-  assert.deepEqual([...v2[0]!], [...v1[0]!]);
-  const it = store.add({ kind: "fact", text: "Kevin goes by Kev", confidence: 0.9, importance: 1, origin: "kevin" }, src);
+  assert.deepEqual([...second[0]!], [...first[0]!]);
+  const it = store.add({ kind: "fact", text: "User goes by Kev", confidence: 0.9, importance: 1, origin: "user" }, src);
   assert.ok(store.vectorFor(it.id, e));
   const other = new FakeEmbedder({ dims: 16 });
   assert.equal(store.vectorFor(it.id, other), undefined, "never a vector from another space");
   const reloaded = new MemoryStore({ dir, now: () => T0, newId: ids() });
   reloaded.load();
-  assert.deepEqual([...reloaded.vectorFor(it.id, e)!], [...v1[0]!], "the cache round-trips through base64 exactly");
+  assert.deepEqual([...reloaded.vectorFor(it.id, e)!], [...first[0]!], "the cache round-trips through base64 exactly");
   assert.equal(reloaded.cache.size, 2);
 });
 
@@ -153,7 +153,7 @@ test("store: 200 mixed ops — memory.jsonl and embeddings.jsonl byte lengths on
       case 0:
       case 1:
       case 2: {
-        const text = `Kevin ${kind} number ${i}`;
+        const text = `User ${kind} number ${i}`;
         await store.embed(e, [text]);
         all.push(store.add({ kind, text, confidence: 0.5, importance: (i % 5) / 4, origin: "extracted" }, { ...src, at: c.now() }).id);
         break;
@@ -162,10 +162,10 @@ test("store: 200 mixed ops — memory.jsonl and embeddings.jsonl byte lengths on
         store.touch(all[i % all.length]!, { ...src, at: c.now() });
         break;
       case 4:
-        store.update(all[i % all.length]!, { text: `Kevin ${kind} number ${i} revised`, confidence: 0.6 }, { ...src, at: c.now() });
+        store.update(all[i % all.length]!, { text: `User ${kind} number ${i} revised`, confidence: 0.6 }, { ...src, at: c.now() });
         break;
       case 5:
-        store.forget(all[i % all.length]!, i % 2 ? "kevin" : "reflex");
+        store.forget(all[i % all.length]!, i % 2 ? "user" : "reflex");
         break;
       case 6:
         store.restore(all[i % all.length]!);

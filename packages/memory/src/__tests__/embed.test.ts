@@ -61,8 +61,8 @@ test("vectors: base64 float32 round trip is exact; the cache sha is stable under
   const v = l2normalize(Float32Array.from([0.1, -0.2, 0.3, 0.4, -0.5]));
   const back = fromBase64(toBase64(v));
   assert.deepEqual([...back], [...v]);
-  assert.equal(EmbeddingCache.sha("Kevin goes by Kev"), EmbeddingCache.sha("  kevin   goes by Kev. "));
-  assert.notEqual(EmbeddingCache.sha("Kevin goes by Kev"), EmbeddingCache.sha("Kevin goes by Kevin"));
+  assert.equal(EmbeddingCache.sha("User goes by Kev"), EmbeddingCache.sha("  user   goes by Kev. "));
+  assert.notEqual(EmbeddingCache.sha("User goes by Kev"), EmbeddingCache.sha("User goes by User"));
 });
 
 test("keyword embedder: no vectors, Jaccard over stemmed folded tokens — identical 1.0, paraphrase ≥ 0.6, a reversal in the band, different facts apart, unrelated < 0.3", async () => {
@@ -71,13 +71,13 @@ test("keyword embedder: no vectors, Jaccard over stemmed folded tokens — ident
   assert.deepEqual(e.thresholds, { update: 0.6, band: 0.4, dup: 0.7 });
   const vs = await e.embed(["a", "b"]);
   assert.equal(vs[0]!.length, 0);
-  assert.equal(keywordSimilarity("Kevin prefers short answers", "Kevin prefers short answers."), 1);
-  assert.ok(keywordSimilarity("Kevin prefers dark mode", "Kevin likes dark mode") >= 0.6, "prefers ≈ likes");
-  assert.ok(keywordSimilarity("Kevin prefers short answers", "Kevin likes his answers brief") >= 0.6);
-  const rev = keywordSimilarity("Kevin prefers dark mode", "Kevin prefers light mode");
+  assert.equal(keywordSimilarity("User prefers short answers", "User prefers short answers."), 1);
+  assert.ok(keywordSimilarity("User prefers dark mode", "User likes dark mode") >= 0.6, "prefers ≈ likes");
+  assert.ok(keywordSimilarity("User prefers short answers", "User likes his answers brief") >= 0.6);
+  const rev = keywordSimilarity("User prefers dark mode", "User prefers light mode");
   assert.ok(rev >= 0.4 && rev < 0.6, `a reversal (${rev}) sits in the band, where the rules decider's antonym rule reads it`);
-  assert.ok(keywordSimilarity("Kevin prefers short answers", "Kevin wants answers in English") < 0.4, "two different facts about answers stay apart");
-  assert.ok(keywordSimilarity("Kevin prefers dark mode", "Kevin's dentist is Dr. Patel") < 0.3);
+  assert.ok(keywordSimilarity("User prefers short answers", "User wants answers in English") < 0.4, "two different facts about answers stay apart");
+  assert.ok(keywordSimilarity("User prefers dark mode", "User's dentist is Dr. Patel") < 0.3);
   assert.equal(stem("prefers"), "prefer");
   assert.equal(stem("answers"), "answer");
   assert.equal(stem("policies"), "policy");
@@ -85,36 +85,36 @@ test("keyword embedder: no vectors, Jaccard over stemmed folded tokens — ident
 });
 
 test("fake embedder: a table pins exact cosines; texts outside the table hash their tokens deterministically; similarityOf falls back to words when a vector is missing", async () => {
-  const e = new FakeEmbedder({ table: { "Kevin prefers dark mode": atCosine(1), "Kevin likes dark mode": atCosine(0.95), "Kevin prefers light mode": atCosine(0.92) }, dims: 3 });
-  const [a, b, c] = await e.embed(["Kevin prefers dark mode", "kevin likes dark mode.", "Kevin prefers light mode"]);
+  const e = new FakeEmbedder({ table: { "User prefers dark mode": atCosine(1), "User likes dark mode": atCosine(0.95), "User prefers light mode": atCosine(0.92) }, dims: 3 });
+  const [a, b, c] = await e.embed(["User prefers dark mode", "user likes dark mode.", "User prefers light mode"]);
   assert.ok(Math.abs(e.similarity(a!, b!) - 0.95) < 1e-6);
   assert.ok(Math.abs(e.similarity(a!, c!) - 0.92) < 1e-6);
   const h = new FakeEmbedder();
-  const [x1, x2, y] = await h.embed(["Kevin prefers dark mode", "Kevin prefers dark mode", "Kevin's dentist is Dr. Patel"]);
+  const [x1, x2, y] = await h.embed(["User prefers dark mode", "User prefers dark mode", "User's dentist is Dr. Patel"]);
   assert.deepEqual([...x1!], [...x2!]);
   assert.ok(h.similarity(x1!, y!) < 0.3);
   assert.equal(h.calls.length, 1);
-  assert.equal(similarityOf(h, { text: "Kevin prefers dark mode", vec: x1 }, { text: "Kevin prefers dark mode." }), 1, "words when one side has no vector");
+  assert.equal(similarityOf(h, { text: "User prefers dark mode", vec: x1 }, { text: "User prefers dark mode." }), 1, "words when one side has no vector");
   const failing = new FakeEmbedder({ fail: () => new EmbedError("http", "429", 429) });
   await assert.rejects(failing.embed(["x"]), (err: unknown) => err instanceof EmbedError);
 });
 
 test("query similarity is coverage of the item, weighted against words most items share; compare() names the space so words are judged by the keyword table", () => {
   const q = "open the pull request for the auth work, read through the diff and tell me if the PR is fine, then push it";
-  const proc = "How Kevin likes it done: read the diff before saying a PR is fine";
+  const proc = "How User likes it done: read the diff before saying a PR is fine";
   assert.ok(keywordSimilarity(q, proc) < 0.3, `symmetric overlap punishes the long query: Jaccard ${keywordSimilarity(q, proc).toFixed(2)}`);
   assert.ok(keywordQuerySimilarity(q, proc) >= 0.5, `coverage ${keywordQuerySimilarity(q, proc).toFixed(2)}: four of the item's eight words are in the query`);
   assert.ok(keywordQuerySimilarity(q, proc) > 2 * keywordSimilarity(q, proc), "coverage does not pay for the query's length");
-  assert.equal(keywordQuerySimilarity("Kevin prefers short answers", "Kevin likes his answers brief"), 1, "the query says everything the item says");
+  assert.equal(keywordQuerySimilarity("User prefers short answers", "User likes his answers brief"), 1, "the query says everything the item says");
   assert.equal(keywordQuerySimilarity("", proc), 0);
   assert.equal(keywordQuerySimilarity(q, "the and of"), 0, "an item of stop words matches nothing");
-  const weight = tokenWeights(["Kevin likes dark mode", "Kevin prefers short answers", "Kevin likes jazz", "Kevin's dentist is Dr. Patel"]);
+  const weight = tokenWeights(["User likes dark mode", "User prefers short answers", "User likes jazz", "User's dentist is Dr. Patel"]);
   assert.equal(weight("dentist"), 1, "a word one item carries counts fully");
   assert.ok(weight("like") < 0.5, `'like' is in three of four items: ${weight("like").toFixed(2)}`);
-  assert.ok(keywordQuerySimilarity("I'd like you to open the diff", "Kevin likes dark mode", weight) < keywordQuerySimilarity("I'd like you to open the diff", "Kevin likes dark mode"), "a shared verb weighs less than a rare noun");
+  assert.ok(keywordQuerySimilarity("I'd like you to open the diff", "User likes dark mode", weight) < keywordQuerySimilarity("I'd like you to open the diff", "User likes dark mode"), "a shared verb weighs less than a rare noun");
   const e = new FakeEmbedder({ dims: 3 });
-  const a = { text: "Kevin prefers short answers", vec: l2normalize(Float32Array.from([1, 0, 0])) };
-  const b = { text: "Kevin prefers short spoken answers", vec: l2normalize(Float32Array.from([0.8, 0.6, 0])) };
+  const a = { text: "User prefers short answers", vec: l2normalize(Float32Array.from([1, 0, 0])) };
+  const b = { text: "User prefers short spoken answers", vec: l2normalize(Float32Array.from([0.8, 0.6, 0])) };
   const vec = compare(e, a, b);
   assert.equal(vec.space, "vector");
   assert.ok(Math.abs(vec.sim - 0.8) < 1e-6);

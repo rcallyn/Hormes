@@ -156,7 +156,7 @@ export class MemoryStore {
   }
 
   /**
-   * Forget-reflex windows. They apply by time to every session — the words Kevin
+   * Forget-reflex windows. They apply by time to every session — the words User
    * asked to forget were said in that window, whichever session id carries them;
    * `sessionId` on a window is a record of where he said it, not a filter.
    */
@@ -285,9 +285,13 @@ export class MemoryStore {
     return this.state.items.get(id);
   }
 
-  /** Fold `id` into `into` (fold: same fact, evidence combines) or mark it superseded (fold false). */
+  /**
+   * Fold `id` into `into` (fold: same fact, evidence combines) or mark it superseded (fold
+   * false). Only a live item merges: a forgotten or archived one stays what User (or the
+   * decay) made it, so Restore still brings it back.
+   */
   merge(id: string, into: string, fold: boolean): void {
-    if (id === into || !this.state.items.has(id) || !this.state.items.has(into)) return;
+    if (id === into || this.state.items.get(id)?.state !== "live" || !this.state.items.has(into)) return;
     this.write({ at: this.now(), op: "merge", id, into, fold });
   }
 

@@ -17,8 +17,9 @@ export interface Thresholds {
   readonly dup: number;
 }
 
-export type MemoryBy = "kevin" | "reflex" | "cli";
-export type ExtractorKind = "responses" | "rules";
+export type MemoryBy = "user" | "reflex" | "cli";
+/** Which extractor wrote a run: OpenAI's Responses API, a local model over Chat Completions, or the regex rules. */
+export type ExtractorKind = "responses" | "local" | "rules";
 
 export interface RunCounts {
   readonly added: number;
@@ -83,16 +84,16 @@ export interface Candidate {
   /** 0..1 (the Responses schema's 1..5 is divided by 5 on the way in). */
   readonly importance: number;
   readonly confidence: number;
-  /** Line numbers of the extract input this came from; at least one must be Kevin's. */
+  /** Line numbers of the extract input this came from; at least one must be User's. */
   readonly evidence: readonly number[];
-  /** Where the words were said; set by the service from the first Kevin line cited. */
+  /** Where the words were said; set by the service from the first User line cited. */
   readonly source?: MemorySource;
-  readonly origin?: "extracted" | "kevin" | "tool";
+  readonly origin?: "extracted" | "user" | "tool";
 }
 
 export interface ExtractLine {
   readonly n: number;
-  readonly speaker: "Kevin" | "Hormes";
+  readonly speaker: "User" | "Hormes";
   readonly text: string;
   readonly at: number;
 }
@@ -105,14 +106,14 @@ export interface ExtractRequest {
 }
 
 export interface ExtractInput {
-  /** Kevin's local day, YYYY-MM-DD. */
+  /** User's local day, YYYY-MM-DD. */
   readonly day: string;
   readonly lines: readonly ExtractLine[];
   readonly requests: readonly ExtractRequest[];
-  /** How many of `lines` are Kevin's. */
-  readonly kevinLines: number;
-  /** Kevin's lines in the whole pending delta, before the char cap — the MIN_NEW_KEVIN_LINES gate reads this once. */
-  readonly pendingKevinLines: number;
+  /** How many of `lines` are User's. */
+  readonly userLines: number;
+  /** User's lines in the whole pending delta, before the char cap — the MIN_NEW_USER_LINES gate reads this once. */
+  readonly pendingUserLines: number;
   /** Where the watermark goes after this slice. */
   readonly upToAt: number;
   /** True when the char cap cut the slice short; later rows wait for the next run. */

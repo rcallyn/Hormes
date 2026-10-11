@@ -28,10 +28,10 @@ export function ids(prefix = "m"): () => string {
   return () => `${prefix}_${String(++n).padStart(4, "0")}`;
 }
 
-function tItem(id: string, speaker: "kevin" | "hormes", text: string, at: number): TranscriptItem {
+function tItem(id: string, speaker: "user" | "hormes", text: string, at: number): TranscriptItem {
   return { id, speaker, text, startMs: 0, endMs: 1000, at, final: true };
 }
-export const heard = (at: number, text: string, id = `h${at}`): LedgerRow => ({ at, type: "heard", item: tItem(id, "kevin", text, at) });
+export const heard = (at: number, text: string, id = `h${at}`): LedgerRow => ({ at, type: "heard", item: tItem(id, "user", text, at) });
 export const said = (at: number, text: string, id = `s${at}`): LedgerRow => ({ at, type: "said", item: tItem(id, "hormes", text, at) });
 
 /** Stands in for the runner's redactor: known key shapes become the mark. */

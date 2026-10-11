@@ -12,8 +12,8 @@ export const MAX_SOURCES = 8;
 export const LIVE_CAP = 2000;
 /** "forget that" tombstones what was learned in this window and excludes it from later runs. */
 export const FORGET_RECENT_MS = 600_000;
-/** A run needs this many new Kevin lines since the watermark; a pause-heavy day stays at a few runs. */
-export const MIN_NEW_KEVIN_LINES = 4;
+/** A run needs this many new User lines since the watermark; a pause-heavy day stays at a few runs. */
+export const MIN_NEW_USER_LINES = 4;
 /** An embedding failure defers a run this many times before it lands without vectors. */
 export const DEFER_MAX_TRIES = 3;
 

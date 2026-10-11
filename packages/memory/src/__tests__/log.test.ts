@@ -19,18 +19,18 @@ test("log: append then replay reproduces the store's items exactly; forget keeps
   const c = clock();
   const store = new MemoryStore({ dir, now: c.now, newId: ids() });
   store.load();
-  const a = store.add({ kind: "preference", text: "Kevin prefers short answers", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
+  const a = store.add({ kind: "preference", text: "User prefers short answers", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
   c.tick(1000);
-  const b = store.add({ kind: "fact", text: "Kevin goes by Kev", confidence: 0.9, importance: 1, origin: "kevin" }, src);
+  const b = store.add({ kind: "fact", text: "User goes by Kev", confidence: 0.9, importance: 1, origin: "user" }, src);
   c.tick(1000);
   store.touch(a.id, { ...src, at: c.now() }, { confidence: 0.9 });
-  store.update(b.id, { text: "Kevin goes by Kev." }, { ...src, at: c.now() });
-  store.forget(a.id, "kevin");
+  store.update(b.id, { text: "User goes by Kev." }, { ...src, at: c.now() });
+  store.forget(a.id, "user");
   assert.equal(store.get(a.id)?.state, "forgotten");
   store.restore(a.id);
   assert.equal(store.get(a.id)?.state, "live");
-  const e1 = store.add({ kind: "episode", text: "Kevin shipped the auth branch", confidence: 0.6, importance: 0.3, origin: "extracted" }, src);
-  const e2 = store.add({ kind: "episode", text: "Kevin shipped the auth branch.", confidence: 0.6, importance: 0.3, origin: "extracted" }, src);
+  const e1 = store.add({ kind: "episode", text: "User shipped the auth branch", confidence: 0.6, importance: 0.3, origin: "extracted" }, src);
+  const e2 = store.add({ kind: "episode", text: "User shipped the auth branch.", confidence: 0.6, importance: 0.3, origin: "extracted" }, src);
   store.merge(e1.id, e2.id, true);
   store.archive(b.id, "decay");
   store.exclude(T0, T0 + 1000, "A");
@@ -44,7 +44,7 @@ test("log: append then replay reproduces the store's items exactly; forget keeps
   assert.deepEqual([...state.items.values()], store.items("all"));
   assert.equal(state.items.get(a.id)?.seenCount, 2);
   assert.equal(state.items.get(a.id)?.confidence, 0.9);
-  assert.equal(state.items.get(b.id)?.text, "Kevin goes by Kev.");
+  assert.equal(state.items.get(b.id)?.text, "User goes by Kev.");
   assert.equal(state.items.get(b.id)?.state, "archived");
   assert.equal(state.items.get(e1.id)?.state, "merged");
   assert.equal(state.items.get(e1.id)?.mergedInto, e2.id);
@@ -54,9 +54,9 @@ test("log: append then replay reproduces the store's items exactly; forget keeps
 
   // the text change kept what was said before
   const updateRow = read.rows.find((r) => r.op === "update") as Extract<MemoryRow, { op: "update" }>;
-  assert.equal(updateRow.prev?.text, "Kevin goes by Kev");
+  assert.equal(updateRow.prev?.text, "User goes by Kev");
   // the forgotten item is still a line in the file
-  assert.ok(readFileSync(log.path, "utf8").includes("Kevin prefers short answers"));
+  assert.ok(readFileSync(log.path, "utf8").includes("User prefers short answers"));
 });
 
 test("log: a malformed line is skipped and counted; the rows around it still replay", () => {
@@ -64,9 +64,9 @@ test("log: a malformed line is skipped and counted; the rows around it still rep
   const c = clock();
   const store = new MemoryStore({ dir, now: c.now, newId: ids() });
   store.load();
-  store.add({ kind: "fact", text: "Kevin goes by Kev", confidence: 0.9, importance: 1, origin: "kevin" }, src);
+  store.add({ kind: "fact", text: "User goes by Kev", confidence: 0.9, importance: 1, origin: "user" }, src);
   appendFileSync(join(dir, "memory.jsonl"), "{this is not json\n");
-  store.add({ kind: "fact", text: "Kevin's office is in SoMa", confidence: 0.7, importance: 0.5, origin: "extracted" }, src);
+  store.add({ kind: "fact", text: "User's office is in SoMa", confidence: 0.7, importance: 0.5, origin: "extracted" }, src);
   const read = new MemoryLog(join(dir, "memory.jsonl")).read();
   assert.equal(read.skipped, 1);
   assert.equal(read.rows.length, 2);
@@ -86,13 +86,13 @@ test("log: across 50 mixed ops the file's byte length only grows and no verb rew
     switch (i % 7) {
       case 0:
       case 1:
-        live.push(store.add({ kind: i % 2 ? "fact" : "episode", text: `Kevin did thing number ${i}`, confidence: 0.5, importance: 0.4, origin: "extracted" }, { ...src, at: c.now() }).id);
+        live.push(store.add({ kind: i % 2 ? "fact" : "episode", text: `User did thing number ${i}`, confidence: 0.5, importance: 0.4, origin: "extracted" }, { ...src, at: c.now() }).id);
         break;
       case 2:
         if (live[0]) store.touch(live[0], { ...src, at: c.now() });
         break;
       case 3:
-        if (live[1]) store.update(live[1], { text: `Kevin did thing number ${i} again` });
+        if (live[1]) store.update(live[1], { text: `User did thing number ${i} again` });
         break;
       case 4:
         if (live[0]) store.forget(live[0], "cli");
@@ -116,11 +116,11 @@ test("log: a partial last line (a crash mid-append, no trailing newline) costs t
   const c = clock();
   const store = new MemoryStore({ dir, now: c.now, newId: ids() });
   store.load();
-  const a = store.add({ kind: "fact", text: "Kevin goes by Kev", confidence: 0.9, importance: 1, origin: "kevin" }, src);
+  const a = store.add({ kind: "fact", text: "User goes by Kev", confidence: 0.9, importance: 1, origin: "user" }, src);
   const path = join(dir, "memory.jsonl");
   appendFileSync(path, '{"at":1,"op":"add","item":{"id":"m_torn","kind":"fa'); // torn: no newline
   const before = statSync(path).size;
-  const b = store.add({ kind: "fact", text: "Kevin's office is in SoMa", confidence: 0.7, importance: 0.5, origin: "extracted" }, src);
+  const b = store.add({ kind: "fact", text: "User's office is in SoMa", confidence: 0.7, importance: 0.5, origin: "extracted" }, src);
   assert.ok(statSync(path).size > before);
   const read = new MemoryLog(path).read();
   assert.equal(read.skipped, 1, "the torn line alone is lost");
@@ -134,11 +134,11 @@ test("log: a partial last line (a crash mid-append, no trailing newline) costs t
   again.load();
   assert.equal(again.replayed, true, "index.json counts 2 lines, the file has 3 (the torn one): replay wins");
   assert.deepEqual(again.items("all"), store.items("all"));
-  again.add({ kind: "fact", text: "Kevin prefers short answers", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
+  again.add({ kind: "fact", text: "User prefers short answers", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
   assert.equal(readFileSync(path, "utf8").split("\n").filter(Boolean).length, 4);
   // a foreign writer that ends its line properly needs no healing either
   appendFileSync(path, `${JSON.stringify({ at: 2, op: "exclude", from: 1, to: 2 })}\n`);
-  again.add({ kind: "fact", text: "Kevin likes jazz", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
+  again.add({ kind: "fact", text: "User likes jazz", confidence: 0.7, importance: 0.6, origin: "extracted" }, src);
   const final = readFileSync(path, "utf8");
   assert.ok(!/\n\n/.test(final), "no blank line was inserted after a complete foreign line");
   assert.equal(new MemoryLog(path).read().skipped, 1);

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { ExtractUnavailableError } from "../extract/extractor.ts";
-import { DECIDE_INSTRUCTIONS, EXTRACT_INSTRUCTIONS, EXTRACT_MAX_ITEMS, EXTRACT_SCHEMA, renderExtractUser, stripBounds } from "../extract/prompt.ts";
+import { DECIDE_INSTRUCTIONS, EXTRACT_INSTRUCTIONS, EXTRACT_MAX_ITEMS, EXTRACT_SCHEMA, extractInstructions, renderExtractUser, stripBounds } from "../extract/prompt.ts";
 import { DEFAULT_MEMORY_MODEL, pickMemoryModel, ResponsesExtractor } from "../extract/responses.ts";
 import { OPENAI_THRESHOLDS } from "../limits.ts";
 import { postFilter } from "../merge.ts";
@@ -18,14 +18,14 @@ import { fakeFetch, fixtureJson, item, jsonResponse, T0 } from "./helpers.ts";
 const input: ExtractInput = {
   day: "2026-09-11",
   lines: [
-    { n: 1, speaker: "Kevin", text: "call me Kev", at: T0 + 1 },
+    { n: 1, speaker: "User", text: "call me Kev", at: T0 + 1 },
     { n: 2, speaker: "Hormes", text: "Sure, Kev.", at: T0 + 2 },
-    { n: 3, speaker: "Kevin", text: "I prefer short answers", at: T0 + 3 },
+    { n: 3, speaker: "User", text: "I prefer short answers", at: T0 + 3 },
     { n: 4, speaker: "Hormes", text: "Noted.", at: T0 + 4 },
   ],
   requests: [{ request: "open the diff for the auth branch", status: "done", summary: "Opened it.", at: T0 + 5 }],
-  kevinLines: 2,
-  pendingKevinLines: 2,
+  userLines: 2,
+  pendingUserLines: 2,
   upToAt: T0 + 5,
   truncated: false,
   dropped: 0,
@@ -44,20 +44,20 @@ test("responses extractor: the body is the exact instructions, numbered lines, s
   assert.equal(body["model"], "gpt-5-mini");
   assert.equal(body["instructions"], EXTRACT_INSTRUCTIONS);
   assert.equal(body["input"], renderExtractUser(input));
-  assert.equal(body["input"], ["Conversation on 2026-09-11 (Kevin's local day), lines numbered:", "1 Kevin: call me Kev", "2 Hormes: Sure, Kev.", "3 Kevin: I prefer short answers", "4 Hormes: Noted.", "Requests Hormes worked on and how they ended:", '- "open the diff for the auth branch" — done: Opened it.'].join("\n"));
+  assert.equal(body["input"], ["Conversation on 2026-09-11 (User's local day), lines numbered:", "1 User: call me Kev", "2 Hormes: Sure, Kev.", "3 User: I prefer short answers", "4 Hormes: Noted.", "Requests Hormes worked on and how they ended:", '- "open the diff for the auth branch" — done: Opened it.'].join("\n"));
   assert.deepEqual(body["text"], { format: { type: "json_schema", name: "memory_candidates", strict: true, schema: (await import("../extract/prompt.ts")).EXTRACT_SCHEMA } });
   assert.equal(body["max_output_tokens"], 900);
   assert.equal(body["store"], false);
   assert.deepEqual(body["reasoning"], { effort: "minimal" });
-  assert.match(EXTRACT_INSTRUCTIONS, /at least one cited line must be Kevin's/);
+  assert.match(EXTRACT_INSTRUCTIONS, /at least one cited line must be User's/);
   assert.match(DECIDE_INSTRUCTIONS, /Set contradicts to true/);
 
   assert.equal(raw.length, 5);
-  const kevin = new Set([1, 3]);
-  const results = raw.map((c) => postFilter(c, { kevinLines: kevin }));
-  assert.ok("ok" in results[0]! && results[0].ok.text === "Kevin goes by Kev." && results[0].ok.importance === 1 && results[0].ok.confidence === 0.9);
+  const user = new Set([1, 3]);
+  const results = raw.map((c) => postFilter(c, { userLines: user }));
+  assert.ok("ok" in results[0]! && results[0].ok.text === "User goes by Kev." && results[0].ok.importance === 1 && results[0].ok.confidence === 0.9);
   assert.ok("ok" in results[1]! && results[1].ok.importance === 0.8 && results[1].ok.kind === "preference");
-  assert.deepEqual(results[2], { refused: "no Kevin line cited" }, "Hormes's guess about tiredness cites only line 2");
+  assert.deepEqual(results[2], { refused: "no User line cited" }, "Hormes's guess about tiredness cites only line 2");
   assert.ok("ok" in results[3]! && results[3].ok.text.length <= 200 && results[3].ok.text.endsWith("."), "the long procedure is cut at a sentence end");
   assert.deepEqual(results[4], { refused: "card number" });
 });
@@ -101,19 +101,19 @@ test("responses extractor: 500 then 200 is one retry; 429 twice fails as http; a
 test("responses decider: the letter target maps to the neighbour, contradicts is read, and any failure falls back to the rules decision", async () => {
   const ff = fakeFetch(() => jsonResponse(fixtureJson("decide-response.json")));
   const x = new ResponsesExtractor({ apiKey: () => "k", fetchImpl: ff.fetch, backoffMs: 0 });
-  const existing = item({ id: "m_1", text: "Kevin prefers dark mode", kind: "preference" });
-  const c = { kind: "preference" as const, text: "Kevin prefers light mode", subjects: [], importance: 0.6, confidence: 0.7, evidence: [1] };
+  const existing = item({ id: "m_1", text: "User prefers dark mode", kind: "preference" });
+  const c = { kind: "preference" as const, text: "User prefers light mode", subjects: [], importance: 0.6, confidence: 0.7, evidence: [1] };
   const d = await x.decide(c, [{ item: existing, sim: 0.8 }], { thresholds: OPENAI_THRESHOLDS, now: T0 });
   assert.deepEqual(d, { op: "ADD", target: "m_1", contradicts: true });
   const body = ff.calls[0]!.body as Record<string, unknown>;
   assert.equal(body["instructions"], DECIDE_INSTRUCTIONS);
-  assert.equal(body["input"], "Candidate: Kevin prefers light mode (kind preference, importance 3)\nExisting:\nA [m_1] Kevin prefers dark mode (preference, last seen 0 days ago, seen 1 times)");
+  assert.equal(body["input"], "Candidate: User prefers light mode (kind preference, importance 3)\nExisting:\nA [m_1] User prefers dark mode (preference, last seen 0 days ago, seen 1 times)");
   assert.deepEqual((body["text"] as { format: { name: string } }).format.name, "memory_decision");
   const down = fakeFetch(() => jsonResponse({}, 503));
   const y = new ResponsesExtractor({ apiKey: () => "k", fetchImpl: down.fetch, backoffMs: 0 });
-  assert.deepEqual(await y.decide(c, [{ item: existing, sim: 0.92 }], { thresholds: OPENAI_THRESHOLDS, now: T0 }), { op: "UPDATE", target: "m_1", text: "Kevin prefers light mode", contradicts: false, replaces: true });
-  assert.deepEqual(await y.decide(c, [{ item: existing, sim: 0.8 }], { thresholds: OPENAI_THRESHOLDS, now: T0 }), { op: "UPDATE", target: "m_1", text: "Kevin prefers light mode", contradicts: false, replaces: true }, "rules in the band: dark → light is an antonym swap");
-  assert.deepEqual(await y.decide({ ...c, text: "Kevin prefers a light editor theme" }, [{ item: existing, sim: 0.8 }], { thresholds: OPENAI_THRESHOLDS, now: T0 }), { op: "ADD", contradicts: false });
+  assert.deepEqual(await y.decide(c, [{ item: existing, sim: 0.92 }], { thresholds: OPENAI_THRESHOLDS, now: T0 }), { op: "UPDATE", target: "m_1", text: "User prefers light mode", contradicts: false, replaces: true });
+  assert.deepEqual(await y.decide(c, [{ item: existing, sim: 0.8 }], { thresholds: OPENAI_THRESHOLDS, now: T0 }), { op: "UPDATE", target: "m_1", text: "User prefers light mode", contradicts: false, replaces: true }, "rules in the band: dark → light is an antonym swap");
+  assert.deepEqual(await y.decide({ ...c, text: "User prefers a light editor theme" }, [{ item: existing, sim: 0.8 }], { thresholds: OPENAI_THRESHOLDS, now: T0 }), { op: "ADD", contradicts: false });
 });
 
 test("responses extractor: a 400 that names a schema bound (minItems/maxItems/minimum/maximum) is answered once more with the bounds stripped, and stays stripped; the post-filter still caps at 24 items", async () => {
@@ -138,7 +138,7 @@ test("responses extractor: a 400 that names a schema bound (minItems/maxItems/mi
   assert.ok(!("maxItems" in stripped.properties.items));
   assert.equal(EXTRACT_MAX_ITEMS, 24);
   // a bounds-free schema cannot cap the list: the parser does
-  const many = fakeFetch(() => jsonResponse({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ items: Array.from({ length: 40 }, (_, i) => ({ kind: "fact", text: `Kevin fact ${i}`, subjects: [], importance: 3, confidence: 0.5, evidence: [1] })) }) }] }] }));
+  const many = fakeFetch(() => jsonResponse({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ items: Array.from({ length: 40 }, (_, i) => ({ kind: "fact", text: `User fact ${i}`, subjects: [], importance: 3, confidence: 0.5, evidence: [1] })) }) }] }] }));
   const z = new ResponsesExtractor({ apiKey: () => "k", fetchImpl: many.fetch, backoffMs: 0 });
   assert.equal((await z.extract(input)).length, 24);
   // any other 400 is the configuration fault it looks like
@@ -156,4 +156,20 @@ test("pickMemoryModel: prefers the newest gpt-*-mini text model, undated over da
   assert.equal(pickMemoryModel(["gpt-5-mini-2025-08-07"]), "gpt-5-mini-2025-08-07", "a dated id when nothing else exists");
   assert.equal(pickMemoryModel(["gpt-4o", "gpt-live-1", "gpt-4o-mini-tts", "gpt-5-nano"]), undefined);
   assert.equal(pickMemoryModel([]), undefined);
+});
+
+test("release F1: the extractor's instructions and transcript carry the user's name — the rules say \"Sam prefers …\", the lines are labelled \"Sam:\", no literal User; the extractor option threads it into the request", async () => {
+  const sam = extractInstructions("Sam");
+  assert.doesNotMatch(sam, /User/);
+  assert.match(sam, /durable memory of Sam, the one person it works for/);
+  assert.match(sam, /starting with "Sam", the named person, or the named place: "Sam prefers …", "Sam's dentist is …", "How Sam likes it done: …"/);
+  assert.match(sam, /at least one cited line must be Sam's \("Sam:"\)/);
+  assert.equal(sam.replaceAll("Sam", "User"), EXTRACT_INSTRUCTIONS, "only the name moves");
+  assert.equal(extractInstructions(), EXTRACT_INSTRUCTIONS);
+  assert.equal(renderExtractUser(input, "Sam"), ["Conversation on 2026-09-11 (Sam's local day), lines numbered:", "1 Sam: call me Kev", "2 Hormes: Sure, Kev.", "3 Sam: I prefer short answers", "4 Hormes: Noted.", "Requests Hormes worked on and how they ended:", '- "open the diff for the auth branch" — done: Opened it.'].join("\n"));
+  const ff = fakeFetch(() => jsonResponse({ output: [{ type: "message", content: [{ type: "output_text", text: JSON.stringify({ items: [] }) }] }] }));
+  await new ResponsesExtractor({ apiKey: () => "sk-test", fetchImpl: ff.fetch, backoffMs: 0, userName: "Sam" }).extract(input);
+  const body = ff.calls[0]!.body as Record<string, unknown>;
+  assert.equal(body["instructions"], sam);
+  assert.equal(body["input"], renderExtractUser(input, "Sam"));
 });

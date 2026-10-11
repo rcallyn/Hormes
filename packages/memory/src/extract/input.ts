@@ -10,7 +10,7 @@ const REQUEST_CHARS = 160;
 const SUMMARY_CHARS = 200;
 
 export interface BuildExtractInputOptions {
-  /** Kevin's local day (YYYY-MM-DD); derived from the first row when absent. */
+  /** User's local day (YYYY-MM-DD); derived from the first row when absent. */
   readonly day?: string;
   /** The watermark: rows at or before it were read already. */
   readonly sinceAt?: number;
@@ -36,7 +36,7 @@ const words = (s: string): number => s.trim().split(/\s+/).filter(Boolean).lengt
 /**
  * One session's ledger rows → the extractor's numbered input, with everything
  * memory must never read taken out first: grant rows, tool payloads
- * (delegation.step), the confirmation question and its short answer, rows Kevin
+ * (delegation.step), the confirmation question and its short answer, rows User
  * cleared from view (now.cleared without a later now.restored), rows inside a
  * forget window, rows the watermark already covered, and every line the
  * redactor or a refusal shape touched (dropped, never masked). The char cap
@@ -108,7 +108,7 @@ export function buildExtractInput(rows: readonly LedgerRow[], opts: BuildExtract
           dropped++;
           return;
         }
-        lines.push({ n: 0, speaker: r.type === "heard" ? "Kevin" : "Hormes", text: out.text, at: r.at });
+        lines.push({ n: 0, speaker: r.type === "heard" ? "User" : "Hormes", text: out.text, at: r.at });
         return;
       }
       case "delegation.created": {
@@ -133,7 +133,9 @@ export function buildExtractInput(rows: readonly LedgerRow[], opts: BuildExtract
         return;
       }
       default:
-        return; // grant, delegation.step, problem, agent, worker, … are never a source
+        // grant, delegation.step, problem, agent, … are never a source — nor is any row type this
+        // switch does not name: the `worker` rows in day files from before 2026-09-13 are skipped here.
+        return;
     }
   });
 
@@ -158,8 +160,8 @@ export function buildExtractInput(rows: readonly LedgerRow[], opts: BuildExtract
     day: day ?? localDay(sinceAt || Date.now()),
     lines: numbered,
     requests: keptRequests,
-    kevinLines: numbered.filter((l) => l.speaker === "Kevin").length,
-    pendingKevinLines: lines.filter((l) => l.speaker === "Kevin").length,
+    userLines: numbered.filter((l) => l.speaker === "User").length,
+    pendingUserLines: lines.filter((l) => l.speaker === "User").length,
     upToAt,
     truncated,
     dropped,

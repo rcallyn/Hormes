@@ -13,8 +13,8 @@ test("redact: a line the injected redactor changed is dropped whole — the extr
   const out = redactThenDrop(redactFake, "the key is sk-proj-abcdefghijklmnopqrstuvwxyz0123456789");
   assert.ok("dropped" in out);
   assert.equal(refuseReason("here: [redacted secret]"), "redacted secret");
-  const kept = redactThenDrop(redactFake, "Kevin prefers short answers");
-  assert.deepEqual(kept, { text: "Kevin prefers short answers" });
+  const kept = redactThenDrop(redactFake, "User prefers short answers");
+  assert.deepEqual(kept, { text: "User prefers short answers" });
 });
 
 test("redact: a Luhn-valid card with spaces or dashes is dropped; a 16-digit non-Luhn order number is kept", () => {
@@ -23,7 +23,7 @@ test("redact: a Luhn-valid card with spaces or dashes is dropped; a 16-digit non
   assert.equal(refuseReason("my card is 4111 1111 1111 1111"), "card number");
   assert.equal(refuseReason("card 4111-1111-1111-1111 please"), "card number");
   assert.equal(refuseReason("order number 1234 5678 9012 3457"), undefined);
-  assert.equal(refuseReason("Kevin's flight is at 10:45 on 2026-09-08"), undefined);
+  assert.equal(refuseReason("User's flight is at 10:45 on 2026-09-08"), undefined);
 });
 
 test("redact: SSN, spoken passwords and one-time codes are dropped; ordinary uses of the words are kept", () => {
@@ -39,19 +39,19 @@ test("redact: SSN, spoken passwords and one-time codes are dropped; ordinary use
   assert.equal(refuseReason("cvv 123"), "one-time code");
 });
 
-test("redact: secret paths and env names refuse; emails and phones survive only for kind contact + origin kevin", () => {
+test("redact: secret paths and env names refuse; emails and phones survive only for kind contact + origin user", () => {
   assert.match(refuseReason("copy ~/.ssh/id_ed25519 to the server") ?? "", /secret path/);
   assert.equal(refuseReason("echo $OPENAI_API_KEY"), "secret env name");
   assert.equal(refuseReason("Ben's email is ben@example.com"), "email address");
-  assert.equal(refuseReason("Ben's email is ben@example.com", { kind: "contact", origin: "kevin" }), undefined);
+  assert.equal(refuseReason("Ben's email is ben@example.com", { kind: "contact", origin: "user" }), undefined);
   assert.equal(refuseReason("Ben's email is ben@example.com", { kind: "contact", origin: "extracted" }), "email address");
   assert.equal(refuseReason("call Ben at +1 (415) 555-0123"), "phone number");
-  assert.equal(refuseReason("call Ben at +1 (415) 555-0123", { kind: "contact", origin: "kevin" }), undefined);
-  assert.equal(refuseReason("Kevin prefers dark mode"), undefined);
+  assert.equal(refuseReason("call Ben at +1 (415) 555-0123", { kind: "contact", origin: "user" }), undefined);
+  assert.equal(refuseReason("User prefers dark mode"), undefined);
 });
 
 test("redact: normalizeText folds case, whitespace and trailing punctuation (the sha and equality key)", () => {
-  assert.equal(normalizeText("  Kevin   goes by Kev. "), "kevin goes by kev");
-  assert.equal(normalizeText("Kevin goes by Kev"), normalizeText("kevin goes by kev!"));
-  assert.notEqual(normalizeText("Kevin prefers dark mode"), normalizeText("Kevin prefers light mode"));
+  assert.equal(normalizeText("  User   goes by Kev. "), "user goes by kev");
+  assert.equal(normalizeText("User goes by Kev"), normalizeText("user goes by kev!"));
+  assert.notEqual(normalizeText("User prefers dark mode"), normalizeText("User prefers light mode"));
 });
