@@ -12,6 +12,14 @@ import type { Speaker, TranscriptItem } from "@hormes/protocol";
 
 export const GAP_MS = 1400;
 
+/**
+ * Wall-clock finaliser: an utterance no fragment has touched for this long is over
+ * whatever the session clock says. `settle` judges on the session timeline (`nowMs`),
+ * which stops when a session errors without closing — the Console's caret then blinked
+ * on the last item for the whole outage. The engine's tick passes the wall clock too.
+ */
+export const ORPHAN_MS = 15_000;
+
 export interface FragmentEvent {
   readonly speaker: Speaker;
   readonly delta: string;
@@ -22,6 +30,8 @@ export interface FragmentEvent {
 export class Transcript {
   private items: TranscriptItem[] = [];
   private seq = 0;
+  /** Wall clock of the last fragment per open item (internal; the wire never sees it). */
+  private readonly touchedAt = new Map<string, number>();
   private readonly listeners = new Set<(item: TranscriptItem, kind: "start" | "update" | "final") => void>();
 
   constructor(
@@ -56,6 +66,7 @@ export class Transcript {
         endMs: Math.max(lastSame.endMs, frag.endMs),
       };
       this.items[this.items.indexOf(lastSame)] = merged;
+      this.touchedAt.set(merged.id, this.now());
       this.emit(merged, "update");
       return merged;
     }
@@ -73,26 +84,88 @@ export class Transcript {
       final: false,
     };
     this.items.push(item);
-    if (this.items.length > this.maxItems) this.items.splice(0, this.items.length - this.maxItems);
+    this.touchedAt.set(item.id, item.at);
+    if (this.items.length > this.maxItems) {
+      for (const gone of this.items.splice(0, this.items.length - this.maxItems)) this.touchedAt.delete(gone.id);
+    }
     this.emit(item, "start");
     return item;
   }
 
-  /** Close utterances that have not grown for GAP_MS at the given session time. */
-  settle(nowMs: number): TranscriptItem[] {
+  /**
+   * A line Kevin typed in the Console, on the record like a spoken one: final at once,
+   * never merged with a fragment (GAP_MS is for the voice's fragments), `source: "typed"`,
+   * and `startMs = endMs = nowMs` on the session timeline. Any open utterance is closed
+   * first — emitted `final`, exactly as `push` does — so the typed line lands after it and
+   * `since()` / `last("kevin")` read it in order: the request window, the yes check and the
+   * reflexes then see typed words the way they see speech. Emitted once, as `final` (an item
+   * born final never "starts"), so the ledger's `heard` row is written exactly once. A blank
+   * line (a stray Return) is nothing said: no item, no emission, `undefined` back — the class
+   * is safe on its own, whether or not the caller trimmed first.
+   */
+  pushTyped(text: string, nowMs: number, speaker: Speaker = "kevin"): TranscriptItem | undefined {
+    const clean = text.trim().replace(/\s+/g, " ");
+    if (!clean) return undefined;
+    this.finalizeOpen();
+    const item: TranscriptItem = {
+      id: `t_${++this.seq}`,
+      speaker,
+      text: clean,
+      startMs: nowMs,
+      endMs: nowMs,
+      at: this.now(),
+      final: true,
+      source: "typed",
+    };
+    this.items.push(item);
+    if (this.items.length > this.maxItems) {
+      for (const gone of this.items.splice(0, this.items.length - this.maxItems)) this.touchedAt.delete(gone.id);
+    }
+    this.emit(item, "final");
+    return item;
+  }
+
+  /**
+   * Close utterances that have not grown for GAP_MS at the given session time — or,
+   * when `wallNow` is given, for ORPHAN_MS of wall clock (the session clock may have
+   * stopped: an error with no `closed` behind it).
+   */
+  settle(nowMs: number, wallNow?: number): TranscriptItem[] {
     const closed: TranscriptItem[] = [];
     this.items = this.items.map((i) => {
-      if (i.final || nowMs - i.endMs < GAP_MS) return i;
+      if (i.final) return i;
+      const orphaned = wallNow !== undefined && wallNow - (this.touchedAt.get(i.id) ?? i.at) >= ORPHAN_MS;
+      if (nowMs - i.endMs < GAP_MS && !orphaned) return i;
       const f = { ...i, final: true };
       closed.push(f);
       return f;
     });
-    for (const f of closed) this.emit(f, "final");
+    for (const f of closed) {
+      this.touchedAt.delete(f.id);
+      this.emit(f, "final");
+    }
     return closed;
   }
 
+  /**
+   * Close every open utterance now (a new one is starting). Each item closed here
+   * is emitted as `final` exactly as `settle` would: the engine's ledger and its
+   * `utterance` event hang on that emission, and a command Hormes answers within
+   * the merge gap used to be closed here silently and never reach the ledger —
+   * 4 of 51 delegations had their triggering utterance on record.
+   */
   finalizeOpen(): void {
-    this.items = this.items.map((i) => (i.final ? i : { ...i, final: true }));
+    const closed: TranscriptItem[] = [];
+    this.items = this.items.map((i) => {
+      if (i.final) return i;
+      const f = { ...i, final: true };
+      closed.push(f);
+      return f;
+    });
+    for (const f of closed) {
+      this.touchedAt.delete(f.id);
+      this.emit(f, "final");
+    }
   }
 
   all(): readonly TranscriptItem[] {

@@ -41,6 +41,34 @@ test("settle finalizes stale utterances and render shows a window", () => {
   assert.equal(t.render(10_000, 3300), "Kevin: hello\nHormes: hi");
 });
 
+test("an utterance closed by the next one is emitted as final once — the ledger keeps the command Hormes answered at once — and settle does not emit it again", () => {
+  const t = new Transcript(() => 0);
+  const finals: string[] = [];
+  const kinds: string[] = [];
+  t.onChange((item, kind) => {
+    kinds.push(`${kind}:${item.speaker}`);
+    if (kind === "final") finals.push(`${item.speaker}:${item.text}`);
+  });
+  t.push({ speaker: "kevin", delta: "hormes scroll down", startMs: 0, endMs: 900 });
+  // Hormes answers 200 ms later: Kevin's utterance is closed by finalizeOpen (inside push), not by settle.
+  t.push({ speaker: "hormes", delta: " On it.", startMs: 1100, endMs: 1400 });
+  assert.deepEqual(finals, ["kevin:hormes scroll down"], "the closed utterance was emitted as final");
+  assert.deepEqual(kinds, ["start:kevin", "final:kevin", "start:hormes"], "final lands before the new utterance starts");
+  assert.equal(t.all()[0]?.final, true);
+  assert.equal(t.settle(5000).length, 1, "settle closes only the still-open hormes line");
+  assert.deepEqual(finals, ["kevin:hormes scroll down", "hormes:On it."], "nothing is emitted twice");
+  // Explicit finalizeOpen with several open items (both speakers): one final each, nothing for what was already final.
+  const t2 = new Transcript(() => 0);
+  const closed: string[] = [];
+  t2.onChange((item, kind) => kind === "final" && closed.push(item.text));
+  t2.push({ speaker: "kevin", delta: "one", startMs: 0, endMs: 500 });
+  t2.settle(3000);
+  t2.push({ speaker: "kevin", delta: "two", startMs: 4000, endMs: 4500 });
+  t2.finalizeOpen();
+  t2.finalizeOpen();
+  assert.deepEqual(closed, ["one", "two"]);
+});
+
 test("joinFragments handles punctuation and word pieces", () => {
   assert.equal(joinFragments("hey", ", jar"), "hey, jar");
   assert.equal(joinFragments("hey, jar", "head"), "hey, hormes");
@@ -60,4 +88,54 @@ test("appends are chunked under the token cap at sentence boundaries", () => {
   }
   assert.deepEqual(chunkForAppend("   "), []);
   assert.deepEqual(chunkForAppend("short one."), ["short one."]);
+});
+
+test("pushTyped: a typed line is final at once, never merges with a fragment on either side, carries source 'typed', and is emitted once as final after the open utterance it closes", () => {
+  const t = new Transcript(() => 1000);
+  const events: string[] = [];
+  t.onChange((item, kind) => events.push(`${kind}:${item.speaker}:${item.text}${item.source ? `:${item.source}` : ""}`));
+  // Kevin is mid-sentence by voice when the typed line lands within the merge gap.
+  t.push({ speaker: "kevin", delta: "open", startMs: 0, endMs: 400 });
+  const typed = t.pushTyped("  open   safari ", 600);
+  assert.deepEqual(typed, { id: "t_2", speaker: "kevin", text: "open safari", startMs: 600, endMs: 600, at: 1000, final: true, source: "typed" });
+  assert.deepEqual(events, ["start:kevin:open", "final:kevin:open", "final:kevin:open safari:typed"], "the open fragment is closed first; the typed line is emitted exactly once, as final");
+  // A fragment right after it (within GAP_MS) starts a NEW utterance rather than growing the typed one.
+  t.push({ speaker: "kevin", delta: " and slack", startMs: 900, endMs: 1200 });
+  assert.deepEqual(t.all().map((i) => [i.text, i.final, i.source ?? "voice"]), [["open", true, "voice"], ["open safari", true, "typed"], ["and slack", false, "voice"]]);
+  // since() and last() see it in order; render() shows it as Kevin's line.
+  assert.deepEqual(t.since(500, "kevin").map((i) => i.text), ["open safari", "and slack"]);
+  t.finalizeOpen();
+  assert.equal(t.last("kevin")?.text, "and slack");
+  assert.equal(t.render(10_000, 1200), "Kevin: open\nKevin: open safari\nKevin: and slack");
+  // A typed yes is what the confirmation path reads back.
+  const yes = t.pushTyped("yes", 5000);
+  assert.equal(t.last("kevin"), yes);
+  assert.equal(t.last("kevin")?.source, "typed");
+  // The other speaker may type too (a Hormes line placed on the record by the engine).
+  assert.equal(t.pushTyped("done.", 6000, "hormes")?.speaker, "hormes");
+  // settle() has nothing to close for typed lines and emits nothing more for them.
+  events.length = 0;
+  assert.equal(t.settle(60_000).length, 0);
+  assert.deepEqual(events, []);
+});
+
+test("pushTyped: a blank line is nothing said — no item, no emission, and the open utterance is left alone", () => {
+  const t = new Transcript(() => 1000);
+  const events: string[] = [];
+  t.onChange((item, kind) => events.push(`${kind}:${item.text}`));
+  t.push({ speaker: "kevin", delta: "open", startMs: 0, endMs: 200 });
+  assert.equal(t.pushTyped("", 600), undefined);
+  assert.equal(t.pushTyped("   \n\t ", 600), undefined);
+  assert.deepEqual(events, ["start:open"], "nothing emitted for a blank line; the open fragment is not closed by it");
+  assert.equal(t.all().length, 1);
+  assert.equal(t.all()[0]?.final, false, "the open fragment still grows");
+  const line = t.pushTyped("  safari ", 700);
+  assert.equal(line?.text, "safari");
+  assert.deepEqual(events, ["start:open", "final:open", "final:safari"], "a real line closes it and lands after it");
+});
+
+test("pushTyped: the item cap still holds when typed lines pour in", () => {
+  const t = new Transcript(() => 0, 5);
+  for (let i = 0; i < 8; i++) t.pushTyped(`line ${i}`, i * 100);
+  assert.deepEqual(t.all().map((i) => i.text), ["line 3", "line 4", "line 5", "line 6", "line 7"]);
 });
