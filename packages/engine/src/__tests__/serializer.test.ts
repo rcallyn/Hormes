@@ -32,15 +32,18 @@ const tick = (): Promise<void> => new Promise((r) => setImmediate(r));
 test("haltReasonFor is batch.ts's haltReason, word for word", () => {
   for (const o of [question(), refused(), failed(), text()]) assert.equal(haltReasonFor("type", o), haltReason({ name: "type", input: {} }, o));
   assert.equal(haltReasonFor("type", text()), undefined);
+  // The user's name, with no pronoun after it — the same words in both places for another name too.
+  assert.equal(haltReasonFor("type", question(), "Sam"), "not run: type is waiting for Sam's answer; ask Sam and stop");
+  assert.equal(haltReasonFor("type", question(), "Sam"), haltReason({ name: "type", input: {} }, question(), "Sam"));
   assert.ok(READ_ONLY_TOOLS.size > 0 && [...READ_ONLY_TOOLS].every((t) => SERIALIZER_BYPASS.has(t)), "every look bypasses the queue");
-  for (const t of ["thread_wait", "worker_wait", "speak_progress", "agent_wait"]) assert.ok(SERIALIZER_BYPASS.has(t), `${t} never holds the acts behind it`);
+  for (const t of ["thread_wait", "speak_progress", "agent_wait"]) assert.ok(SERIALIZER_BYPASS.has(t), `${t} never holds the acts behind it`);
   // The hands-free management tools: never behind an act, never halted by its question.
-  for (const t of ["thread_start", "thread_stop", "thread_read", "worker_start", "worker_stop", "worker_read", "agent_start", "agent_send", "agent_read"]) assert.ok(SERIALIZER_BYPASS.has(t), `${t} touches neither the hands nor the lease`);
+  for (const t of ["thread_start", "thread_stop", "thread_read", "agent_start", "agent_send", "agent_read"]) assert.ok(SERIALIZER_BYPASS.has(t), `${t} touches neither the hands nor the lease`);
   for (const t of ["self_edit", "self_apply", "self_check", "self_discard", "left_click", "type", "applescript", "run_shell", "browser_navigate", "write_file"]) assert.ok(!SERIALIZER_BYPASS.has(t), `${t} takes the queue`);
 });
 
-test("a thread_start (and its alias, and an agent_start / agent_send) issued alongside a left_click that asks Kevin starts at once and answers its own text — never `not run:`", async () => {
-  for (const mgmt of ["thread_start", "worker_start", "thread_stop", "agent_start", "agent_send"]) {
+test("a thread_start / thread_stop / agent_start / agent_send issued alongside a left_click that asks Kevin starts at once and answers its own text — never `not run:`", async () => {
+  for (const mgmt of ["thread_start", "thread_stop", "agent_start", "agent_send"]) {
     const s = new ActingSerializer();
     const click = deferred();
     const started = deferred();
@@ -56,7 +59,7 @@ test("a thread_start (and its alias, and an agent_start / agent_send) issued alo
     click.resolve(question());
     assert.equal((await pClick).result.kind, "needs-confirmation");
     assert.deepEqual((await pMgmt).result, { kind: "text", text: "started Spotify alongside" }, `${mgmt} answers its own result`);
-    assert.deepEqual((await pTyped).result, { kind: "error", message: "not run: left_click is waiting for Kevin's answer; ask him and stop" }, "the act behind the click is halted, as before");
+    assert.deepEqual((await pTyped).result, { kind: "error", message: "not run: left_click is waiting for Kevin's answer; ask Kevin and stop" }, "the act behind the click is halted, as before");
     assert.equal(s.halted, 1);
     assert.equal(s.ran, 1, "the management tool is not counted as an act");
   }
@@ -94,7 +97,7 @@ test("I1: two acting calls issued together run in arrival order — the second s
 test("I2: a needs-confirmation from the first acting call makes the queued second answer batch.ts's text without touching the hands; a refusal and an error halt the same way; a call issued after the halt runs", async () => {
   // batch.ts names the call that did not go through (the one waiting for Kevin), the same words for every call behind it.
   for (const [outcome, expect] of [
-    [question(), "not run: left_click is waiting for Kevin's answer; ask him and stop"],
+    [question(), "not run: left_click is waiting for Kevin's answer; ask Kevin and stop"],
     [refused(), "not run: left_click was refused earlier in this turn"],
     [failed(), "not run: left_click failed earlier in this turn (no control named Save)"],
   ] as const) {
@@ -149,7 +152,7 @@ test("I6: drain answers every queued acting call `stopped: <reason>`; the one in
   await pd;
 });
 
-test("two lanes' queues are independent: a worker lane's act does not wait on the main lane's, and a halt on one halts nothing on the other", async () => {
+test("two lanes' queues are independent: a thread lane's act does not wait on the main lane's, and a halt on one halts nothing on the other", async () => {
   const main = new ActingSerializer();
   const lane = new ActingSerializer();
   const a = deferred();

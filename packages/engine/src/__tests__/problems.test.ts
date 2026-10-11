@@ -33,10 +33,10 @@ class GrantHands extends RecordingHands {
 
 async function greeted(w: World): Promise<void> {
   await w.engine.start();
-  for (let i = 0; i < 200 && w.engine.snapshot().permissions.all === undefined; i++) await settle(10);
+  for (let i = 0; i < 200 && w.engine.snapshot().permissions.all.length === 0; i++) await settle(10);
 }
 
-test("typedProblems is the same list as problems, with kind, remedy and since; a repeat keeps its place and its since; the cap and clear-problems apply to both", async () => {
+test("the snapshot's problems carry kind, remedy and since; a repeat keeps its place and its since; the cap and clear-problems apply", async () => {
   const w = world();
   const { engine, clock } = w;
   try {
@@ -47,7 +47,7 @@ test("typedProblems is the same list as problems, with kind, remedy and since; a
     clock.t += 1000;
     engine.problemOf("other", "first"); // a repeat: no second row, since unchanged
     engine.problemOf("disk.low", "disk", { label: "Reveal shots", open: "/x/shots" });
-    assert.deepEqual(engine.snapshot().problems, ["first", "disk"]);
+    assert.deepEqual(engine.snapshot().problems.map((p) => p.text), ["first", "disk"]);
     assert.deepEqual(typed(w), [
       { kind: "other", text: "first", since: t0 },
       { kind: "disk.low", text: "disk", remedy: { label: "Reveal shots", open: "/x/shots" }, since: t0 + 1000 },
@@ -87,11 +87,11 @@ test("a missing grant is a permission.* problem with Request / Open pane as its 
     await (engine as unknown as { pollPermissions(): Promise<void> }).pollPermissions();
     assert.equal(ofKind(w, "permission.fullDiskAccess").length, 0);
     // The microphone: denied is permission.microphone with the app's pane; granted clears it.
-    engine.setMicrophonePermission("denied");
+    engine.setPermission("microphone", "denied");
     const mic = ofKind(w, "permission.microphone");
     assert.equal(mic.length, 1);
     assert.deepEqual(mic[0]!.remedy, { label: "Open pane", command: { type: "request-permission", which: "microphone" } });
-    engine.setMicrophonePermission("granted");
+    engine.setPermission("microphone", "granted");
     assert.equal(ofKind(w, "permission.microphone").length, 0);
     // problem.retry on the app-owned kinds reads fresh and closely: a grant revoked meanwhile is seen on that read.
     hands.fresh = { ...hands.fresh, fullDiskAccess: false };
@@ -150,7 +150,7 @@ test("Live errors are typed by the classifier: a limit is voice.limit with Retry
   assert.equal(classifyLiveError("response_input_buffer_full: Backend response input history is limited to 128 items and 32768 U…"), "limit");
   assert.equal(classifyLiveError("rate_limit_exceeded: Rate limit reached for gpt-live-1"), "limit");
   assert.equal(classifyLiveError("invalid_api_key: Incorrect API key provided"), "key");
-  assert.equal(classifyLiveError("OPENAI_API_KEY is missing; set it in ~/.hormes/env or .env.local"), "key");
+  assert.equal(classifyLiveError("OPENAI_API_KEY is missing; set it in ~/.hormes/env (Setup › Voice writes it)"), "key");
   assert.equal(classifyLiveError("live socket closed before start (code 1006)"), "connection");
   assert.equal(classifyLiveError("live session did not start within 15000ms"), "connection");
   assert.equal(classifyLiveError("unknown_parameter: nope"), "other");
@@ -163,8 +163,9 @@ test("Live errors are typed by the classifier: a limit is voice.limit with Retry
     await engine.ready();
     engine.updateSettings({ idleSleepMinutes: 0 });
     await engine.wake("test");
-    live.emit("error", new Error("response_input_buffer_full: Backend response input history is limited to 128 items"), "steer_9");
-    live.emit("error", new Error("response_input_buffer_full: Backend response input history is limited to 128 items"), "steer_10");
+    // A passing limit. The session's own input cap (response_input_buffer_full) is a Reopen that stays (w2-1-voice V11).
+    live.emit("error", new Error("rate_limit_exceeded: Rate limit reached for gpt-live-1"), "steer_9");
+    live.emit("error", new Error("rate_limit_exceeded: Rate limit reached for gpt-live-1"), "steer_10");
     const limit = ofKind(w, "voice.limit");
     assert.equal(limit.length, 1, "deduped by kind + text");
     assert.equal(limit[0]!.remedy?.label, "Retry in 30 s");
@@ -312,7 +313,7 @@ test("problem.retry on the brain clears the rows and restarts the brain; on voic
   }
 });
 
-test("the snapshot carries problemsTyped alongside problems (the same list), and the problem.retry command reaches retryProblem", async () => {
+test("the snapshot's problems are the typed list, and the problem.retry command reaches retryProblem", async () => {
   const w = world();
   const { engine } = w;
   try {
@@ -322,19 +323,19 @@ test("the snapshot carries problemsTyped alongside problems (the same list), and
     engine.problemOf("disk.low", "Disk low: 3 MB free", { label: "Reveal shots", open: "/x/shots" });
     const snap = engine.snapshot();
     assert.deepEqual(
-      snap.problemsTyped?.map((p) => p.text),
-      snap.problems,
-      "the typed list is the plain list, in order",
+      snap.problems.map((p) => p.text),
+      ["command failed: nope", "Disk low: 3 MB free"],
+      "the typed list carries the lines, in order",
     );
     assert.deepEqual(
-      snap.problemsTyped?.map((p) => p.kind),
+      snap.problems.map((p) => p.kind),
       ["other", "disk.low"],
     );
-    assert.deepEqual(snap.problemsTyped?.[1]?.remedy, { label: "Reveal shots", open: "/x/shots" });
+    assert.deepEqual(snap.problems[1]?.remedy, { label: "Reveal shots", open: "/x/shots" });
     // The remedy button's command, through the command arm the rail sends.
     await engine.command({ type: "problem.retry", kind: "other" });
-    assert.deepEqual(engine.snapshot().problems, ["Disk low: 3 MB free"]);
-    assert.equal(engine.snapshot().problemsTyped?.length, 1);
+    assert.deepEqual(engine.snapshot().problems.map((p) => p.text), ["Disk low: 3 MB free"]);
+    assert.equal(engine.snapshot().problems.length, 1);
   } finally {
     await engine.stop();
   }
@@ -425,6 +426,40 @@ test("the disk preflight runs before every capture: a disk that fills mid-sessio
     await engine.command({ type: "mark.add", rect: { x: 30, y: 30, w: 100, h: 50 } });
     assert.equal(hands.named("zoom").length, 2, "space back: captured, and the row is gone");
     assert.equal(ofKind(w, "disk.low").length, 0);
+  } finally {
+    await engine.stop();
+  }
+});
+
+test("brain.local is a ProblemKind of its own (the amber, Kevin-does-a-thing class beside permission.*), carries a copyable command in its remedy, and its Retry restarts the brain like the other brain kinds", async () => {
+  const starts = { n: 0 };
+  const brain = {
+    kind: "fake",
+    start: async () => {
+      starts.n++;
+      return { ready: true, detail: "fake" };
+    },
+    handle: async () => ({ status: "done" as const }),
+    cancel: async () => undefined,
+    stop: async () => undefined,
+  };
+  const w = world({ brain });
+  const { engine } = w;
+  try {
+    await engine.start();
+    await engine.ready();
+    const kind: ProblemKind = "brain.local";
+    const remedy = { label: "Retry", command: { type: "problem.retry" as const, kind }, copy: "ollama pull qwen3.5:27b" };
+    engine.problemOf(kind, "Local brain: Ollama 0.34.0 is up but nothing on it can call tools. In a terminal: ollama pull qwen3.5:27b (17 GB, fits this Mac).", remedy);
+    const rows = ofKind(w, kind);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0]!.remedy?.copy, "ollama pull qwen3.5:27b", "the command Kevin runs himself rides on the remedy; no surface runs it");
+    assert.deepEqual(rows[0]!.remedy?.command, { type: "problem.retry", kind: "brain.local" });
+    const before = starts.n;
+    await engine.command({ type: "problem.retry", kind });
+    assert.equal(ofKind(w, kind).length, 0, "the row clears on Retry");
+    assert.equal(starts.n, before + 1, "and the brain was restarted");
+    assert.equal(engine.brainInfo.ready, true);
   } finally {
     await engine.stop();
   }

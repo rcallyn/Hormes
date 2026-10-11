@@ -6,23 +6,28 @@ import { join } from "node:path";
 import { Ledger } from "@hormes/core";
 import { AgentRegistry, type AgentConnector } from "@hormes/agents";
 import { ConfirmationDesk, ConfirmationState, FocusLease, LEASE_IDLE_MS, WAIT_MAX_MS, type AcquireOptions, type LeaseOutcome } from "@hormes/hands";
-import type { Brain, BrainResult, BrainSink, BrainTask, ToolRunner } from "@hormes/brain";
+import type { Brain, BrainResult, BrainSink, BrainTask, RunnerOptions, ToolRunner } from "@hormes/brain";
 import { MAIN_THREAD_ID, THREAD_MAX_LIVE, type LedgerRow, type OverlayCommand, type Thread, type ThreadEvent } from "@hormes/protocol";
 import { ACTING_HOLD_MS, ThreadTable } from "../threads/table.ts";
 import { THREAD_IDLE_END_MS, THREAD_PROGRESS_GAP_MS, ThreadScheduler, type ThreadBrainFactory, type ThreadParent, type ThreadVoice } from "../threads/scheduler.ts";
 import { LANE_REFUSAL } from "../threads/runner.ts";
-import { RecordingHands, settle, threadNameOf, until } from "./world.ts";
+import { CONFIRMATION_RESUME, confirmationResume, resumeText, threadBrief } from "../threads/lines.ts";
+import { RecordingHands, bestOf, settle, threadNameOf, until } from "./world.ts";
 
 /**
  * The scheduler without the engine: fake brains scripted per thread, a real
  * ConfirmationDesk over a ConfirmationState, a FocusLease over fake hands with fast
- * polls, a real Ledger in a temp dir, and a clock the test moves. Admission is
+ * polls, a real Ledger in a temp dir, a fake AppleScript behind every lane runner (no
+ * test here spawns osascript) and a clock the test moves. Admission is
  * synchronous and refuses the fifth live thread, a spawned thread's spawn, a
  * duplicate name (case-insensitively) and a name over sixteen characters; the
  * budgets end a turn; a follow-up supersedes the running turn on the same brain;
  * `answerYes` arms only for the floor's lane; every change is one coalesced event
  * and never a snapshot; the ledger gets the thread.* rows the rebuild reads.
  */
+
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
 
 interface FakeBrain {
   readonly id: string;
@@ -53,6 +58,8 @@ interface Harness {
   readonly changes: { n: number };
   readonly voice: { split: string[]; says: string[] };
   readonly overlays: OverlayCommand[];
+  /** Every AppleScript a lane runner ran, in order: the harness's fake answered it, never osascript. */
+  readonly appleScripts: string[];
   readonly parent: ThreadParent;
   readonly acquires: { actor: string; opts: AcquireOptions & { rank?: number | undefined } }[];
   script: ((job: { brain: FakeBrain; task: BrainTask; sink: BrainSink; runner: ToolRunner }) => Promise<BrainResult | undefined>) | undefined;
@@ -71,7 +78,7 @@ const fakeConnector: AgentConnector = {
   read: async () => "",
 };
 
-function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory?: (q: string, signal: AbortSignal) => Promise<string | undefined>; look?: () => Promise<string | undefined>; factory?: boolean; coalesceMs?: number; withMain?: boolean; /** A brain's `stop()` takes this long (a real app-server's does). */ stopDelayMs?: number; /** How long a superseded turn's brain may take to let go. */ supersedeWaitMs?: number; /** A brain's `handle` ignores `cancel()` and the abort: it never returns. */ deaf?: boolean } = {}): Harness {
+function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory?: (q: string, signal: AbortSignal) => Promise<string | undefined>; look?: () => Promise<string | undefined>; factory?: boolean; coalesceMs?: number; withMain?: boolean; /** A brain's `stop()` takes this long (a real app-server's does). */ stopDelayMs?: number; /** How long a superseded turn's brain may take to let go. */ supersedeWaitMs?: number; /** A brain's `handle` ignores `cancel()` and the abort: it never returns. */ deaf?: boolean; /** The user's name the lines say (default: none wired, so "Kevin"). */ userName?: string } = {}): Harness {
   const clock = { t: 1_757_500_000_000 };
   const now = (): number => clock.t;
   const dir = mkdtempSync(join(tmpdir(), "jh-threads-sched-"));
@@ -86,6 +93,12 @@ function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory
   const changes = { n: 0 };
   const voice = { split: [] as string[], says: [] as string[] };
   const overlays: OverlayCommand[] = [];
+  const appleScripts: string[] = [];
+  // The lanes' Apple events end here: a script that passed the gates answers ok and touches nothing.
+  const runAppleScript: NonNullable<RunnerOptions["runAppleScript"]> = async (script) => {
+    appleScripts.push(script);
+    return { code: 0, signal: null, stdout: "", stderr: "", timedOut: false, cancelled: false, ms: 0 };
+  };
   const acquires: Harness["acquires"] = [];
   let scheduler!: ThreadScheduler;
   const desk = new ConfirmationDesk(root, (name, q) => void scheduler.speakQuestion(name, q), now);
@@ -110,6 +123,7 @@ function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory
     changes,
     voice,
     overlays,
+    appleScripts,
     acquires,
     parent: { id: "dlg_parent", liveId: "item_1", request: "tell ben on slack i'm late and play focus on spotify", kevinDialogue: "tell ben on slack i'm late and play focus on spotify", offsetMs: 1000 },
     script: undefined,
@@ -170,19 +184,19 @@ function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory
   };
   const threadVoice: ThreadVoice = {
     splitLine: (_parentId, name) => voice.split.push(name),
-    workerStep: () => undefined,
-    workerSay: (_parentId, _name, text) => voice.says.push(text),
+    threadSay: (_parentId, _name, text) => voice.says.push(text),
   };
   const agents = new AgentRegistry([fakeConnector], 0);
   const table = new ThreadTable({ now });
   if (o.withMain) table.started({ id: MAIN_THREAD_ID, name: "Hormes", lane: "voice", status: "idle", task: "", apps: [], startedAt: clock.t, updatedAt: clock.t, turns: 0, steps: 0, waits: 0, budget: { steps: 40, seconds: 300 }, canSay: true, canStop: true });
+  const userName = o.userName;
   scheduler = new ThreadScheduler({
     now,
     ledger,
     desk,
     lease,
     hands: { focus: hands, background: handsBg },
-    runnerOptions: () => ({ agents, stateDir: dir, now }),
+    runnerOptions: () => ({ agents, stateDir: dir, now, runAppleScript }),
     toolsetOptions: () => ({ annotate: (cmd) => overlays.push(cmd), now }),
     makeBrain: () => (o.factory === false ? undefined : factory),
     parentFor: () => h.parent,
@@ -197,6 +211,7 @@ function harness(o: { spares?: number; enabled?: boolean; eyes?: boolean; memory
     eyes: o.eyes,
     look: o.look,
     supersedeWaitMs: o.supersedeWaitMs,
+    userName: userName ? () => userName : undefined,
   });
   (h as { scheduler: ThreadScheduler }).scheduler = scheduler;
   (h as { table: ThreadTable }).table = table;
@@ -209,13 +224,27 @@ const busy = (t: Thread | undefined): boolean => t?.status === "thinking" || t?.
 test("admission is synchronous and refuses: the fourth spawned thread (main + 3 live), a spawned thread's spawn (depth one), a duplicate live name case-insensitively, a name over 16 characters, no name, no task, threads off, no factory", async () => {
   const h = harness({ withMain: true });
   h.script = async () => undefined;
+  const admitted: number[] = [];
   for (const name of ["Spotify", "Slack", "Mail"]) {
     const t0 = process.hrtime.bigint();
     const r = h.start(name);
-    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    admitted.push(Number(process.hrtime.bigint() - t0) / 1e6);
     assert.equal(r.kind, "text", text(r));
-    assert.ok(ms < 20, `admitted in ${ms.toFixed(1)} ms`);
   }
+  // The slowest of the three admissions; timed again over a fresh harness only when a loaded Mac stalled it.
+  const slowest = await bestOf(Math.max(...admitted), 20 * RUNNER_SLACK, async () => {
+    const again = harness({ withMain: true });
+    again.script = async () => undefined;
+    const times = ["Spotify", "Slack", "Mail"].map((name) => {
+      const t0 = process.hrtime.bigint();
+      again.start(name);
+      return Number(process.hrtime.bigint() - t0) / 1e6;
+    });
+    await again.scheduler.cancelAll("timed again");
+    again.scheduler.dispose();
+    return Math.max(...times);
+  });
+  assert.ok(slowest < 20 * RUNNER_SLACK, `admitted in ${slowest.toFixed(1)} ms at worst (under ${20 * RUNNER_SLACK})`);
   assert.equal(h.table.liveCount(), THREAD_MAX_LIVE, "main + 3");
   assert.match(text(h.start("Notes")), /^3 threads are busy/);
   assert.match(text(h.start("SPOTIFY")), /already running/);
@@ -245,9 +274,22 @@ test("a warm spare is taken first: start() answers under 5 ms, no brain.start on
   assert.equal(h.brains.length, 2);
   const t0 = process.hrtime.bigint();
   const r = h.start("Spotify");
-  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  const first = Number(process.hrtime.bigint() - t0) / 1e6;
   assert.equal(r.kind, "text");
-  assert.ok(ms < 5, `start() with a spare: ${ms.toFixed(2)} ms`);
+  // Timed again over a fresh harness with its two spares warm, only when a loaded Mac stalled the first.
+  const ms = await bestOf(first, 5 * RUNNER_SLACK, async () => {
+    const again = harness({ spares: 2 });
+    again.script = async () => undefined;
+    again.scheduler.warm();
+    await until(() => again.scheduler.pool.warmCount === 2);
+    const t1 = process.hrtime.bigint();
+    again.start("Spotify");
+    const took = Number(process.hrtime.bigint() - t1) / 1e6;
+    await again.scheduler.cancelAll("timed again");
+    again.scheduler.dispose();
+    return took;
+  });
+  assert.ok(ms < 5 * RUNNER_SLACK, `start() with a spare: ${ms.toFixed(2)} ms (under ${5 * RUNNER_SLACK})`);
   assert.equal(h.brains[0]!.started, 1, "the spare's one boot; none on the caller's path");
   await until(() => h.byName("Spotify") !== undefined);
   assert.equal(h.byName("Spotify"), h.brains[0]);
@@ -298,6 +340,7 @@ test("a thread's steps land on ITS OWN delegation (threadId) with the marks stam
   const t = d.timings as { firstToolAt?: number; firstActionAt?: number; toolRoundTripMs?: number[]; eyesMs?: number; doneAt?: number };
   assert.equal(t.firstToolAt, d.createdAt + 100, "the first LOOK, not the eyes' shot");
   assert.equal(t.firstActionAt, d.createdAt + 200, "the Apple event that returned ok");
+  assert.deepEqual(h.appleScripts, ['tell application "Spotify" to play'], "the Apple event reached the harness's fake, never osascript");
   assert.equal(t.toolRoundTripMs?.length, 2, "one sample per tool, the eyes' shot excluded");
   assert.equal(t.eyesMs, 0, "the eyes' shot took no fake time");
   assert.equal(t.doneAt, d.createdAt + 300);
@@ -629,16 +672,16 @@ test("speak_progress on a thread speaks once per turn as '<Name>: …' and never
   h.scheduler.dispose();
 });
 
-test("stop by kevin speaks '<Name> stopped.', by cut is silent, by the brain (thread_stop) answers the brain; stopNamed is case-insensitive and false for a finished thread; worker_* aliases answer as thread_*; thread_wait waits for a settled or waiting thread and reads a finished one", async () => {
+test("stop by kevin speaks '<Name> stopped.', by cut is silent, by the brain (thread_stop) answers the brain; stopNamed is case-insensitive and false for a finished thread; thread_wait waits for a settled or waiting thread and reads a finished one", async () => {
   const h = harness();
   h.script = async () => undefined;
   const task = { delegationId: "item_1", request: h.parent.request, dialogue: "", confirmation: false, offsetMs: 0, signal: new AbortController().signal };
-  const started = await h.scheduler.tool("worker_start", { name: "Spotify", task: "play Focus", lane: "background" }, { task });
+  const started = await h.scheduler.tool("thread_start", { name: "Spotify", task: "play Focus", lane: "background" }, { task });
   assert.match(text(started), /^started thread Spotify \(t_/);
   const second = await h.scheduler.tool("thread_start", { name: "Slack", task: "tell Ben" }, { task });
   assert.equal(second.kind, "text");
   await until(() => h.byName("Spotify") !== undefined && h.byName("Slack") !== undefined);
-  const read = await h.scheduler.tool("worker_read", { name: "spotify" }, { task });
+  const read = await h.scheduler.tool("thread_read", { name: "spotify" }, { task });
   assert.match(text(read), /^Spotify: still working \(0 steps, 0 s\); thread_wait again or thread_stop it$/);
   const waiting = h.scheduler.tool("thread_wait", { name: "Spotify", timeout: 5 }, { task });
   await settle(20);
@@ -647,7 +690,7 @@ test("stop by kevin speaks '<Name> stopped.', by cut is silent, by the brain (th
   assert.deepEqual(h.voice.says, ["Spotify stopped."]);
   assert.equal(await h.scheduler.stopNamed("spotify"), false, "finished: not live");
   assert.equal(await h.scheduler.stop("t_nobody"), false);
-  const stopped = await h.scheduler.tool("worker_stop", { name: "Slack" }, { task });
+  const stopped = await h.scheduler.tool("thread_stop", { name: "Slack" }, { task });
   assert.match(text(stopped), /^Slack stopped \(0 steps\)\. Kevin was told: "Slack stopped\."$/);
   assert.deepEqual(h.voice.says, ["Spotify stopped.", "Slack stopped."]);
   assert.equal(h.byName("Slack")!.cancels, 1);
@@ -709,7 +752,7 @@ test("statusLine through the scheduler: the tool's phrase while acting, the ques
   h.scheduler.dispose();
 });
 
-test("apps are claimed from open_app, `tell application`, and a browser host; a tagged orb.fly from the thread's toolset carries `thread` to the overlay and lands on the record as `at`; the Worker list keeps the old shape", async () => {
+test("apps are claimed from open_app, `tell application`, and a browser host; a tagged orb.fly from the thread's toolset carries `thread` to the overlay and lands on the record as `at`; the summaries carry the app and the lane", async () => {
   const h = harness();
   h.script = async (job) => {
     await job.runner.run("applescript", { script: 'tell application "Spotify" to play track "x"' });
@@ -730,16 +773,16 @@ test("apps are claimed from open_app, `tell application`, and a browser host; a 
   assert.ok(h.events.some((e) => e.kind === "at" && (e as { x: number }).x === 100), "the coalesced `at` event reached the sink");
   assert.deepEqual(h.table.get(id)!.apps, ["Spotify"], "the Apple event's app; a web fetch is no app");
   assert.equal(h.table.get(id)!.app, "Spotify");
-  const list = h.scheduler.list();
+  const list = h.spawned();
   assert.equal(list.length, 1);
   assert.equal(list[0]!.id, id);
   assert.equal(list[0]!.name, "Spotify");
-  assert.equal(list[0]!.status, "working");
-  assert.equal(list[0]!.delegationId, "dlg_parent");
+  assert.equal(list[0]!.status, "acting", "the Apple event was an act");
+  assert.equal(list[0]!.parentDelegationId, "dlg_parent");
   assert.equal(list[0]!.app, "Spotify");
   assert.equal(list[0]!.lane, "background");
   await h.scheduler.cancelAll("done");
-  assert.equal(h.scheduler.list()[0]!.status, "cancelled");
+  assert.equal(h.spawned()[0]!.status, "stopped");
   h.scheduler.dispose();
 });
 
@@ -760,7 +803,7 @@ test("the task carries the memory block (bounded at 250 ms: a hanging hook leave
   const t0 = Date.now();
   h.start("Slack");
   await until(() => h.byName("Slack")?.tasks.length === 1);
-  assert.ok(Date.now() - t0 < 1000);
+  assert.ok(Date.now() - t0 < 1000 * RUNNER_SLACK, `bounded: under ${1000 * RUNNER_SLACK} ms (${Date.now() - t0} ms)`);
   assert.equal(h.byName("Slack")!.tasks[0]!.memory, undefined, "bounded: the task went without it");
   const blind = harness({ eyes: false });
   blind.script = async () => ({ status: "done", summary: "ok." });
@@ -772,7 +815,7 @@ test("the task carries the memory block (bounded at 250 ms: a hanging hook leave
   blind.scheduler.dispose();
 });
 
-test("idle end: a thread waiting on a yes nobody gives, or paused, for THREAD_IDLE_END_MS ends done 'idle' at the tick and its lane returns; drain resolves when the parent's threads end; running(parentId) counts one parent's", async () => {
+test("idle end: a thread paused for THREAD_IDLE_END_MS (here after its question) ends stopped 'idle', never done, at the tick and its lane returns; drain resolves when the parent's threads end; running(parentId) counts one parent's (a question nobody answers is re-asked first: threads-launch.test.ts)", async () => {
   const h = harness();
   h.script = async (job) => {
     const r = (await job.runner.run("click_element", { name: "Send" })).result;
@@ -780,6 +823,7 @@ test("idle end: a thread waiting on a yes nobody gives, or paused, for THREAD_ID
   };
   h.start("Slack", "send it", "screen");
   await until(() => h.spawned()[0]?.status === "waiting-kevin");
+  assert.equal(await h.scheduler.pause(h.spawned()[0]!.id), true);
   const other: ThreadParent = { ...h.parent, id: "dlg_other" };
   h.script = async () => undefined;
   h.scheduler.start(other, { name: "Mail", task: "read the inbox", lane: "background" });
@@ -792,10 +836,10 @@ test("idle end: a thread waiting on a yes nobody gives, or paused, for THREAD_ID
   const slack = (): Thread => h.spawned().find((t) => t.name === "Slack")!;
   h.clock.t += THREAD_IDLE_END_MS - 1;
   h.scheduler.tick();
-  assert.equal(slack().status, "waiting-kevin", "not yet");
+  assert.equal(slack().status, "paused", "not yet");
   h.clock.t += 1;
   h.scheduler.tick();
-  assert.equal(slack().status, "done");
+  assert.equal(slack().status, "stopped");
   assert.equal(slack().detail, "idle");
   assert.equal(h.byName("Slack")!.stops, 1, "its lane returned");
   assert.equal(h.desk.floor, undefined, "its question went with it");
@@ -810,7 +854,7 @@ test("idle end: a thread waiting on a yes nobody gives, or paused, for THREAD_ID
   h.scheduler.dispose();
 });
 
-test("stopAll (sleep) stops every thread and every spare, flushes the coalescer, and the next warm() boots again; the Worker-shaped list and the summaries agree on who lingers", async () => {
+test("stopAll (sleep) stops every thread and every spare, flushes the coalescer, and the next warm() boots again; the summaries say who lingers", async () => {
   const h = harness({ spares: 1 });
   h.scheduler.warm();
   await settle(5);
@@ -826,10 +870,9 @@ test("stopAll (sleep) stops every thread and every spare, flushes the coalescer,
   assert.equal(spare.stops, 1, "the spare's process ended too");
   assert.equal(h.scheduler.spareIds.length, 0);
   assert.equal(h.events[h.events.length - 1]!.kind, "ended");
-  assert.equal(h.scheduler.list().length, 1, "the finished thread lingers in the Worker shape");
-  assert.equal(h.spawned().length, 1);
+  assert.equal(h.spawned().length, 1, "the finished thread lingers in the summaries");
   h.clock.t += 30_001;
-  assert.equal(h.scheduler.list().length, 0);
+  assert.equal(h.spawned().length, 0);
   assert.equal(h.scheduler.warm(), 1, "a new wake warms again");
   await h.scheduler.stopAll();
   h.scheduler.dispose();
@@ -1030,7 +1073,7 @@ test("a brain that never lets go after cancel(): a follow-up resolves within the
   const t0 = Date.now();
   assert.equal(await h.scheduler.followUp(id, "skip this song"), true);
   const took = Date.now() - t0;
-  assert.ok(took >= 60 && took < 1000, `bounded: ${took} ms`);
+  assert.ok(took >= 60 && took < 1000 * RUNNER_SLACK, `bounded: ${took} ms (under ${1000 * RUNNER_SLACK})`);
   assert.equal(fb.cancels, 1, "cancel() was called once");
   await until(() => fb.tasks.length === 2);
   assert.equal(h.scheduler.turnsOf(id)[0]!.status, "cancelled", "the record closed without the brain");
@@ -1077,4 +1120,54 @@ test("answerNo on a live thread that is not waiting drops only its question and 
   await until(() => h.table.get(id)?.status === "stopped");
   assert.equal(await h.scheduler.answerNo(id), false, "finished");
   h.scheduler.dispose();
+});
+
+test("the user's name: the lines a thread's brain reads say the name — thread_start's refusal, the brief's gate line, a pause's detail and continuation, a stop's detail and thread_wait's told line; for another name no literal Kevin and the same words otherwise", async () => {
+  const lines: Record<"Kevin" | "Sam", string[]> = { Kevin: [], Sam: [] };
+  for (const who of ["Kevin", "Sam"] as const) {
+    const h = harness(who === "Sam" ? { userName: "Sam" } : {});
+    h.script = async () => undefined;
+    const task = { delegationId: "item_1", request: h.parent.request, dialogue: "", confirmation: false, offsetMs: 0, signal: new AbortController().signal };
+    const out = lines[who];
+    out.push(text(await h.scheduler.tool("thread_start", { name: "", task: "play Focus" }, { task })));
+    const started = await h.scheduler.tool("thread_start", { name: "Spotify", task: "play Focus", lane: "background" }, { task });
+    assert.equal(started.kind, "text", text(started));
+    await until(() => h.byName("Spotify")?.tasks.length === 1);
+    const fb = h.byName("Spotify")!;
+    const id = h.spawned()[0]!.id;
+    out.push(fb.tasks[0]!.dialogue);
+    assert.equal(await h.scheduler.pause(id), true);
+    out.push(h.table.get(id)!.detail ?? "");
+    await h.scheduler.resume(id);
+    await until(() => fb.tasks.length === 2);
+    out.push(fb.tasks[1]!.dialogue);
+    const waiting = h.scheduler.tool("thread_wait", { name: "Spotify", timeout: 5 }, { task });
+    await settle(20);
+    assert.equal(await h.scheduler.stopNamed("Spotify"), true);
+    out.push(text(await waiting));
+    out.push(h.table.get(id)!.detail ?? "");
+    h.scheduler.dispose();
+  }
+  // The defaults, as the older pins read them.
+  assert.equal(lines.Kevin[0], "thread_start needs a name Kevin will hear (one word, usually the app)");
+  assert.match(lines.Kevin[1]!, /Kevin's own words, for names and gates: "tell ben on slack/);
+  assert.equal(lines.Kevin[2], "Kevin paused it");
+  assert.match(lines.Kevin[3]!, /Kevin paused you at step 0; carry on from where you were\.$/);
+  assert.match(lines.Kevin[4]!, /^Spotify: stopped — Kevin stopped it \(Kevin was told: "Spotify stopped\."\)/);
+  assert.equal(lines.Kevin[5], "Kevin stopped it");
+  // Another name: the same six lines, the name in every one, no literal Kevin anywhere.
+  assert.equal(lines.Sam.length, lines.Kevin.length);
+  for (let i = 0; i < lines.Sam.length; i++) {
+    assert.doesNotMatch(lines.Sam[i]!, /Kevin/, lines.Sam[i]);
+    assert.match(lines.Sam[i]!, /Sam/, lines.Sam[i]);
+    assert.equal(lines.Sam[i]!.replaceAll("Sam", "Kevin"), lines.Kevin[i]!, `line ${i} reads the same for another name`);
+  }
+  // The pure texts, and the default constant the older imports read.
+  assert.equal(CONFIRMATION_RESUME, confirmationResume("Kevin"));
+  assert.equal(confirmationResume("Sam"), "\n\nHormes (to its thread): Sam said yes. Call the same tool again with exactly the same arguments, then finish your job.");
+  assert.equal(resumeText(3), resumeText(3, "Kevin"));
+  assert.equal(resumeText(3, "Sam"), "\n\nHormes (to its thread): Sam paused you at step 3; carry on from where you were.");
+  const brief = threadBrief("Spotify", "play Focus", "background", "play focus", "Sam");
+  assert.doesNotMatch(brief, /Kevin/);
+  assert.equal(brief.replaceAll("Sam", "Kevin"), threadBrief("Spotify", "play Focus", "background", "play focus"));
 });

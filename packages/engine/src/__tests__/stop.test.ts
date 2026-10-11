@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { LedgerRow } from "@hormes/protocol";
+import { MAIN_THREAD_ID, type LedgerRow } from "@hormes/protocol";
 import { Engine } from "../engine.ts";
 import { delegate, frame, nextUtterance, rows, settle, until, world } from "./world.ts";
 
@@ -14,6 +14,9 @@ import { delegate, frame, nextUtterance, rows, settle, until, world } from "./wo
  * the `stop` command) does all of that and then CLOSES the session — the meter
  * stops — and sleeps; transport.test.ts has the rest of it.
  */
+
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
 
 type StopRow = Extract<LedgerRow, { type: "stop" }>;
 
@@ -50,7 +53,7 @@ test("interrupt: output audio is dropped for the gate window, the running delega
     const t0 = Date.now();
     await engine.command({ type: "interrupt" });
     const took = Date.now() - t0;
-    assert.ok(took < 150, `interrupt returned in ${took}ms`);
+    assert.ok(took < 150 * RUNNER_SLACK, `interrupt returned in ${took} ms (under ${150 * RUNNER_SLACK})`);
     assert.equal(brain.cancels, 1, "the brain's cancel was called");
     assert.equal(engine.snapshot().delegations[0]?.status, "cancelled");
     assert.equal(engine.snapshot().delegations[0]?.summary, "Kevin pressed stop");
@@ -94,8 +97,11 @@ test("interrupt: output audio is dropped for the gate window, the running delega
     assert.equal(engine.outputGated, true);
     live.emit("audio", frame());
     assert.equal(audio.length, 1, "gated");
+    // "never mind" begins with a stop phrase, but the press already cut the voice: nothing is audible to say it over,
+    // so it lifts the gate and is not a second stop.
     live.emit("inputTranscript", " never mind", 3000, 3400);
     assert.equal(engine.outputGated, false, "Kevin spoke: the gate is lifted");
+    assert.deepEqual(rows<StopRow>(w, "stop").map((r) => r.how), ["pressed", "pressed"], "one row per press, none for his words");
     live.emit("audio", frame());
     assert.equal(audio.length, 2);
     assert.equal(engine.currentPhase, "listening");
@@ -123,7 +129,7 @@ test("interrupt with nothing running is harmless: a flush, a toast, the voice to
     assert.equal(engine.currentPhase, "listening");
     assert.equal(engine.snapshot().session?.id, "sess_1");
     // Asleep: still harmless, and honest about it.
-    await engine.sleep();
+    await engine.command({ type: "sleep" });
     events.length = 0;
     await engine.command({ type: "interrupt" });
     assert.equal(engine.currentPhase, "asleep");
@@ -171,11 +177,12 @@ test("a spoken \"stop\" is an interrupt: the delegation is cancelled, the brain'
     await settle();
     assert.equal(hands.named("type").length, 0, "nothing was typed after the spoken stop");
 
-    // The voice's sentence in flight is dropped; Kevin's next words lift the gate.
+    // The voice's sentence in flight is dropped; Kevin's next utterance lifts the gate. It starts past the stop's end
+    // plus the transcript's GAP_MS: words inside the stop's own utterance never lift it (V10).
     audio.length = 0;
     live.emit("audio", frame());
     assert.equal(audio.length, 0);
-    live.emit("inputTranscript", " ok now open safari", live.nowMs + 1500, live.nowMs + 2200);
+    live.emit("inputTranscript", " ok now open safari", live.nowMs + 2000, live.nowMs + 2700);
     assert.equal(engine.outputGated, false);
     live.emit("audio", frame());
     assert.equal(audio.length, 1);
@@ -227,7 +234,7 @@ test("stop aftermath: nothing is left running, armed or billed; asleep at once; 
     assert.equal(engine.snapshot().session, undefined);
     assert.equal(live.currentState, "closed");
     await stopping;
-    assert.ok(Date.now() - t0 < 1700, "stop returned without waiting for the brain's cancel");
+    assert.ok(Date.now() - t0 < 1700 * RUNNER_SLACK, `stop returned without waiting for the brain's cancel: under ${1700 * RUNNER_SLACK} ms (${Date.now() - t0} ms)`);
     const snap = engine.snapshot();
     assert.equal(snap.delegations.filter((d) => d.status === "running" || d.status === "awaiting-confirmation").length, 0, "nothing running or awaiting");
     assert.equal(snap.delegations[0]!.status, "cancelled");
@@ -236,8 +243,8 @@ test("stop aftermath: nothing is left running, armed or billed; asleep at once; 
     assert.equal(engine.outputGated, false, "no gate: there is no session to gate");
     assert.equal(engine.transportState, "asleep");
 
-    // While the old cancel is still in flight: wake opens a fresh session, say-text reaches it, a new delegation runs on it.
-    await engine.command({ type: "wake" });
+    // While the old cancel is still in flight: go opens a fresh session, say-text reaches it, a new delegation runs on it.
+    await engine.command({ type: "go" });
     assert.equal(engine.currentPhase, "listening");
     assert.equal(lives.length, 2);
     const next = lives[1]!;
@@ -263,10 +270,10 @@ test("stop aftermath: nothing is left running, armed or billed; asleep at once; 
     // And sleep does not hang on a brain whose cancel never answers; the session is closed at once regardless.
     realBrain.cancel = () => new Promise<void>(() => undefined);
     const s0 = Date.now();
-    const sleeping = engine.sleep();
+    const sleeping = engine.command({ type: "sleep" });
     assert.equal(next.currentState, "closed", "closed before the brain's cancel is awaited");
     await sleeping;
-    assert.ok(Date.now() - s0 < 2000, "sleep is bounded even when the brain's cancel hangs");
+    assert.ok(Date.now() - s0 < 2000 * RUNNER_SLACK, `sleep is bounded even when the brain's cancel hangs: under ${2000 * RUNNER_SLACK} ms (${Date.now() - s0} ms)`);
     assert.equal(engine.currentPhase, "asleep");
     realBrain.cancel = originalCancel;
   } finally {
@@ -274,38 +281,38 @@ test("stop aftermath: nothing is left running, armed or billed; asleep at once; 
   }
 });
 
-test("interrupt while workers run: every worker is cancelled quietly (its brain's cancel once), the parent is cancelled, the session stays open; worker.stop cancels one worker with its one line and keeps the other", async () => {
+test("interrupt while threads run: every thread is cancelled quietly (its brain's cancel once), the parent is cancelled, the session stays open; thread.stop stops one thread with its one line and keeps the other", async () => {
   const w = world();
   const { engine, live, brain } = w;
   try {
-    w.workers.script = async () => undefined;
+    w.threads.script = async () => undefined;
     await engine.start();
     await engine.ready();
     engine.updateSettings({ idleSleepMinutes: 0 });
     await engine.wake("test");
     delegate(w, "hormes tell ben on slack and play focus on spotify", "item_1");
     await settle();
-    await engine.runner.run("worker_start", { name: "Spotify", task: "play Focus" });
-    await engine.runner.run("worker_start", { name: "Slack", task: "tell Ben", lane: "screen" });
+    await engine.runner.run("thread_start", { name: "Spotify", task: "play Focus" });
+    await engine.runner.run("thread_start", { name: "Slack", task: "tell Ben", lane: "screen" });
     await settle(50);
-    const workers = engine.snapshot().workers ?? [];
-    assert.equal(workers.length, 2);
+    const spawned = () => engine.snapshot().threads.filter((x) => x.id !== MAIN_THREAD_ID);
+    assert.equal(spawned().length, 2);
     live.commentary.length = 0;
     // The Console's Stop on one row.
-    await engine.command({ type: "worker.stop", workerId: workers.find((x) => x.name === "Spotify")!.id });
+    await engine.command({ type: "thread.stop", threadId: spawned().find((x) => x.name === "Spotify")!.id });
     await until(() => live.commentary.length > 0, 1500);
-    assert.equal((engine.snapshot().workers ?? []).find((x) => x.name === "Spotify")!.status, "cancelled");
-    assert.equal((engine.snapshot().workers ?? []).find((x) => x.name === "Slack")!.status, "working");
+    assert.equal(spawned().find((x) => x.name === "Spotify")!.status, "stopped");
+    assert.equal(spawned().find((x) => x.name === "Slack")!.status, "thinking");
     assert.deepEqual(live.commentary, ["Spotify stopped."]);
     assert.equal(live.currentState, "started");
     // The spoken stop: everything.
     live.commentary.length = 0;
     await engine.command({ type: "interrupt", how: "said" });
     assert.equal(brain.cancels, 1);
-    assert.deepEqual((engine.snapshot().workers ?? []).map((x) => x.status), ["cancelled", "cancelled"]);
-    assert.equal(w.workers.byName("Slack")!.cancels, 1);
-    assert.equal(w.workers.byName("Spotify")!.cancels, 1, "cancelled once, whichever verb");
-    assert.deepEqual(live.commentary, [], "a cut says nothing per worker");
+    assert.deepEqual(spawned().map((x) => x.status), ["stopped", "stopped"]);
+    assert.equal(w.threads.byName("Slack")!.cancels, 1);
+    assert.equal(w.threads.byName("Spotify")!.cancels, 1, "cancelled once, whichever verb");
+    assert.deepEqual(live.commentary, [], "a cut says nothing per thread");
     assert.equal(engine.snapshot().delegations[0]!.status, "cancelled");
     assert.equal(live.currentState, "started", "the session stays");
     assert.equal(rows<StopRow>(w, "stop").length, 1);

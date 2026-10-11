@@ -1,16 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { readConfig, type HormesConfig } from "@hormes/core";
 import type { LiveSession } from "@hormes/live";
 import type { Brain, BrainTask } from "@hormes/brain";
 import type { NativeHands } from "@hormes/hands";
 import type { OverlayCommand } from "@hormes/protocol";
 import { Engine } from "../engine.ts";
-import { FakeMemoryService, noShell } from "./world.ts";
+import { FakeMemoryService, noShell, tempDir, testConfig, until } from "./world.ts";
 
 /**
  * The marks lifecycle: mark.add records a ScreenMark at once (asleep or awake),
@@ -69,26 +67,14 @@ interface World {
   zooms: Record<string, unknown>[];
   /** Every hands op and Live note in the order they happened. */
   timeline: string[];
-  hands: { failZoom: boolean; holdZoom: (() => void) | undefined };
+  hands: { failZoom: boolean; holdZoom: (() => void) | undefined; frontmost: unknown | undefined; failFrontmost: boolean };
   brain: { fail: boolean };
   clock: { t: number };
 }
 
 function world(): World {
-  const dir = mkdtempSync(join(tmpdir(), "jh-marks-engine-"));
-  const config: HormesConfig = {
-    ...readConfig(),
-    openaiApiKey: "sk-test-not-used",
-    brain: "auto",
-    brainModel: "",
-    brainBaseUrl: undefined,
-    anthropicApiKey: undefined,
-    claudeBin: undefined,
-    codexBin: undefined,
-    handsBin: join(dir, "no-hands"),
-    stateDir: join(dir, "state"),
-    socketPath: join(dir, "state", "j.sock"),
-  };
+  const dir = tempDir("jh-marks-engine-");
+  const config = testConfig(dir, { openaiApiKey: "sk-test-not-used" });
   const tasks: BrainTask[] = [];
   const brainState = { fail: false };
   const brain: Brain = {
@@ -110,7 +96,7 @@ function world(): World {
   };
   const clock = { t: 1_757_500_000_000 };
   // Every engine in a test runs over the memory stand-in: the real service would build an OpenAI embedder over the fake key.
-  const engine = new Engine({ config, connectors: [], brain, makeLive: () => live as unknown as LiveSession, now: () => clock.t, exec: noShell, memory: { service: new FakeMemoryService() } });
+  const engine = new Engine({ config, connectors: [], brain, fallbackUserName: "Kevin", makeLive: () => live as unknown as LiveSession, now: () => clock.t, exec: noShell, memory: { service: new FakeMemoryService() } });
   const overlays: OverlayCommand[] = [];
   engine.on("overlay", (c) => {
     overlays.push(c);
@@ -120,9 +106,10 @@ function world(): World {
   // that answers `zoom` (what mark.add asks for) and nothing else. `holdZoom` keeps a capture
   // in flight until the test lets it go.
   const zooms: Record<string, unknown>[] = [];
-  const hands: World["hands"] = { failZoom: false, holdZoom: undefined };
+  const hands: World["hands"] = { failZoom: false, holdZoom: undefined, frontmost: undefined, failFrontmost: false };
   (engine.hands as unknown as { request: (op: string, params?: Record<string, unknown>) => Promise<unknown> }).request = async (op, params = {}) => {
     timeline.push(`hands:${op}`);
+    if (op === "frontmost" && !hands.failFrontmost) return hands.frontmost ?? { app: "Finder", pid: 7, window: null };
     if (op === "zoom" && !hands.failZoom) {
       zooms.push(params);
       if (hands.holdZoom) await new Promise<void>((release) => (hands.holdZoom = release));
@@ -199,7 +186,7 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
     assert.equal(engine.currentPhase, "listening");
     timeline.length = 0;
     await engine.command({ type: "mark.add", rect: { x: 300.4, y: 400.6, w: 80, h: 40 }, path: [{ x: 300, y: 400 }, { x: 380, y: 440 }] });
-    assert.deepEqual(live.instructions, ["Kevin just circled a region of his screen (80×40 at 300,401). The brain will see the image with the next task; acknowledge briefly if he is asking about it."]);
+    assert.deepEqual(live.instructions, ["Kevin just circled a region of the screen (80×40 at 300,401). The brain will see the image with the next task; acknowledge briefly if Kevin is asking about it."]);
     assert.deepEqual(timeline, ["live-note", "hands:element_at", "hands:windows", "hands:zoom", "overlay:orb.trace"]);
     marks = engine.snapshot().marks;
     assert.equal(marks.length, 4);
@@ -215,8 +202,8 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
       [marks[0]!, marks[1]!, marks[3]!].map((m) => join(engine.config.stateDir, m.screenshotPath!)),
     );
     assert.ok(attachments.every((a) => existsSync(a.path) && a.mediaType === "image/png"));
-    assert.equal(attachments[0]!.note, "Kevin circled this region of his screen: 10,20 100×50 (global points)");
-    assert.equal(attachments[2]!.note, "Kevin circled this region of his screen: 300,401 80×40 (global points)");
+    assert.equal(attachments[0]!.note, "Kevin circled this region of the screen: 10,20 100×50 (global points)");
+    assert.equal(attachments[2]!.note, "Kevin circled this region of the screen: 300,401 80×40 (global points)");
     marks = engine.snapshot().marks;
     assert.equal(marks.length, 4, "consumed marks stay for the Console");
     assert.ok(marks.every((m) => m.consumed));
@@ -236,11 +223,13 @@ test("marks: circled regions are recorded at once, captured without Hormes's win
     w.clock.t += 10 * 60_000; // circled ten minutes ago, still pending
     (engine as unknown as { tick(): void }).tick();
     assert.equal(engine.snapshot().marks.length, 1);
+    // Ten minutes on, the circle no longer opens an exchange by itself (the room-talk gate, LC-7): Kevin asks.
+    live.emit("inputTranscript", " hormes what's this", live.nowMs, live.nowMs + 900);
     live.emit("delegation", "item_3", "client", 3000);
     await settle();
     assert.equal(tasks.length, 3);
     assert.equal(tasks[2]!.attachments?.length, 1);
-    assert.equal(tasks[2]!.attachments![0]!.note, "Kevin circled this region of his screen: 1,1 2×2 (global points), circled 10 min ago", "the brain hears how old the circle is");
+    assert.equal(tasks[2]!.attachments![0]!.note, "Kevin circled this region of the screen: 1,1 2×2 (global points), circled 10 min ago", "the brain hears how old the circle is");
     (engine as unknown as { tick(): void }).tick();
     assert.equal(engine.snapshot().marks.length, 1, "consumed just now: kept for the Console although drawn ten minutes ago");
     assert.equal(engine.snapshot().marks[0]!.consumed, true);
@@ -372,23 +361,11 @@ function bboxOf(pts: readonly { x: number; y: number }[]): { x: number; y: numbe
 }
 
 test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circled dialog is the dialog, not the label under the centroid; a circled button is the button; a window barely touched leaves the box", async () => {
-  const dir = mkdtempSync(join(tmpdir(), "jh-marks-snap-"));
-  const config: HormesConfig = {
-    ...readConfig(),
-    openaiApiKey: "sk-test-not-used",
-    brain: "auto",
-    brainModel: "",
-    brainBaseUrl: undefined,
-    anthropicApiKey: undefined,
-    claudeBin: undefined,
-    codexBin: undefined,
-    handsBin: join(dir, "no-hands"),
-    stateDir: join(dir, "state"),
-    socketPath: join(dir, "state", "j.sock"),
-  };
+  const dir = tempDir("jh-marks-snap-");
+  const config = testConfig(dir, { openaiApiKey: "sk-test-not-used" });
   const brain: Brain = { kind: "fake", start: async () => ({ ready: true, detail: "fake" }), handle: async () => ({ status: "done", summary: "done." }), cancel: async () => undefined, stop: async () => undefined };
   const hands = new SnapHands();
-  const engine = new Engine({ config, connectors: [], brain, hands, makeLive: () => new FakeLive() as unknown as LiveSession, exec: noShell, memory: { service: new FakeMemoryService() } });
+  const engine = new Engine({ config, connectors: [], brain, hands, fallbackUserName: "Kevin", makeLive: () => new FakeLive() as unknown as LiveSession, exec: noShell, memory: { service: new FakeMemoryService() } });
   const overlays: OverlayCommand[] = [];
   engine.on("overlay", (c) => overlays.push(c));
   const near = (a: number, b: number, tol = 1): boolean => Math.abs(a - b) <= tol;
@@ -399,7 +376,8 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     // A circled dialog: element_at at the centroid is a label inside it; the dialog window is what Kevin surrounded.
     const dialog = { windowId: 2, pid: 2, app: "Finder", title: "Move to Trash?", x: 320, y: 320, w: 560, h: 360, layer: 0 };
     hands.element = { role: "AXStaticText", title: "Are you sure?", frame: { x: 500, y: 480, w: 200, h: 40 }, app: "Finder" };
-    hands.windows = [{ windowId: 1, pid: 1, app: "Finder", title: "Desktop", x: 0, y: 0, w: 1440, h: 900, layer: 0 }, dialog];
+    // Front to back, as CGWindowList gives them: the dialog sits in front of the Finder window it belongs to.
+    hands.windows = [dialog, { windowId: 1, pid: 1, app: "Finder", title: "Desktop", x: 0, y: 0, w: 1440, h: 900, layer: 0 }];
     let path = strokeAround(dialog, 20);
     await engine.command({ type: "mark.add", rect: bboxOf(path), path });
     let m = engine.snapshot().marks[0]!;
@@ -455,6 +433,160 @@ test("marks: the stroke snaps to the LARGEST frame mostly inside it — a circle
     trace = overlays.find((o) => o.cmd === "orb.trace") as Extract<OverlayCommand, { cmd: "orb.trace" }>;
     b = bboxOf(trace.points);
     assert.ok(near(b.y, -500) && near(b.h, 30), `trace in global points: ${JSON.stringify(b)}`);
+  } finally {
+    await engine.stop();
+  }
+});
+
+// ---- the notch's × and Window box ------------------------------------------------------------
+
+/** Snapshot events emitted so far (a scheduleSnapshot lands one after its timer). */
+/** Counts the snapshots the engine publishes and keeps each one's mark ids, so a test can ask "did any snapshot after this point change the marks" without pinning how many unrelated snapshots (the meter, a lease, a task) land in a quiet window. */
+function snapshots(engine: Engine): { count: () => number; markIdsSince: (from: number) => ReadonlyArray<ReadonlyArray<string>> } {
+  let n = 0;
+  const ids: string[][] = [];
+  engine.on("event", (e) => {
+    if (e.type === "snapshot") {
+      n++;
+      ids.push(e.snapshot.marks.map((m) => m.id));
+    }
+  });
+  return { count: () => n, markIdsSince: (from) => ids.slice(from) };
+}
+
+test("mark.remove drops one pending mark and the snapshot follows; removing a consumed mark clears its consumed clock; an unknown or malformed id changes nothing, throws nothing and schedules no snapshot", async () => {
+  const w = world();
+  const { engine, live, tasks } = w;
+  const snaps = snapshots(engine);
+  try {
+    await engine.start();
+    await engine.ready();
+    await engine.command({ type: "mark.add", rect: { x: 10, y: 20, w: 100, h: 50 } });
+    await engine.command({ type: "mark.add", rect: { x: 200, y: 20, w: 100, h: 50 } });
+    let marks = engine.snapshot().marks;
+    assert.equal(marks.length, 2);
+    const [first, second] = marks as [typeof marks[0], typeof marks[0]];
+    await settle();
+    const before = snaps.count();
+    await engine.command({ type: "mark.remove", id: first.id });
+    marks = engine.snapshot().marks;
+    assert.deepEqual(marks.map((m) => m.id), [second.id], "the one mark left, the other pending one untouched");
+    assert.ok(await until(() => snaps.count() > before, 500), "the snapshot follows the removal");
+    // A consumed mark: handed to a task, then removed — its consumed clock goes with it (nothing left to age out).
+    engine.updateSettings({ idleSleepMinutes: 0 });
+    await engine.wake("test");
+    live.emit("delegation", "item_1", "client", 1000);
+    await settle();
+    assert.equal(tasks.length, 1);
+    assert.equal(engine.snapshot().marks[0]!.consumed, true);
+    const consumedAt = (engine as unknown as { markConsumedAt: Map<string, number> }).markConsumedAt;
+    assert.ok(consumedAt.has(second.id));
+    await engine.command({ type: "mark.remove", id: second.id });
+    assert.deepEqual(engine.snapshot().marks, []);
+    assert.equal(consumedAt.has(second.id), false, "the consumed clock is cleared with the mark");
+    // Unknown and malformed ids: nothing changes, nothing throws, no snapshot is scheduled.
+    await engine.command({ type: "mark.add", rect: { x: 1, y: 1, w: 5, h: 5 } });
+    await settle();
+    const kept = engine.snapshot().marks;
+    const quiet = snaps.count();
+    for (const id of ["mark_zzzzzzzz", "x", "", "mark_", "MARK_ABC", "mark_ab/../c"]) await engine.command({ type: "mark.remove", id });
+    await settle();
+    assert.deepEqual(engine.snapshot().marks, kept);
+    // A no-op removal publishes no snapshot with changed marks. The exact count is not pinned: while the session is
+    // awake the meter, the lease and the task publish their own snapshots, and on a shared runner one can land inside
+    // the quiet window (CI 2026-09-30 saw exactly that).
+    for (const ids of snaps.markIdsSince(quiet)) assert.deepEqual(ids, kept.map((m) => m.id), "no snapshot changed the marks for a no-op");
+  } finally {
+    await engine.stop();
+  }
+});
+
+test("a capture finishing after mark.remove does not resurrect the mark, and the next task gets zero attachments; mark.remove then mark.add keeps the cap of six", async () => {
+  const w = world();
+  const { engine, live, tasks } = w;
+  try {
+    await engine.start();
+    await engine.ready();
+    engine.updateSettings({ idleSleepMinutes: 0 });
+    await engine.wake("test");
+    w.hands.holdZoom = () => undefined;
+    const adding = engine.command({ type: "mark.add", rect: { x: 10, y: 20, w: 100, h: 50 }, path: [{ x: 10, y: 20 }, { x: 110, y: 70 }] });
+    await settle();
+    const id = engine.snapshot().marks[0]!.id;
+    assert.equal(engine.snapshot().marks[0]!.screenshotPath, undefined, "the capture is still in flight");
+    await engine.command({ type: "mark.remove", id });
+    assert.deepEqual(engine.snapshot().marks, [], "gone at once");
+    // The capture lands into nothing: the file is a day's shot, the mark does not come back.
+    w.hands.holdZoom!();
+    w.hands.holdZoom = undefined;
+    await adding;
+    await settle();
+    assert.deepEqual(engine.snapshot().marks, [], "a finished capture does not resurrect a removed mark");
+    live.emit("delegation", "item_1", "client", 1000);
+    await settle();
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0]!.attachments, undefined, "settled: zero attachments handed over");
+    // The cap holds across a removal: seven adds after a remove still leave six, the newest last.
+    for (let i = 0; i < 3; i++) await engine.command({ type: "mark.add", rect: { x: i, y: i, w: 5, h: 5 } });
+    await engine.command({ type: "mark.remove", id: engine.snapshot().marks[0]!.id });
+    for (let i = 10; i < 17; i++) await engine.command({ type: "mark.add", rect: { x: i, y: i, w: 5, h: 5 } });
+    const marks = engine.snapshot().marks;
+    assert.equal(marks.length, 6);
+    assert.deepEqual(marks[5]!.rect, { x: 16, y: 16, w: 5, h: 5 });
+  } finally {
+    w.hands.holdZoom?.();
+    await engine.stop();
+  }
+});
+
+test("mark.window captures the front window whole: one mark with source window, element.role window, the window's frame as rect, no element_at / windows probe, zoom with Hormes's pids excluded, a toast naming the app and size; in session the Live note says captured a window; asleep it says nothing", async () => {
+  const w = world();
+  const { engine, live, zooms, timeline } = w;
+  const toasts: string[] = [];
+  engine.on("event", (e) => {
+    if (e.type === "toast") toasts.push(`${e.tone}:${e.text}`);
+  });
+  try {
+    await engine.start();
+    await engine.ready();
+    w.hands.frontmost = { app: "Safari", bundleId: "com.apple.Safari", pid: 42, window: { title: "Apple", x: 120, y: 80, w: 800, h: 600, windowId: 9 } };
+    // Asleep: the mark lands, nobody is told.
+    await engine.command({ type: "mark.window" });
+    assert.ok(await until(() => engine.snapshot().marks.length === 1 && engine.snapshot().marks[0]!.screenshotPath !== undefined, 2000), "the window mark landed with its shot");
+    let m = engine.snapshot().marks[0]!;
+    assert.equal(m.source, "window");
+    assert.deepEqual(m.rect, { x: 120, y: 80, w: 800, h: 600 }, "the window's frame, no snap");
+    assert.deepEqual(m.element, { role: "window", title: "Apple", app: "Safari" });
+    assert.equal(m.path, undefined);
+    assert.equal(m.consumed, false);
+    assert.deepEqual(timeline.filter((t) => t.startsWith("hands:")), ["hands:frontmost", "hands:zoom"], "frontmost, then the capture: no element_at, no windows");
+    assert.deepEqual(zooms[0], { x: 120, y: 80, w: 800, h: 600, maxLongEdge: 2000, excludePids: [process.pid] });
+    assert.deepEqual(live.instructions, [], "asleep: Live hears nothing");
+    assert.deepEqual(toasts, ["info:Captured Safari · 800×600"]);
+    await engine.command({ type: "mark.clear" });
+    // In session: the voice hears about the captured window.
+    engine.updateSettings({ idleSleepMinutes: 0 });
+    await engine.wake("test");
+    live.instructions.length = 0;
+    await engine.command({ type: "mark.window" });
+    assert.ok(await until(() => engine.snapshot().marks.length === 1, 2000));
+    assert.deepEqual(live.instructions, ["Kevin just captured a window of the screen (Safari, 800×600). The brain will see the image with the next task; acknowledge briefly if Kevin is asking about it."]);
+    m = engine.snapshot().marks[0]!;
+    assert.equal(m.source, "window");
+    // No front window: a warn toast, no mark. Hands failing: a toast, no throw, no mark.
+    await engine.command({ type: "mark.clear" });
+    toasts.length = 0;
+    w.hands.frontmost = { app: "Finder", pid: 1, window: null };
+    await engine.command({ type: "mark.window" });
+    await settle();
+    assert.deepEqual(engine.snapshot().marks, []);
+    assert.deepEqual(toasts, ["warn:No front window to capture"]);
+    toasts.length = 0;
+    w.hands.failFrontmost = true;
+    await engine.command({ type: "mark.window" });
+    await settle();
+    assert.deepEqual(engine.snapshot().marks, []);
+    assert.deepEqual(toasts, ["warn:No front window to capture"], "the hands failing is the same answer, never a throw");
   } finally {
     await engine.stop();
   }

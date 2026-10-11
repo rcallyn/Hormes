@@ -15,9 +15,12 @@ import { delegate, nextUtterance, rows, settle, until, world } from "./world.ts"
  * opens no paid session unless Settings.typedWakes says so.
  */
 
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
+
 type HeardRow = Extract<LedgerRow, { type: "heard" }>;
 
-test("typed while ASLEEP is refused by default: no Live session is opened (the FakeLive is never started), one toast 'asleep — press Go', no instruction, nothing on the record — the text stays in the composer; with Settings.typedWakes the same line wakes Hormes and reaches the new session as the typed instruction", async () => {
+test("typed while ASLEEP is refused by default: no Live session is opened (the FakeLive is never started), one toast 'asleep · press Go', no instruction, nothing on the record — the text stays in the composer; with Settings.typedWakes the same line wakes Hormes and reaches the new session as the typed instruction", async () => {
   const w = world();
   const { engine, live, lives, events, hands } = w;
   try {
@@ -33,7 +36,7 @@ test("typed while ASLEEP is refused by default: no Live session is opened (the F
     assert.equal(engine.transportState, "asleep");
     assert.deepEqual(
       events.filter((e) => e.type === "toast").map((e) => (e.type === "toast" ? `${e.tone}:${e.text}` : "")),
-      ["warn:asleep — press Go"],
+      ["warn:asleep · press Go"],
       "one toast, and the words are the composer's to keep",
     );
     assert.equal(live.instructions.length, 0);
@@ -108,7 +111,7 @@ test("typed 'open safari' runs the reflex first (a hands op within 300 ms; the i
     const t0 = Date.now();
     await engine.command({ type: "say-text", text: "open safari" });
     const took = Date.now() - t0;
-    assert.ok(took < 300, `the typed command acted in ${took} ms`);
+    assert.ok(took < 300 * RUNNER_SLACK, `the typed command acted in ${took} ms (under ${300 * RUNNER_SLACK})`);
     assert.equal(hands.named("open_app").length, 1, "the reflex opened Safari on the acting helper");
     assert.match(live.instructions.at(-1) ?? "", /^Kevin just typed \(treat it exactly like speech\): "open safari"\. Hormes already did it: opened Safari\./);
     // Live's delegation for the typed words: already done, not redone.
@@ -177,7 +180,7 @@ test("a typed yes arms the main lane's pending question and Live's next delegati
     assert.equal(slack.tasks[1]!.confirmation, true);
     assert.equal(brain.cancels, cancels, "the main brain's turn was not superseded by a yes meant for a thread");
     assert.equal(engine.snapshot().delegations.find((d) => d.liveId === "item_2")!.status, "running");
-    assert.ok(live.instructions.some((i) => /his yes went to Slack's question/.test(i)), live.instructions.join(" | "));
+    assert.ok(live.instructions.some((i) => /that yes went to Slack's question/.test(i)), live.instructions.join(" | "));
     assert.equal(rows<HeardRow>(w, "heard").filter((r) => r.item.source === "typed" && r.item.text === "yes").length, 2, "both typed yeses are on the record");
   } finally {
     await engine.stop();

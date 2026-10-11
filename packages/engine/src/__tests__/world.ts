@@ -1,14 +1,16 @@
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readConfig, type HormesConfig } from "@hormes/core";
+import type { HormesConfig } from "@hormes/core";
 import type { LiveSession, SessionConfig } from "@hormes/live";
 import type { Brain, BrainResult, BrainSink, BrainTask, ToolRunner } from "@hormes/brain";
-import { FAKE_ACTING_OPS, HANDS_BUSY_PREFIX, KEVIN_QUIET_MS, NativeRequestError, USER_IDLE_NONE_MS, type NativeHands, type UserIdle } from "@hormes/hands";
+import { FAKE_ACTING_OPS, fakeHeldNow, HANDS_BUSY_PREFIX, KEVIN_QUIET_MS, NativeRequestError, USER_IDLE_NONE_MS, type NativeHands, type UserIdle } from "@hormes/hands";
 import type { AgentConnector, SendResult, TranscriptDelta, TranscriptOptions, TranscriptPage } from "@hormes/agents";
-import type { AgentInfo, AgentMessage, ConnectorHealth, EngineEvent, LedgerRow, MemoryItem, MemoryKind, MemoryOrigin, MemoryState, MemorySummary, OverlayCommand } from "@hormes/protocol";
-import type { Exec } from "@hormes/cli/install";
+import type { AgentInfo, AgentMessage, ConnectorHealth, EngineEvent, LedgerRow, LocalModel, LocalServerStatus, MemoryItem, MemoryKind, MemoryOrigin, MemoryState, MemorySummary, OverlayCommand } from "@hormes/protocol";
+import type { Exec } from "@hormes/install";
 import type { IngestOptions, IngestResult, RememberResult, Rendered } from "@hormes/memory";
 import { Engine, type EngineOptions } from "../engine.ts";
 import type { MemoryServiceLike } from "../memory-bridge.ts";
@@ -34,7 +36,6 @@ export class FakeLive extends EventEmitter {
   session: { id: string; expires_at: number } | undefined;
   /** The config the engine opened this session with (instructions, voice, delegation). */
   config: SessionConfig | undefined;
-  nowMs = 1000;
   audioIn = 0;
   /** What the server has billed so far (a `usage` emit updates it; the closed event carries it). */
   usage = 0;
@@ -45,8 +46,33 @@ export class FakeLive extends EventEmitter {
   hangOnClose = false;
   /** The server refuses the socket: start() reports `closed("connection_lost")` and rejects, as the real session does when the socket closes before `session.started`. */
   failStart = false;
-  constructor(readonly id = "sess_1") {
+  /** The session timeline by hand: what a test moved it by (`nowMs +=`, `nowMs =`), from 1 s at the start. */
+  private handMs = 1000;
+  /** The test clock when the session started: from then on the timeline follows the clock as well. */
+  private startedClock: number | undefined;
+  /** `clock`: the world's test clock, so the session timeline moves with it, as Live's does with the wall clock. */
+  constructor(
+    readonly id = "sess_1",
+    private readonly clock?: () => number,
+  ) {
     super();
+  }
+  /**
+   * The session timeline (Live's `start_ms` / `end_ms`): 1 s at the start, plus the test clock since `start()`, plus what
+   * a test moves it by hand. The engine's room-talk gate judges the exchange on it, so a test that moves only the clock
+   * still moves the timeline, and one that moves only the timeline still works as before.
+   */
+  get nowMs(): number {
+    const ran = this.clock && this.startedClock !== undefined ? this.clock() - this.startedClock : 0;
+    return this.handMs + ran;
+  }
+  set nowMs(v: number) {
+    this.handMs += v - this.nowMs;
+  }
+  /** The session clock stops where it is (a server error with no `closed` behind it): from here only a test moves it. */
+  freezeTimeline(): void {
+    this.handMs = this.nowMs;
+    this.startedClock = undefined;
   }
   async start(): Promise<{ id: string; expires_at: number }> {
     if (this.failStart) {
@@ -54,6 +80,7 @@ export class FakeLive extends EventEmitter {
       this.finish("connection_lost");
       throw new Error("live socket closed before start (code 1000)");
     }
+    this.startedClock = this.clock?.();
     this.currentState = "started";
     this.session = { id: this.id, expires_at: Math.floor(Date.now() / 1000) + 3600 };
     return this.session;
@@ -66,15 +93,18 @@ export class FakeLive extends EventEmitter {
     this.usage = seconds;
     this.emit("usage", seconds, undefined);
   }
-  appendInstructions(_id: string | null, content: string): string {
+  appendInstructions(id: string | null, content: string, o?: { readonly ask?: boolean }): string {
     this.instructions.push(content);
+    // As LiveSession does: an append that asks the voice for words is an ask (the engine's room-talk gate reads it).
+    if (o?.ask !== false) this.emit("ask", "instructions", id, `i_${this.instructions.length}`, content);
     return "i";
   }
   appendThinking(): string {
     return "t";
   }
-  appendCommentary(_id: string | null, content: string): string {
+  appendCommentary(id: string | null, content: string): string {
     this.commentary.push(content);
+    this.emit("ask", "commentary", id, `c_${this.commentary.length}`, content);
     return "c";
   }
   appendAudio(): void {
@@ -121,8 +151,11 @@ export class FakeLive extends EventEmitter {
 /**
  * Hands with canned answers; `hold` names an op to keep in flight until `release()`.
  * Kevin's hands win here as in the helper: after `kevinActed()` every acting op within
- * KEVIN_QUIET_MS answers `busy` (nothing posted) unless the op says `ownDriver`;
- * `user_idle` reports the same clock. `focus_app` / `open_app` change `frontApp`.
+ * KEVIN_QUIET_MS answers `busy` (nothing posted) unless the op says `ownDriver`, and so
+ * do `move`, `focus_app`, an `open_app` that activates, `browser_navigate` and a
+ * `browser_js` in the front browser that is not `readOnly` (fakeHeldNow, the predicate
+ * the hands' own fake calls); `user_idle` reports the same clock. `focus_app` /
+ * `open_app` change `frontApp`.
  */
 /** The one screen both helpers look at: the front app, the focused field, the front window's labels. */
 interface FakeScreen {
@@ -199,11 +232,11 @@ export class RecordingHands implements NativeHands {
     if (this.hold === op && this.release_ === undefined) await new Promise<void>((r) => (this.release_ = r));
     if (FAKE_ACTING_OPS.has(op)) {
       // As the helper does, before its first CGEvent.post: Kevin's hands on the machine → nothing is posted.
-      if (this.busyCheck && params["ownDriver"] !== true && this.kevinAt !== undefined) {
-        const ms = this.now() - this.kevinAt;
-        if (ms < KEVIN_QUIET_MS) throw new NativeRequestError({ code: "busy", message: `${HANDS_BUSY_PREFIX} ${Math.max(0, Math.round(ms))} ms ago; nothing was posted` });
-      }
+      this.guardBusy(params);
       this.posted.push({ op, params, at });
+    } else if (fakeHeldNow(op, params, this.frontApp)) {
+      // The pointer jumping, an app pulled over the one he types in, or the page under his keys replaced or scripted, steps on him as a click does.
+      this.guardBusy(params);
     }
     switch (op) {
       case "hello":
@@ -250,6 +283,12 @@ export class RecordingHands implements NativeHands {
   }
   named(op: string): { op: string; params: Record<string, unknown>; at: number }[] {
     return this.ops.filter((o) => o.op === op);
+  }
+  /** The helper's busy check: Kevin's key, click or scroll within KEVIN_QUIET_MS → `busy`, unless the op says `ownDriver`. */
+  private guardBusy(params: Record<string, unknown>): void {
+    if (!this.busyCheck || params["ownDriver"] === true || this.kevinAt === undefined) return;
+    const ms = this.now() - this.kevinAt;
+    if (ms < KEVIN_QUIET_MS) throw new NativeRequestError({ code: "busy", message: `${HANDS_BUSY_PREFIX} ${Math.max(0, Math.round(ms))} ms ago; nothing was posted` });
   }
 }
 
@@ -504,7 +543,140 @@ export class FakeMemoryService implements MemoryServiceLike {
     this.consolidations++;
     return { merged: 0, archived: 0, done: true };
   }
+  /** Keywords only: nothing to re-embed, ever. */
+  async reembed(): Promise<number> {
+    this.reembeds++;
+    return 0;
+  }
+  reembeds = 0;
   flush(): void {}
+}
+
+// ---- the local model server, faked ----------------------------------------------------------
+// `EngineOptions.discoverLocal` answers discovery from a scripted status; the brain and memory
+// still talk to a server, so a tiny HTTP stand-in answers the reads the daemon makes of Ollama
+// (/v1/models for the compatible probe, /api/generate for warm-up and cool, /api/chat is never
+// reached in these tests, /api/embed or /v1/embeddings and /v1/chat/completions for memory). Anything
+// else is recorded as a violation — the never-writes pin, as the brain's own tests keep it.
+
+const GIB = 1024 ** 3;
+
+/** One tool-capable, vision-capable Ollama model as discovery would list it (17 GB, 256k trained). */
+export function localModel(id: string, over: Partial<LocalModel> = {}): LocalModel {
+  return { id, capabilities: ["completion", "tools", "vision", "thinking"], sizeBytes: 17e9, contextLength: 262_144, family: "qwen35", parameterSize: "27B", modifiedAt: 1_757_000_000_000, fit: "good", loaded: false, cloud: false, ...over };
+}
+
+/** A reachable Ollama at `baseUrl` with these models (checkedAt now, so the brain reuses the engine's look instead of discovering again). */
+export function localStatus(baseUrl: string, models: readonly LocalModel[], over: Partial<LocalServerStatus> = {}): LocalServerStatus {
+  return { reachable: true, flavor: "ollama", version: "0.34.0", baseUrl, models, ramBytes: 128 * GIB, checkedAt: Date.now(), ...over };
+}
+
+/** Nothing answering on this Mac. */
+export function localNone(over: Partial<LocalServerStatus> = {}): LocalServerStatus {
+  return { reachable: false, baseUrl: "", models: [], ramBytes: 128 * GIB, checkedAt: Date.now(), ...over };
+}
+
+export interface FakeLocalRequest {
+  method: string;
+  path: string;
+  body: unknown;
+  /** The request headers, lower-cased names (`authorization` is what the bearer tests read). */
+  headers: Record<string, string>;
+}
+
+export interface FakeLocalServer {
+  url: string;
+  /** Every request, in order. */
+  seen: FakeLocalRequest[];
+  /** Requests outside the never-writes allowlist (pull, delete, create, copy, push, download, load). */
+  violations: string[];
+  /** The model ids /v1/models lists. */
+  models: string[];
+  /** What POST /api/embed answers: a unit vector of `dims` per input (0 = answer 404, "not pulled"). */
+  embedDims: number;
+  /** What POST /v1/chat/completions answers as `choices[0].message.content` (an extractor's JSON), or a status. */
+  chat: { status: number; content: string };
+  /** What GET /v1/models answers when not 200 (401: a server that wants a token it was not given) — the compatible probe's refusal. */
+  modelsStatus: number;
+  /** Runs on every request before it is answered: a test's hook into the moment a probe is in flight. */
+  before: ((r: FakeLocalRequest) => void) | undefined;
+  close(): Promise<void>;
+}
+
+const LOCAL_READS: ReadonlyArray<{ method: string; path: string }> = [
+  { method: "GET", path: "/api/version" },
+  { method: "GET", path: "/api/tags" },
+  { method: "POST", path: "/api/show" },
+  { method: "GET", path: "/api/ps" },
+  { method: "GET", path: "/v1/models" },
+  { method: "POST", path: "/api/chat" },
+  { method: "POST", path: "/api/generate" },
+  { method: "POST", path: "/api/embed" },
+  { method: "POST", path: "/v1/chat/completions" },
+  { method: "POST", path: "/v1/embeddings" },
+  { method: "GET", path: "/api/v0/models" },
+  { method: "GET", path: "/health" },
+  { method: "GET", path: "/props" },
+];
+
+export async function fakeLocalServer(models: readonly string[] = ["qwen3.5:27b"]): Promise<FakeLocalServer> {
+  const fake: FakeLocalServer = { url: "", seen: [], violations: [], models: [...models], embedDims: 768, chat: { status: 200, content: JSON.stringify({ items: [] }) }, modelsStatus: 200, before: undefined, close: async () => undefined };
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const raw = Buffer.concat(chunks).toString("utf8");
+      let body: unknown;
+      try {
+        body = raw ? JSON.parse(raw) : undefined;
+      } catch {
+        body = raw;
+      }
+      const method = req.method ?? "";
+      const path = (req.url ?? "").split("?")[0] ?? "";
+      const headers = Object.fromEntries(Object.entries(req.headers).map(([k, v]) => [k.toLowerCase(), Array.isArray(v) ? v.join(", ") : (v ?? "")]));
+      const seen: FakeLocalRequest = { method, path, body, headers };
+      fake.seen.push(seen);
+      fake.before?.(seen);
+      const answer = (status: number, json: unknown): void => {
+        res.writeHead(status, { "content-type": "application/json" });
+        res.end(JSON.stringify(json));
+      };
+      if (!LOCAL_READS.some((a) => a.method === method && a.path === path) || (path === "/api/generate" && (typeof body !== "object" || body === null || !("keep_alive" in body) || "prompt" in body))) {
+        fake.violations.push(`${method} ${path}`);
+        return answer(500, { error: `never-writes: ${method} ${path}` });
+      }
+      if (path === "/api/version") return answer(200, { version: "0.34.0" });
+      if (path === "/v1/models") {
+        if (fake.modelsStatus !== 200) return answer(fake.modelsStatus, { error: { message: fake.modelsStatus === 401 ? "Invalid API key" : "no" } });
+        return answer(200, { object: "list", data: fake.models.map((id) => ({ id, object: "model", owned_by: "library" })) });
+      }
+      if (path === "/api/generate") return answer(200, { model: (body as { model?: string }).model, done: true, done_reason: (body as { keep_alive?: unknown }).keep_alive === 0 ? "unload" : "load" });
+      if (path === "/api/embed") {
+        if (fake.embedDims === 0) return answer(404, { error: `model '${(body as { model?: string }).model}' not found` });
+        const input = (body as { input: string[] }).input;
+        return answer(200, { model: (body as { model?: string }).model, embeddings: input.map((_, i) => Array.from({ length: fake.embedDims }, (_x, k) => (k === i % fake.embedDims ? 1 : 0.0001 * (i + 1)))) });
+      }
+      if (path === "/v1/embeddings") {
+        // LM Studio and llama.cpp speak the OpenAI shape: one vector per input, `embedDims` wide.
+        const input = (body as { input: string[] }).input;
+        return answer(200, { object: "list", model: (body as { model?: string }).model, data: input.map((_, i) => ({ object: "embedding", index: i, embedding: Array.from({ length: fake.embedDims }, (_x, k) => (k === i % fake.embedDims ? 1 : 0.0001 * (i + 1))) })) });
+      }
+      if (path === "/v1/chat/completions") {
+        if (fake.chat.status !== 200) return answer(fake.chat.status, { error: { message: "no" } });
+        return answer(200, { id: "c1", object: "chat.completion", model: (body as { model?: string }).model, choices: [{ index: 0, message: { role: "assistant", content: fake.chat.content }, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 5 } });
+      }
+      return answer(404, { error: `no fake for ${method} ${path}` });
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  fake.url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  fake.close = () =>
+    new Promise<void>((r) => {
+      server.closeAllConnections();
+      server.close(() => r());
+    });
+  return fake;
 }
 
 export interface BrainState {
@@ -530,9 +702,6 @@ export interface FakeThreadBrain {
   resolve: ((r: BrainResult) => void) | undefined;
 }
 
-/** @deprecated the same record, under the workers pass's name. */
-export type FakeWorkerBrain = FakeThreadBrain;
-
 /** What a scripted thread turn sees. Return a result to finish the turn; return undefined to hold it for `brain.resolve`. */
 export interface ThreadJob {
   readonly brain: FakeThreadBrain;
@@ -541,9 +710,6 @@ export interface ThreadJob {
   /** The thread's own lane runner: `runner.run("type", …)` goes through its lane's rules. */
   readonly runner: ToolRunner;
 }
-
-/** @deprecated the same, under the workers pass's name. */
-export type WorkerJob = ThreadJob;
 
 export interface ThreadWorld {
   /** Every thread brain the engine built, in order (the spares included). */
@@ -556,12 +722,9 @@ export interface ThreadWorld {
   byName(name: string): FakeThreadBrain | undefined;
 }
 
-/** @deprecated the same, under the workers pass's name. */
-export type WorkerWorld = ThreadWorld;
-
-/** The thread's name from the brief a task carries (`threadBrief` opens with it); the old `<liveId>/<name>` shape is read too. */
+/** The thread's name from the brief a task carries (`threadBrief` opens with it); a test that names the delegation `<liveId>/<name>` is read too. */
 export function threadNameOf(task: BrainTask): string | undefined {
-  const m = /^Hormes \(to its (?:thread|worker) ([^)]+)\)/.exec(task.dialogue);
+  const m = /^Hormes \(to its thread ([^)]+)\)/.exec(task.dialogue);
   if (m?.[1]) return m[1];
   const tail = task.delegationId.split("/").pop();
   return tail && !/^dlg_/.test(tail) ? tail : undefined;
@@ -573,48 +736,105 @@ export interface World {
   live: FakeLive;
   /** Every session the engine opened, in order; a resume or a re-wake appends one. `lives.at(-1)` is the current. */
   lives: FakeLive[];
-  /** The acting helper: the main brain's, dictation's and screen-lane workers' ops. */
+  /** The acting helper: the main brain's, dictation's and screen-lane threads' ops. */
   hands: RecordingHands;
-  /** The reading helper: the AX warm tick, ear hints, the wake shot, `user_idle`, background workers' ops. */
+  /** The reading helper: the AX warm tick, ear hints, the wake shot, `user_idle`, background threads' ops. */
   handsBg: RecordingHands;
   events: EngineEvent[];
   overlays: OverlayCommand[];
   audio: Buffer[];
   brain: BrainState;
-  /** The spawned threads' fake brains (`threads` and `workers` are the same object; `workers` is the old name). */
+  /** The spawned threads' fake brains. */
   threads: ThreadWorld;
-  workers: ThreadWorld;
   /** The memory module's stand-in the engine was built over (undefined when a test injected its own seams). */
   memory: FakeMemoryService | undefined;
   clock: { t: number };
   dir: string;
 }
 
+/** No shell: the engine's own shell-outs (the Dock read) answer "not found" unless a test scripts `exec`, so no test ever reads Kevin's Dock. Every `new Engine` in a test passes it. */
+export const noShell: Exec = () => ({ code: 127, stdout: "", stderr: "no shell in tests" });
+
+const tempDirs = new Set<string>();
+let tempDirsSwept = false;
+
+/**
+ * A fresh dir under the OS temp dir, removed when the test process exits (BL-14). A test may hand
+ * it to a second engine until then (`where.dir`), so nothing is removed earlier. A dir that cannot
+ * be removed at exit stays: a throw inside an 'exit' handler would fail a file whose tests passed.
+ */
+export function tempDir(prefix: string): string {
+  if (!tempDirsSwept) {
+    tempDirsSwept = true;
+    process.once("exit", () => {
+      for (const dir of tempDirs) {
+        try {
+          rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // Still busy (a child the test left writing into it): it stays, as the preload's own sweep leaves it.
+        }
+      }
+    });
+  }
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  tempDirs.add(dir);
+  return dir;
+}
+
+/**
+ * The config a test engine runs on: what readConfig() gives on a Mac with nothing set (no key, no
+ * server URL, `auto`, the default models), over `<dir>/state`, with the hands helper at a path that
+ * does not exist. Never readConfig(): it loads ~/.hormes/env and the shell's keys into the test,
+ * and from there into every request a test engine makes (BL-12). A test names what it needs in `over`.
+ * scripts/__tests__/hermetic.test.ts holds these defaults to readConfig()'s, so a default changed in
+ * packages/core/src/env.ts fails there until this follows.
+ */
+export function testConfig(dir: string, over: Partial<HormesConfig> = {}): HormesConfig {
+  return {
+    openaiApiKey: undefined,
+    anthropicApiKey: undefined,
+    liveModel: "gpt-live-1",
+    liveVoice: "ballad",
+    brain: "auto",
+    brainModel: "",
+    brainEffort: "medium",
+    brainBaseUrl: undefined,
+    brainApiKey: undefined,
+    stateDir: join(dir, "state"),
+    socketPath: join(dir, "state", "j.sock"),
+    idleSleepMinutes: 10,
+    logLevel: "info",
+    claudeBin: undefined,
+    codexBin: undefined,
+    handsBin: join(dir, "no-hands"),
+    memoryModel: undefined,
+    ...over,
+  };
+}
+
+/** The global fetch as the test preload left it, read once when this module loads. */
+const preloadFetch = globalThis.fetch;
+
+/**
+ * The fetch a world's engine is given: every request answered 401, as a server answers a key it does not know, so
+ * nothing leaves the process. A test that put its own fetch on globalThis (user-name's F4 model probe) gets that one.
+ */
+export const refusingFetch: typeof fetch = async (input, init) => {
+  if (globalThis.fetch !== preloadFetch) return globalThis.fetch(input, init);
+  return new Response(JSON.stringify({ error: { message: "Incorrect API key provided (test)", code: "invalid_api_key" } }), { status: 401, headers: { "content-type": "application/json" } });
+};
+
 /**
  * `where.dir` reuses another world's state dir (its ledger, its settings) — a second engine
  * over the same day. `where.firstSessionId` names that engine's first FakeLive (default
  * `sess_1`), so two engines over one ledger do not write the same session id twice.
  * `where.oneHands` gives both helpers the same RecordingHands (a test that patches
- * `hands.request` and does not care which helper answered).
+ * `hands.request` and does not care which helper answered). `where.select`: no injected
+ * brain, so the engine walks its real selection (over `extra.brainOf`'s fakes).
  */
-/** No shell: the engine's own shell-outs (the Dock read) answer "not found" unless a test scripts `exec`, so no test ever reads Kevin's Dock. Every `new Engine` in a test passes it. */
-export const noShell: Exec = () => ({ code: 127, stdout: "", stderr: "no shell in tests" });
-
-export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?: string; readonly firstSessionId?: string; readonly noHands?: boolean; readonly oneHands?: boolean } = {}): World {
-  const dir = where.dir ?? mkdtempSync(join(tmpdir(), "jh-engine-"));
-  const config: HormesConfig = {
-    ...readConfig(),
-    openaiApiKey: "sk-test-not-used",
-    brain: "auto",
-    brainModel: "",
-    brainBaseUrl: undefined,
-    anthropicApiKey: undefined,
-    claudeBin: undefined,
-    codexBin: undefined,
-    handsBin: join(dir, "no-hands"),
-    stateDir: join(dir, "state"),
-    socketPath: join(dir, "state", "j.sock"),
-  };
+export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?: string; readonly firstSessionId?: string; readonly noHands?: boolean; readonly oneHands?: boolean; readonly select?: boolean } = {}): World {
+  const dir = where.dir ?? tempDir("jh-engine-");
+  const config = testConfig(dir, { openaiApiKey: "sk-test-not-used" });
   let engine!: Engine;
   const brainState: BrainState = { cancels: 0, cancelDelayMs: 0, resolve: undefined, tasks: [] };
   const brain: Brain = {
@@ -638,8 +858,7 @@ export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?
     },
     stop: async () => undefined,
   };
-  // Thread brains: one fake per spawned thread, scripted by the test. The engine's option is still
-  // named `makeWorkerBrain` (engine.ts); `makeThreadBrain` is the seam every new test reads.
+  // Thread brains: one fake per spawned thread, scripted by the test.
   const threads: ThreadWorld = {
     brains: [],
     script: undefined,
@@ -691,11 +910,12 @@ export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?
   // One FakeLive per session: the first exists before the wake (tests hold it as `live`);
   // every wake after that — a resume, a re-wake — gets a fresh one, as the engine does.
   const first = where.firstSessionId ?? "sess_1";
-  const live = new FakeLive(first);
+  const clock = { t: 1_757_500_000_000 };
+  const live = new FakeLive(first, () => clock.t);
   const lives: FakeLive[] = [live];
   let opened = 0;
   const makeLive = (config: SessionConfig): LiveSession => {
-    const l = lives[opened] ?? new FakeLive(where.firstSessionId ? `${first}_${opened + 1}` : `sess_${opened + 1}`);
+    const l = lives[opened] ?? new FakeLive(where.firstSessionId ? `${first}_${opened + 1}` : `sess_${opened + 1}`, () => clock.t);
     if (!lives.includes(l)) lives.push(l);
     opened++;
     l.config = config;
@@ -705,7 +925,6 @@ export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?
   const handsBg = where.oneHands ? hands : new RecordingHands();
   // One Mac, one screen: what the acting helper fronts is what the reading helper reads.
   if (handsBg !== hands) handsBg.shareScreenWith(hands);
-  const clock = { t: 1_757_500_000_000 };
   hands.now = () => clock.t;
   handsBg.now = () => clock.t;
   // The memory module never loads by name in a test (no store on disk, no network from an extractor or an
@@ -715,7 +934,12 @@ export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?
   // `where.noHands`: no stand-in helper — the binary at config.handsBin does not exist, so the engine sees a helper that is not built.
   // `observeSettleMs: 0`: the observer's 150 ms settle before it reads the screen after an acting tool is real time
   // (an app's reaction), pointless against a fake helper that answers at once; the `now:` line itself still lands.
-  engine = new Engine({ config, connectors: [], brain, ...(where.noHands ? {} : { hands, backgroundHands: handsBg }), makeLive, now: () => clock.t, earStableMs: 40, earCarefulMs: 70, observeSettleMs: 0, makeWorkerBrain: makeThreadBrain, exec: noShell, ...(fakeMemory ? { memory: { service: fakeMemory } } : {}), ...extra });
+  // `probe: false`, `fetch` and `discoverLocal`: no start-up key check against api.openai.com, a 401 for the key
+  // check Retry runs and for memory's model pick (what a server says to a key it does not know), and no look at the
+  // loopback ports (V14 / BL-12), so a world passes under HORMES_TEST_NET=strict. A test that wants any passes its own.
+  // `ownsStateDir`: a world is the daemon's engine (it holds the dir, so its start closes what a dead one left open);
+  // a test of `hormes live` beside it passes `{ ownsStateDir: false }`.
+  engine = new Engine({ config, connectors: [], ownsStateDir: true, ...(where.select ? {} : { brain }), fallbackUserName: "Kevin", ...(where.noHands ? {} : { hands, backgroundHands: handsBg }), makeLive, now: () => clock.t, earStableMs: 40, earCarefulMs: 70, observeSettleMs: 0, makeThreadBrain, exec: noShell, probe: false, fetch: refusingFetch, discoverLocal: async () => localNone(), ...(fakeMemory ? { memory: { service: fakeMemory } } : {}), ...extra });
   // The real service's audit rows reach the ledger through the bridge's onRow; the fake's do the same here.
   if (fakeMemory) fakeMemory.onRow = (row) => engine.ledger.append(row);
   const events: EngineEvent[] = [];
@@ -724,7 +948,7 @@ export function world(extra: Partial<EngineOptions> = {}, where: { readonly dir?
   engine.on("event", (e) => events.push(e));
   engine.on("overlay", (c) => overlays.push(c));
   engine.on("audio", (pcm) => audio.push(pcm));
-  return { engine, live, lives, hands, handsBg, events, overlays, audio, brain: brainState, threads, workers: threads, memory: fakeMemory, clock, dir };
+  return { engine, live, lives, hands, handsBg, events, overlays, audio, brain: brainState, threads, memory: fakeMemory, clock, dir };
 }
 
 export const settle = (ms = 30): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -752,6 +976,17 @@ export function nextUtterance(w: World): void {
 /** Ledger rows of one type for the world's day, in order. */
 export function rows<T extends { type: string }>(w: World, type: string): T[] {
   return (w.engine.ledger.read(w.clock.t) as unknown as T[]).filter((r) => r.type === type);
+}
+
+/**
+ * A wall-clock bound that holds on a quiet Mac and flakes on a loaded one: the first timing is taken as it came, and
+ * only when it is over `bound` is the same path timed again (`again`, on fresh state), up to `tries` timings in all;
+ * the best is kept. A slow path is slow every time; a loaded Mac's one stall is not. The bound never moves.
+ */
+export async function bestOf(first: number, bound: number, again: () => number | Promise<number>, tries = 5): Promise<number> {
+  let best = first;
+  for (let i = 1; i < tries && !(best < bound); i++) best = Math.min(best, await again());
+  return best;
 }
 
 /** Wait until `cond` holds (polled every 10 ms) or `ms` pass; returns whether it held. */

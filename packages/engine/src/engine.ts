@@ -1,27 +1,40 @@
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, statfsSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { HANDS_OFF_APPS, classifyAction, writeEnvSecrets, secretsPresent, Ledger, Trash, logger, newId, readConfig, type HormesConfig, type SweepResult } from "@hormes/core";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from "node:fs";
+import { homedir, totalmem } from "node:os";
+import { basename, join } from "node:path";
+import { HANDS_OFF_APPS, PRESENCE_WINDOW_MS, REPO_ROOT, accountFullName, classifyAction, dataPaths, effectiveUserName, noLiveModelLine, isLoopbackHost, presenceGated, writeEnvSecrets, secretsPresent, Ledger, Trash, logger, newId, readConfig, type HormesConfig, type SweepResult } from "@hormes/core";
 import { LiveSession, Transcript, buildLiveInstructions, classifyLiveError, languageSection, type SessionConfig } from "@hormes/live";
-import { ComputerToolset, ConfirmationDesk, ConfirmationState, DEFAULT_SHOT_BUDGET, FocusLease, HELPER_PERMISSION_KINDS, HandsPool, QUICK_SHOT_BUDGET, ScreenStateCache, SplitHands, YES_PATTERN, axLabels, fakeHandsSpawn, renderCompositeLook, type ActionEvent, type AxNodeInfo, type AxTreeResult, type ElementInfo, type FocusedText, type FrontmostInfo, type HelloPermissions, type HelperPermissionKind, type NativeHands, type NativeHandsProcess, type ScreenshotResult, type ToolResult, type ToolsetOptions, type WindowInfo } from "@hormes/hands";
+import { ComputerToolset, ConfirmationDesk, ConfirmationState, DEFAULT_SHOT_BUDGET, FocusLease, HELPER_PERMISSION_KINDS, HandsPool, QUICK_SHOT_BUDGET, ScreenStateCache, SplitHands, YES_PATTERN, axLabels, fakeHandsSpawn, renderCompositeLook, type ActionEvent, type AxNodeInfo, type AxTreeResult, type ElementInfo, type FocusedText, type FrontmostInfo, type HelloPermissions, type HelperPermissionKind, type NativeHands, type NativeHandsProcess, type ScreenshotResult, type ToolResult, type ToolsetOptions, type UserIdle, type WindowInfo } from "@hormes/hands";
 import { AgentRegistry, DEFAULT_PAGE, defaultConnectors, splitAgentId, type AgentConnector, type TranscriptDelta, type TranscriptOptions, type TranscriptPage } from "@hormes/agents";
-import { BROWSER_APPS, ClaudeBrain, Delegator, FiredReflexes, RECONCILE_THRESHOLD, ReflexRunner, ResponsesBrain, normalizeUtterance, responsesDelegationConfig, screenNote, similarity, type Brain, type BrainAttachment, type BrainSink, type BrainTask, type DelegatorOptions, type Reconciliation, type Reflex, type ReflexOutcome, type RunOutcome, type RunnerOptions, type ToolRunner } from "@hormes/brain";
-import { INSTALLED_URL, HORMES_BUNDLE_ID, defaultExec, describeDock, describeDockChanges, readDock, repairDock, restartDock, type DockAudit, type Exec } from "@hormes/cli/install";
+import { BROWSER_APPS, ClaudeBrain, Delegator, FiredReflexes, LOCAL_NUM_CTX_MIN, LocalBrain, RECONCILE_THRESHOLD, ReflexRunner, ResponsesBrain, addressesHormes, discoverLocalServer, foreignModel, normalizeUtterance, parseReflex, resolveLocalModel, responsesDelegationConfig, screenNote, serverLabel, similarity, suggestedPull, type Brain, type BrainAttachment, type BrainResult, type BrainSink, type BrainTask, type CodexProbe, type DelegatorThreads, type Reconciliation, type Reflex, type ReflexOutcome, type RunOutcome, type RunnerOptions, type ToolRunner } from "@hormes/brain";
+import { INSTALLED_URL, HORMES_BUNDLE_ID, defaultExec, describeDock, describeDockChanges, describeHelperTiles, readDock, readRunning, repairDock, restartDock, type DockAudit, type Exec, type RunningApp } from "@hormes/install";
 import { EarReflexes, STOP_NAME_WAIT_MS, type ReflexLedgerRow } from "./ear.ts";
-import { MemoryBridge, type MemoryBridgeSeams } from "./memory-bridge.ts";
+import { MemoryBridge, type LocalMemoryTarget, type MemoryBridgeSeams } from "./memory-bridge.ts";
+import { AudioTelemetry } from "./audio-telemetry.ts";
+import { EXCHANGE_MAX_MS, EXCHANGE_WINDOW_MS, VoiceAttention, type Verdict, type VoiceGrant } from "./voice-attention.ts";
 import { ActionObserver, ActingSerializer } from "./observe.ts";
-import { LaneRunner, ThreadLog, ThreadScheduler, ThreadTable, WorkerAwareRunner, type ThreadBrainFactory, type ThreadParent, type ThreadVoice } from "./threads/index.ts";
+import { LaneRunner, ThreadAwareRunner, ThreadLog, ThreadScheduler, ThreadTable, type ThreadBrainFactory, type ThreadBrainSpec, type ThreadParent, type ThreadVoice } from "./threads/index.ts";
+import { Automations, keepRecipeTrash, type AutomationExec, type ShellGate, type ShellRunner } from "./automations/index.ts";
 import {
+  ACCENTS,
+  BRAIN_KINDS,
   DEFAULT_SETTINGS,
   DEFAULT_WAKE,
+  LOCAL_NONE,
   MAIN_THREAD_ID,
+  SESSION_LOST_REASON,
+  SETTINGS_KEYS,
+  audioSettingsOf,
+  grantOf,
   THREAD_PAGE,
   THREAD_TERMINAL,
+  VOICES,
   type Accent,
   type AgentInfo,
   type AgentMessage,
   type AgentStatus,
   type AudioLevels,
+  type AudioState,
   type ConnectorHealth,
   type Delegation,
   type DelegationStatus,
@@ -30,6 +43,7 @@ import {
   type EngineCommand,
   type EngineEvent,
   type LedgerRow,
+  type LocalServerStatus,
   type OverlayCommand,
   type PauseInfo,
   type Permissions,
@@ -46,6 +60,7 @@ import {
   type SetupStatus,
   type SleepCause,
   type Snapshot,
+  type SystemSignal,
   type Thread,
   type ThreadEntry,
   type TranscriptItem,
@@ -66,6 +81,249 @@ import type { Grant, PermissionInfo, PermissionKind } from "@hormes/protocol";
  */
 
 const log = logger("engine");
+
+/** A brain kind the selection can start (`auto` resolves to one of these). */
+export type SelectableBrain = Exclude<Settings["brain"], "auto">;
+
+/** What the Console and the voice call each brain. */
+const BRAIN_LABELS: Readonly<Record<SelectableBrain, string>> = {
+  codex: "Codex",
+  "claude-code": "Claude Code",
+  "anthropic-api": "Anthropic API",
+  "openai-compatible": "OpenAI-compatible",
+  local: "Local",
+  "openai-responses": "OpenAI Responses",
+};
+
+/** How each brain gets its login or key back, for the signed-out row. */
+const SIGN_IN_HINTS: Readonly<Record<SelectableBrain, string>> = {
+  codex: "Run codex login, then press Retry.",
+  "claude-code": "Run claude auth login, then press Retry.",
+  "anthropic-api": "Check ANTHROPIC_API_KEY in Setup, then press Retry.",
+  "openai-compatible": "Check the brain's key in Setup, then press Retry.",
+  local: "Check the brain's key in Setup, then press Retry.",
+  "openai-responses": "Check OPENAI_API_KEY in Setup, then press Retry.",
+};
+
+/** The brains a key lets in: a 401 from one of them is a refused key, never a lost login. */
+const KEY_BRAINS: ReadonlySet<SelectableBrain> = new Set(["anthropic-api", "openai-compatible", "local", "openai-responses"]);
+
+/**
+ * What a refused login or key is called, after the brain's name: "Codex is signed out", "Anthropic API brain's key
+ * was refused". `brain`: the row's own wording, "Codex brain is signed out".
+ */
+function lostWords(kind: SelectableBrain | undefined, label: string, o: { readonly brain?: boolean } = {}): string {
+  if (kind && KEY_BRAINS.has(kind)) return `${label} brain's key was refused`;
+  return `${label}${o.brain ? " brain" : ""} is signed out`;
+}
+
+/**
+ * Why a brain failed a task, when the cause is the brain itself and not the task (E-SIGNEDOUT). `quota`: a usage
+ * limit or a quota that lasts hours or needs billing (Codex's "try again in 2 hours", OpenAI's insufficient_quota).
+ * `rate`: a passing limit (a 429, an overloaded server) that a minute clears.
+ */
+export type BrainFailure = "auth" | "quota" | "rate" | "unreachable";
+
+// A login or key the server refused. Read from the brains' own error lines (Codex's "401 Unauthorized: Your
+// authentication token has expired", Claude Code's "Invalid API key · Please run /login", the SDKs' 401s).
+const AUTH_FAILURE = /\b401\b|unauthori[sz]ed|authentication|invalid (?:x-)?api[ _-]?key|incorrect api key|is rejected by the api|token (?:has )?expired|expired (?:token|login|credentials)|not (?:signed|logged) in|signed out|(?:log|sign)(?:ging)? ?in again|please run \/login|codex login|claude auth login/i;
+// Read before RATE_FAILURE: OpenAI's insufficient_quota comes as a 429 too.
+const QUOTA_FAILURE = /usage limit|quota|\b\d+-hour limit|(?:daily|weekly|monthly) limit|credit balance|billing/i;
+const RATE_FAILURE = /rate[ _-]?limit|too many requests|\b429\b|overloaded|\b529\b/i;
+const UNREACHABLE_FAILURE = /could not reach|did not answer within|fetch failed|socket hang up|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|network (?:error|is unreachable)|service unavailable|\b50[234]\b/i;
+// The brains' own words for a task that ran and did not finish: never a fault of the brain's login or line.
+const TASK_FAILURE = /^(?:the model declined|I stopped after|I ran out of time|already handling a task|the answer was cut off|the task no longer fits)/i;
+
+/** The brain's own fault in a failed task's error, or undefined when the task failed on its own terms. */
+export function classifyBrainFailure(error: string | undefined): BrainFailure | undefined {
+  const text = String(error ?? "").trim();
+  if (!text || TASK_FAILURE.test(text)) return undefined;
+  if (AUTH_FAILURE.test(text)) return "auth";
+  if (QUOTA_FAILURE.test(text)) return "quota";
+  if (RATE_FAILURE.test(text)) return "rate";
+  if (UNREACHABLE_FAILURE.test(text)) return "unreachable";
+  return undefined;
+}
+
+/**
+ * What a run of typed text costs on an append, judged by its script (V5): ASCII at 3.2 characters a token (the
+ * appender's rate), any other character at half its UTF-8 bytes: one token for Cyrillic or Greek, 1.5 for CJK, two
+ * for an emoji. Conservative on purpose: an append over the 500-token cap is refused and Kevin hears nothing.
+ */
+function typedCost(text: string): number {
+  let ascii = 0;
+  let other = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp < 0x80) ascii++;
+    else other += cp < 0x800 ? 1 : cp < 0x10000 ? 1.5 : 2;
+  }
+  return ascii / 3.2 + other;
+}
+
+/** `typedCost` in whole tokens. */
+export function typedTokens(text: string): number {
+  return Math.ceil(typedCost(text));
+}
+
+/**
+ * A long typed text in parts of at most `budget` tokens (V5), its line breaks kept: whole paragraphs where they fit,
+ * else whole lines, else sentences, else a cut between characters. Every character arrives, in order; only the
+ * whitespace at a cut is dropped.
+ */
+export function splitTyped(text: string, budget: number): string[] {
+  const levels: readonly ((s: string) => string[])[] = [
+    (s) => s.split(/(?<=\n[ \t]*\n)/),
+    (s) => s.split(/(?<=\n)/),
+    (s) => s.split(/(?<=[.!?]["'”’)\]]*\s+)|(?<=[。！？])/),
+    (s) => Array.from(s),
+  ];
+  const parts: string[] = [];
+  let current = "";
+  let cost = 0;
+  const cut = (): void => {
+    const part = current.replace(/^[\r\n]+/, "").replace(/\s+$/, "");
+    if (part.trim()) parts.push(part);
+    current = "";
+    cost = 0;
+  };
+  const add = (unit: string, level: number): void => {
+    const c = typedCost(unit);
+    if (cost + c <= budget) {
+      current += unit;
+      cost += c;
+      return;
+    }
+    if (c <= budget || level >= levels.length) {
+      cut();
+      current = unit;
+      cost = c;
+      return;
+    }
+    for (const smaller of levels[level]!(unit)) add(smaller, level + 1);
+  };
+  for (const unit of levels[0]!(text)) add(unit, 1);
+  cut();
+  return parts;
+}
+
+/** The longest prefix of `text` within `budget` tokens, with an ellipsis when it was cut. */
+function cutToTokens(text: string, budget: number): string {
+  if (typedCost(text) <= budget) return text;
+  let out = "";
+  let cost = typedCost("…");
+  for (const ch of text) {
+    cost += typedCost(ch);
+    if (cost > budget) break;
+    out += ch;
+  }
+  return `${out.trimEnd()}…`;
+}
+
+/** What the selection knows about this Mac before it starts anything: enough to say which backends Kevin set up. */
+export interface BrainFacts {
+  readonly wanted: Settings["brain"];
+  readonly codex: Pick<CodexProbe, "bin" | "version" | "signedIn" | "detail">;
+  readonly claudeBin: string | undefined;
+  /** `~/.claude` exists: a Claude login may be there. */
+  readonly claudeHome: boolean;
+  readonly anthropicApiKey: string | undefined;
+  readonly baseUrl: string | undefined;
+}
+
+/**
+ * "Configured" means Kevin did something that names this backend: a binary and a login, a key, a server URL. Under
+ * `auto`, an unconfigured backend is skipped with a log line only; a configured one that cannot start gets a problem
+ * line, because that is a thing he can fix. Undefined when configured, else why not.
+ */
+export function brainNotConfigured(kind: SelectableBrain, f: BrainFacts): string | undefined {
+  switch (kind) {
+    case "codex":
+      if (!f.codex.bin) return f.codex.detail; // nothing installed
+      if (f.codex.version && !f.codex.signedIn) return f.codex.detail; // installed, never signed in
+      return undefined; // signed in — or a binary that will not run, which start() reports
+    case "claude-code":
+      // A binary or a Claude login folder. Not ANTHROPIC_API_KEY: the session runs on the Claude login and never
+      // receives the key (F-CLAUDE-KEY), so a key alone is the Anthropic API brain's, not this one's.
+      return f.claudeBin || f.claudeHome ? undefined : "no claude binary or Claude login on this Mac";
+    case "anthropic-api":
+      return f.anthropicApiKey ? undefined : "ANTHROPIC_API_KEY is not set";
+    case "openai-compatible":
+      return f.baseUrl ? undefined : "no server URL (Settings or HORMES_BRAIN_BASE_URL)";
+    case "openai-responses":
+      return undefined;
+    case "local":
+      // Never in AUTO_BRAIN_ORDER: a server another project left running is not a choice Kevin made.
+      return f.wanted === "local" ? undefined : "only when picked (Settings › Brain › Local model)";
+  }
+}
+
+/** A start the walk stopped waiting on (BRAIN_PATIENCE_MS): it goes on in the background and may take over later. */
+interface SlowStart {
+  /** Its place in the walk's order: lower outranks higher. */
+  readonly rank: number;
+  readonly kind: SelectableBrain;
+  readonly brain: Brain;
+  readonly label: string;
+  readonly starting: Promise<{ ready: boolean; detail: string }>;
+}
+
+/** A slow start that proved ready and outranks the brain in use: it takes over at the next quiet moment. */
+interface PendingSwap extends SlowStart {
+  readonly detail: string;
+  /** The selection pass it belongs to; a newer pass drops it. */
+  readonly seq: number;
+  readonly threadFactory: ThreadBrainFactory | undefined;
+}
+
+/** A brain the walk passes over until a restart for any other reason: a lost login, or a usage limit that lasts. */
+interface BrainSkip {
+  readonly failure: "auth" | "quota";
+  /** The brain's own words, trimmed. */
+  readonly why: string;
+}
+
+/**
+ * A line just queued to the open session, watched until the voice has said it (E-SIGNEDOUT's "Switching to the next
+ * brain"): `settled` resolves at its first output-transcript delta plus LINE_QUIET_MS with no delta and no audible
+ * frame, once the session is gone, after LINE_CAP_MS, or when `now()` is called.
+ */
+interface LineWatch {
+  readonly live: LiveSession;
+  readonly settled: Promise<void>;
+  now(): void;
+}
+
+/** A promise that resolves undefined once `ms` pass; `clear` disarms it. */
+function deadline(ms: number): { readonly passed: Promise<undefined>; clear(): void } {
+  let timer: NodeJS.Timeout | undefined;
+  const passed = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), ms);
+    timer.unref?.();
+  });
+  return { passed, clear: () => clearTimeout(timer) };
+}
+
+/**
+ * Write a file whole or not at all: a temp file beside it, flushed to disk, then renamed over it. A crash or a full
+ * disk mid-write leaves the old file, never a torn one (APP-8).
+ */
+function writeFileAtomic(path: string, text: string): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  try {
+    const fd = openSync(tmp, "w");
+    try {
+      writeSync(fd, text);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
 
 export interface EngineEvents {
   event: [event: EngineEvent];
@@ -100,7 +358,7 @@ export interface EngineOptions {
   /** The second helper's stand-in (the reading / background lane); absent, `hands` answers both. */
   readonly backgroundHands?: NativeHands;
   /** Builds a thread's brain over its lane runner (tests inject a scripted fake); absent, the engine builds one for the running brain kind. */
-  readonly makeWorkerBrain?: ThreadBrainFactory;
+  readonly makeThreadBrain?: ThreadBrainFactory;
   /** The observer's settle before it reads the screen after an acting tool (default OBSERVE_SETTLE_MS 150 / 400 for browser tools); tests set 0. */
   readonly observeSettleMs?: number;
   /** What a fresh helper process would print for `--permissions` (tests; the real client runs the binary). */
@@ -123,6 +381,35 @@ export interface EngineOptions {
   readonly dockAuditDelayMs?: number;
   /** The memory module's seams: a whole fake service (tests), or the embedder / extractor / fetch the real one is built over. */
   readonly memory?: MemoryBridgeSeams;
+  /** The name behind an unset `Settings.userName` (release F1); default: the account's full name, read once (`accountFullName`). Tests pin it. */
+  readonly fallbackUserName?: string;
+  /** Test seam: answers the local model server discovery instead of the three loopback ports. */
+  readonly discoverLocal?: (o: { baseUrl?: string | undefined; ramBytes: number }) => Promise<LocalServerStatus>;
+  /** False: start() makes no key check of its own (`probeSetup` still runs when asked). Tests pass false; the network is not theirs. */
+  readonly probe?: boolean;
+  /** The fetch `probeSetup` checks the OpenAI key with, and memory's model pick, embedder and extractor use (default the global one). */
+  readonly fetch?: typeof fetch;
+  /**
+   * Test seam for the selection walk: the brain each kind would start. A kind the record leaves out is not configured.
+   * The walk itself, its patience, the fallbacks and the runtime checks run unchanged (`brain` skips the walk instead).
+   */
+  readonly brainOf?: Partial<Record<SelectableBrain, () => Brain>>;
+  /** How long the walk waits on one brain's start before it takes the next ready one (BRAIN_PATIENCE_MS); tests shorten it. */
+  readonly brainPatienceMs?: number;
+  /**
+   * The automations' own seams (design11): the processes a fire starts (`open`, the
+   * `caffeinate` hold — fixed argv, recorded by the tests' fake), the shell a recipe runs
+   * through, the shell gate re-run on a recipe at fire (a test scripts `confirm`), and the
+   * event coalescer's window.
+   */
+  readonly automations?: { readonly exec?: AutomationExec | undefined; readonly shell?: ShellRunner | undefined; readonly shellGate?: ShellGate | undefined; readonly coalesceMs?: number | undefined; readonly home?: string | undefined } | undefined;
+  /**
+   * This process holds the state dir's daemon lock (`<stateDir>/hormesd.lock`; daemon/main.ts sets it once the lock is
+   * taken). Only then does start() close what a dead daemon left open: its session (`session.closed`, reason
+   * SESSION_LOST_REASON) and its live threads (`thread.ended`). Off by default: `hormes live` or `probe` beside a
+   * running daemon must not close the daemon's live session as lost, or the day would bill it twice.
+   */
+  readonly ownsStateDir?: boolean;
 }
 
 /** Where a page's messages sit in the session file (`TranscriptPage.cursor`); "Load earlier" reads backward from `startOffset`. */
@@ -177,6 +464,9 @@ interface LostSession {
 
 const SETTINGS_FILE = "settings.json";
 
+/** What the gap before a resumed session was: a pause Kevin chose, an engine restart, a server drop, or a voice change. */
+type ResumeHow = "paused" | "restarted" | "reconnected" | "voice change";
+
 export class Engine extends EventEmitter<EngineEvents> {
   /** Re-read after `config.set-secrets`; everything else treats it as constant. */
   config: HormesConfig;
@@ -192,6 +482,11 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** Kevin cleared the Now stream at this wall-clock ms: items at or before it are hidden from the snapshot only. */
   private nowClearedAt: number | undefined;
   /**
+   * One utterance counter for the engine's life: every session's Transcript draws its ids from
+   * here, so a held `t_n` and a live `t_n` never meet in one snapshot (the Console keys rows by id).
+   */
+  private utteranceSeq = 0;
+  /**
    * The open session's transcript. Session-timeline ms restart with every session,
    * so each gets its own: a Delegator's request window (`since(lastDelegationEnd)`)
    * over a shared one would carry every earlier utterance into a resumed session's
@@ -203,22 +498,28 @@ export class Engine extends EventEmitter<EngineEvents> {
   readonly confirmations = new ConfirmationState();
   /** The one question floor over `confirmations`: every lane — the main one included — asks through it; the root keeps the slot the Delegator arms. */
   readonly desk: ConfirmationDesk;
-  /** Two helper processes, one binary, one parent: `focus` acts, `background` reads and serves background workers. */
+  /** Two helper processes, one binary, one parent: `focus` acts, `background` reads and serves background threads. */
   readonly pool: HandsPool;
   /** The acting helper (`pool.focus`), under the name every caller knows. */
   readonly hands: NativeHandsProcess;
-  /** One holder of the pointer, keyboard and frontmost app: Hormes's own hands with priority, workers in turn. */
+  /** One holder of the pointer, keyboard and frontmost app: Hormes's own hands with priority, threads in turn. */
   readonly lease: FocusLease;
   readonly toolset: ComputerToolset;
   readonly agents: AgentRegistry;
-  /** The main lane's runner: `thread_*` (and the `worker_*` aliases) answered from the scheduler, screen tools under the lease, every acting result observed and serialized. */
-  readonly runner: WorkerAwareRunner;
+  /** The main lane's runner: `thread_*` answered from the scheduler, screen tools under the lease, every acting result observed and serialized. */
+  readonly runner: ThreadAwareRunner;
   /**
    * The threads: the scheduler over the one table — the main thread's record included, so "what are you doing"
    * and the snapshot's `threads` come from one place — and the warm brain pool. Spawned threads' turns never touch
    * the snapshot: one `thread.event` per change, their conversations over `thread.transcript` to viewers.
    */
   readonly threads: ThreadScheduler;
+  /**
+   * Automations (design11): set while awake, carried out by the daemon while asleep from
+   * `tick()` and the app's signals — never through `wake()` / `connect()`. Also the
+   * `AutomationSource` the brain's four tools call (`automation_set` / `_list` / `_change`, `recipe_list`).
+   */
+  readonly automations: Automations;
   /** The main toolset's hands: reads on the reading helper, acts on the acting one — a look never queues behind a `type`. */
   readonly splitHands: SplitHands;
   /** What the screen is like right now, from the reading helper: the observer's `now:` line reads it, the composite look reads it, the AX tick feeds it. */
@@ -228,7 +529,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** The main lane's acting queue — one act in flight, a needs-confirmation halts the rest; each thread lane gets its own as its brain is built. */
   readonly serializer: ActingSerializer;
   /** Builds a thread's brain for the running brain kind; undefined while it cannot run a second thread (Responses, a test brain without a seam). */
-  private workerBrainFactory: ThreadBrainFactory | undefined;
+  private threadFactoryOfKind: ThreadBrainFactory | undefined;
   /** The main thread's conversation for its pane (thread.open "main"): utterances, cards, steps and statuses by seq. */
   private readonly mainLog = new ThreadLog();
   /** Delegation ids already carded on the main log; a later `change` for one patches through its steps, never a second card. */
@@ -243,7 +544,57 @@ export class Engine extends EventEmitter<EngineEvents> {
   private brain: Brain | undefined;
   private brainReady = false;
   private brainDetail = "not started";
+  /** The running brain's place in the walk's order (0 = first choice); a slow start that outranks it takes over. */
+  private brainRank = Number.POSITIVE_INFINITY;
+  /** One per selection pass: a slow start from an older pass never takes over. */
+  private selectionSeq = 0;
+  /** A slow start that proved ready and outranks the running brain, waiting for a quiet moment (`trySwap`). */
+  private pendingSwap: PendingSwap | undefined;
+  /**
+   * The kinds whose login or usage limit failed mid-run (E-SIGNEDOUT). They add up, so two signed-out brains never
+   * alternate: the walk passes every one over until a restart for any other reason (Retry, keys, a setting).
+   */
+  private brainSkips = new Map<SelectableBrain, BrainSkip>();
+  /** The skipped kinds the last walk passed over before it landed, and the rows that name them with the brain used meanwhile (`raisePassedRows`). */
+  private brainPassed: readonly (readonly [SelectableBrain, BrainSkip])[] = [];
+  private passedRows: string[] = [];
+  /** V11: Kevin pressed Reopen while a task or a thread ran; the session reopens once nothing runs that a pause would cancel. */
+  private capReopenPending = false;
+  /** The row a failed task raised about the running brain (signed out, a usage limit, rate limited, unreachable); its next done task clears it. */
+  private brainRuntimeRow: string | undefined;
+  /** settings.json could not be read and was moved aside: the line start() raises (APP-8). */
+  private settingsBad: { readonly text: string; readonly path: string } | undefined;
+  /** V3: the open session's server-frame count as last seen, and when it last moved (the engine's clock). */
+  private framesSeen: { live: LiveSession; frames: number; at: number } | undefined;
+  /** V3: when the frame watch last ran, on the process's own clock (`performance.now()`): a late tick is a stalled loop, not a quiet socket. */
+  private framesWatchedAt: number | undefined;
+  /** The line that tells Kevin his brain failed and the walk moves on (E-SIGNEDOUT): a reopen waits until it is said. */
+  private failureLine: LineWatch | undefined;
+  /** A selection pass waiting on `failureLine` before it reopens the session across the Responses line. */
+  private acrossWait: LineWatch | undefined;
+  /** stop() has begun: a restart a failed task scheduled does not start brains into a gone engine. */
+  private stopping = false;
+  /** The local model server as last seen (`lookLocal`): on the snapshot whatever the brain kind is. */
+  private localStatus: LocalServerStatus = LOCAL_NONE;
+  /** The local heal timer: when the next look falls due while `brain === "local"` and no local brain is ready; 0 = disarmed. */
+  private localHealAt = 0;
+  /** The local server (`localServerIdentity`) that resolved the pick and still refused the start; the heal timer waits for it to change. */
+  private localRefusedOn: string | undefined;
+  /** The settings (`brainIdentity`) the last selection pass read; a patch that lands after that read runs one more pass. */
+  private selectedAgainst: string | undefined;
   private setupProbe: { openaiKey: SetupStatus["openaiKey"]; brain: SetupStatus["brain"] } = { openaiKey: "unchecked", brain: "unchecked" };
+  /** The account's full name, read once on first use (`dscl`, guarded; the login name behind it) — what an unset `Settings.userName` means. */
+  private fallbackName: string | undefined;
+
+  /**
+   * What the voice, the brain, the tools and the Console call the person Hormes works for
+   * (release F1): `Settings.userName` when set, else the account's full name. Read live
+   * everywhere through a getter, so a rename in Setup or Settings › Session lands at once.
+   */
+  get userName(): string {
+    this.fallbackName ??= this.opts.fallbackUserName ?? accountFullName();
+    return effectiveUserName(this.settings, this.fallbackName);
+  }
   /** Regions Kevin circled for Hormes; the delegator hands the unconsumed ones to the brain. */
   protected marks: ScreenMark[] = [];
   /** Captures still in flight, by mark id; the delegator waits for them before taking the marks. */
@@ -276,19 +627,30 @@ export class Engine extends EventEmitter<EngineEvents> {
   private muted = false;
   private wantAwake = false;
   private connecting = false;
+  /** A fire's lines that came during a handshake (`holdForSession`): said by the session it opens, or rung if none does (`releaseHeldFires`). */
+  private heldFires: { readonly instruction: string; readonly fallback: readonly EngineEvent[] }[] = [];
+  /** Settles when the connect in flight has finished, whichever way: a line typed during a handshake waits on it (V6). */
+  private connectDone: Promise<void> | undefined;
   /**
-   * The problem lines, oldest first, capped at eight: the snapshot's `problems`, the order
-   * and the cap for `typedProblems()`. `clear-problems` empties it; `problemMeta` carries
-   * each line's kind, remedy and first-seen (see the "problems, typed" region).
+   * The problem lines, oldest first, capped at eight: the order and the cap of the
+   * snapshot's `problems` (`typedProblems()`). `clear-problems` empties it; `problemMeta`
+   * carries each line's kind, remedy and first-seen (see the "problems, typed" region).
    */
   private problems: string[] = [];
   private readonly problemMeta = new Map<string, ProblemMeta>();
   /** The disk preflight's last verdict (`checkDisk`): shots are skipped while true. */
   private diskLow = false;
-  /** Wall clock of Kevin's last own input (wake, ear, Live transcript, typed line, dictation) — never Hormes's speech or the model's actions: the presence gate reads it. */
+  /** Wall clock of Kevin's last own input (wake, ear, Live transcript, typed line, dictation) — never Hormes's speech, the model's actions or Live's delegation (RAIL-14): the presence gate reads it. */
   private lastKevinAt = 0;
-  /** When the announced idle sleep falls due: fixed once announced, so the announcement itself cannot push it. */
+  /** Wall clock of the last Live input-transcript delta: whatever the microphone heard, the room included. Never attention. */
+  private lastHeardAt = 0;
+  /** When the announced idle sleep falls due: fixed once announced; the clause itself and the room cannot push it, only an addressed turn (`addressed()`). */
   private sleepDeadlineAt: number | undefined;
+  /**
+   * Set while the pre-sleep clause is asked for (`announceSleep` inside tick): its append's ask is the clause's, and the
+   * voice turn that takes it is heard and counts for nothing — the only speech of Hormes's that is not an addressed turn.
+   */
+  private announcing = false;
   private diskCheckedAt = 0;
   /** While the voice reconnects after `expired` / `connection_lost`: since when, for the problem line's elapsed figure. 0 otherwise. */
   private voiceReconnectSince = 0;
@@ -308,23 +670,77 @@ export class Engine extends EventEmitter<EngineEvents> {
    */
   private heldReconnect: PauseInfo | undefined;
   private reconnectTimer: NodeJS.Timeout | undefined;
-  private permissions: Permissions = { microphone: "unknown", screenRecording: "unknown", accessibility: "unknown" };
+  /** Pause pressed during a handshake (V12): connect() closes the session the moment it starts and holds the pause. */
+  private pauseAtStart = false;
+  private permissions: Permissions = { all: [] };
   private agentsList: AgentInfo[] = [];
   private connectorHealth: ConnectorHealth[] = [];
   private lastOutputSpeechAt = 0;
   /** The last output audio frame that reached the speaker (not gated): the voice is audible for a moment after it. */
   private lastOutputAudioAt = 0;
+  /**
+   * The attention clock (W1-1): the last ADDRESSED turn — Live's delegation, Hormes's own speech (not the pre-sleep
+   * clause), a typed line, dictation, an ear reflex on addressed words that ran, words that name Hormes, a Go / wake /
+   * resume Kevin pressed. Live's input transcript is whatever the microphone hears (a TV, a call, the room) and never
+   * moves it; a reconnect carries it. The idle sleep and the ear's exchange window read it.
+   */
   private lastAddressedAt = 0;
   /**
+   * The ceiling's clock (D1): the same turns minus words that only name Hormes. The room can say the name (a call
+   * about Hormes, a film), so the name alone never holds a session past IDLE_CEILING_MS.
+   */
+  private lastEngagedAt = 0;
+  /** The utterance whose words last named Hormes: one utterance is one turn, however long the room talks on in it. */
+  private namedItemId: string | undefined;
+  /**
+   * The room-talk gate (LC-7): GPT-Live-1 answers what it hears on its own (no turn-detection setting, no create_response
+   * switch, no cancel), so the ask is the engine's. Each of Kevin's utterances is judged as it arrives, and a voice turn
+   * is heard, run or counted only when the engine asked for it (voice-attention.ts).
+   */
+  private readonly attention = new VoiceAttention({
+    now: () => this.now(),
+    echo: (text) => this.echoOfHormes(normalizeUtterance(text)),
+    inExchange: () => this.inExchange(),
+    // The work running, by Live's delegation id ("" for one Live did not raise: an automation's wake-brain turn).
+    working: () => {
+      const active = this.delegator?.active;
+      return active ? (active.liveId ?? "") : undefined;
+    },
+    // A confirmation waiting on Kevin's yes (a send, a thread's question): past the exchange its yes needs the name.
+    confirming: () => (this.confirmations.pending && !this.confirmations.expired ? this.confirmations.pending.id : undefined),
+    spoke: (grant, aside) => this.voiceSpoke(grant, aside),
+    decided: (ids) => this.saidDecided(ids),
+    log: (line) => log.info(line),
+  });
+  /** Hormes's lines that settled (final) while the gate had not yet decided whether Kevin heard them: written when it has. */
+  private readonly saidPending = new Map<string, TranscriptItem>();
+  /** Hormes's lines already on the ledger as unheard (a late name may release one after all). */
+  private readonly saidUnheard = new Set<string>();
+  /** Set while the cue that an answer needs the name is asked for (`cueTheName`): its append's ask is an aside. */
+  private cueing = false;
+  /**
    * The output gate: Live has no interrupt, so after a stop the voice's audio is
-   * dropped here (and its transcript deltas do not count as speaking) until Kevin's
-   * next input-transcript delta or OUTPUT_GATE_MS pass. Wall clock of `now()`.
+   * dropped here (and its transcript deltas do not count as speaking) until Kevin
+   * says something new or OUTPUT_GATE_MS pass. Wall clock of `now()`.
    */
   private outputGateUntil = 0;
+  /** When the output gate was last set, by a stop pressed or said: the voice heard before it is the voice that stop cut. */
+  private lastGateAt = 0;
   private gatedFrames = 0;
+  /**
+   * The spoken stop the gate holds for (V10): when it was heard, and the utterance on Live's transcript that carries it
+   * (its item and where it ends on the session timeline): known at once on Live's path; on the ear's, once Live's own
+   * transcript of the words arrives. Undefined for a pressed stop. Nothing inside that utterance lifts the gate; only
+   * a new utterance with real words does, or the lapse.
+   */
+  private stopHeard: StopHeard | undefined;
+  /** The utterance a spoken stop last came from: one utterance is one stop, however many fragments say it. */
+  private lastStopItemId: string | undefined;
   private readonly reflexRunner: ReflexRunner;
   /** Reflexes the ear fired in the last seconds, so Live's delegation for the same words is finished as done, not redone. */
   private readonly firedReflexes: FiredReflexes;
+  /** The ear's words for each reflex it matched, the wake word included: whether a reflex that ran was addressed. */
+  private readonly earWords = new WeakMap<Reflex, string>();
   /** The on-device ear: partials matched against the grammar, dictation. */
   private readonly earReflexes: EarReflexes;
   /** Wall clock of the last output frame that was audible (RMS above `AUDIBLE_OUTPUT_LEVEL`); the ear's speaking hold reads this, not every frame. */
@@ -356,6 +772,10 @@ export class Engine extends EventEmitter<EngineEvents> {
   private axWarmBusy = false;
   private outputLevel = 0;
   private inputLevel = 0;
+  /** design12: the app's audio graph as it last read itself back (the `audio-state` frame); undefined while no app is connected. */
+  private audioState: AudioState | undefined;
+  /** Voice PLAN W1.5: Live's arrival per session, the rate-limited `audio:` line, the `audio.playout` row at close. */
+  private readonly audioTelemetry = new AudioTelemetry({ now: () => this.now(), log: (line) => log.info(line) });
   private snapshotTimer: NodeJS.Timeout | undefined;
   private tickTimer: NodeJS.Timeout | undefined;
   /** The startup Dock read, armed in start(); cleared by stop(). */
@@ -377,6 +797,15 @@ export class Engine extends EventEmitter<EngineEvents> {
   private sessionStartedAt = 0;
   private brainStarted: Promise<void> | undefined;
   private usageSeconds = 0;
+  /**
+   * V8 / LM-2: the open session's last `session.usage` row (when, and the seconds it said); `written` is false until
+   * its first row. Set at session start, dropped at its close: `noteUsage` writes nothing for a session that closed.
+   */
+  private usageRow: { readonly sessionId: string; readonly at: number; readonly seconds: number; readonly written: boolean } | undefined;
+  /** PERF-6: the wall clock each of Kevin's utterances last grew at (its last input delta), by transcript item id. */
+  private readonly speechEnds = new Map<string, number>();
+  /** LM-1: the `thread.ended` rows the rebuild owes the threads a dead daemon left live; read at construction, appended by start(). */
+  private orphanRows: readonly LedgerRow[] = [];
   private contextRatio: number | undefined;
 
   constructor(private readonly opts: EngineOptions = {}) {
@@ -398,15 +827,17 @@ export class Engine extends EventEmitter<EngineEvents> {
     // client scrubs every spawn).
     this.pool = new HandsPool({
       binPath: this.config.handsBin,
+      userName: () => this.userName,
       ...(opts.hands ? { spawnImpl: fakeHandsSpawn(opts.hands), assumeAvailable: true } : {}),
       ...(opts.backgroundHands ? { background: { spawnImpl: fakeHandsSpawn(opts.backgroundHands), assumeAvailable: true } } : {}),
       ...(opts.probePermissions ? { probeImpl: opts.probePermissions } : {}),
     });
     this.hands = this.pool.focus;
     this.desk = new ConfirmationDesk(this.confirmations, (name, question) => this.speakPromoted(name, question), this.now);
+    this.desk.userName = () => this.userName;
     // Over the ACTING helper: `user_idle` is judged against the events that helper posted itself
     // (its own typing is not Kevin's), and the re-front's `focus_app` is an acting op.
-    this.lease = new FocusLease({ hands: this.pool.focus, now: this.now });
+    this.lease = new FocusLease({ hands: this.pool.focus, now: this.now, userName: () => this.userName });
     // The main toolset reads on the reading helper and acts on the acting one (DECISIONS §11c): the gate's
     // probes, the observer's reads and the model's own looks never wait behind a `type` or an `open_app`.
     // No verdict moves — `expectFront`, `busy`, STALE_FRAME are judged in the acting helper and in the gate.
@@ -421,30 +852,96 @@ export class Engine extends EventEmitter<EngineEvents> {
       now: this.now,
       ...(opts.observeSettleMs !== undefined ? { settleMs: opts.observeSettleMs, slowSettleMs: opts.observeSettleMs } : {}),
     });
-    this.serializer = new ActingSerializer();
+    this.serializer = new ActingSerializer({ userName: () => this.userName });
     const toolsetBase: Omit<ToolsetOptions, "hands" | "screen" | "confirmations"> = {
+      userName: () => this.userName,
       excludePids: () => [...this.excludePids, process.pid],
       annotate: (cmd) => this.emit("overlay", cmd),
       onAction: (a) => this.onAction(a),
       presenceAt: () => this.lastKevinAt || undefined,
       now: this.now,
     };
-    this.toolset = new ComputerToolset({ ...toolsetBase, hands: this.splitHands, confirmations: this.desk.lane(WorkerAwareRunner.ACTOR, "Hormes") });
+    this.toolset = new ComputerToolset({ ...toolsetBase, hands: this.splitHands, confirmations: this.desk.lane(ThreadAwareRunner.ACTOR, "Hormes") });
     const connectors =
       opts.connectors ??
       defaultConnectors({
         claudeModel: this.settings.brainModel,
         claudeBin: this.config.claudeBin,
+        userName: () => this.userName,
       });
     this.agents = new AgentRegistry(connectors);
     this.agents.onChange((list) => {
       this.agentsList = list;
       // An open conversation whose process is gone: its running calls read `interrupted`, once.
       this.settleEndedConversations(list);
+      // `agent.status` watchers read the same listing (zero new polling).
+      this.automations.agents(list);
       this.scheduleSnapshot();
+    });
+    // Automations (design11) beside the scheduler: the acting helper for `open_app` / `press`, the reading helper for the
+    // app fallback poll, the runner's redactor on every line, the thread pool for one headless `wake-brain` turn — and
+    // never `wake()`, `connect()` or `kevinSpoke()`: a fire is a thing the daemon does with the agent asleep.
+    this.automations = new Automations({
+      stateDir: this.config.stateDir,
+      now: this.now,
+      ledger: this.ledger,
+      settings: () => this.settings,
+      updateSettings: (patch) => this.updateSettings(patch),
+      hands: this.pool.focus,
+      redact: (s) => this.runner.redactor.redact(s),
+      emit: (e) => this.emit("event", e),
+      problem: (kind, text, remedy) => this.problemOf(kind, text, remedy),
+      clearProblems: (kind, where) => this.clearProblems(kind, where),
+      userName: () => this.userName,
+      // Awake: a fire is delivered through the open session (one instruction), not the speaker.
+      live: () => (this.live && !this.connecting && this.live.currentState === "started" ? this.live : undefined),
+      // Opening (the handshake; the app's mic already runs): the fire's lines wait for the session and ring only if none opens.
+      opening: () => this.connecting && this.wantAwake,
+      holdForSession: (instruction, fallback) => this.heldFires.push({ instruction, fallback }),
+      brain: {
+        warmUp: async () => {
+          await this.brain?.warmUp?.();
+        },
+        // ONE brain process for one headless turn, built cold outside the pool. The pool is never touched here: `warm()` would
+        // top up to Settings.warmThreads spares, and a `take()` or a `release()` tops up again — none of that is this turn's.
+        // Its release stops its own process only.
+        lane: async () => {
+          const lane = this.threads.coldLane();
+          if (!lane) return undefined;
+          lane.started ??= lane.brain.start();
+          const ready = await lane.started.catch((e: unknown) => ({ ready: false, detail: (e as Error).message }));
+          const stop = async (): Promise<void> => {
+            await lane.brain.stop().catch((e: unknown) => log.debug(`wake-brain lane ${lane.id} stop: ${(e as Error).message}`));
+          };
+          if (!ready.ready) {
+            await stop();
+            return undefined;
+          }
+          lane.runner.setLane("background");
+          return { brain: lane.brain, runner: lane.runner, release: stop };
+        },
+        // Asleep again — no session at all — the pool is closed and every spare stopped, so nothing stays booted behind
+        // Hormes's back; with a session up, paused or reconnecting, the wake path owns the pool and it is left alone.
+        after: async () => {
+          if (!this.live) await this.threads.pool.stopAll();
+        },
+      },
+      present: () => this.kevinPresent(),
+      localBrain: () => this.settings.brain === "local",
+      brainKind: () => (this.brainReady && this.brain ? this.brain.kind : this.settings.brain),
+      onChange: () => this.scheduleSnapshot(),
+      exec: opts.automations?.exec,
+      shell: opts.automations?.shell,
+      shellGate: opts.automations?.shellGate,
+      coalesceMs: opts.automations?.coalesceMs,
+      home: opts.automations?.home ?? process.env["HOME"] ?? homedir(),
+      repoRoot: REPO_ROOT,
     });
     const runnerBase: Omit<RunnerOptions, "toolset"> = {
       agents: this.agents,
+      userName: () => this.userName,
+      // The automations table behind the brain's four tools, on the main runner and every lane runner alike.
+      automations: this.automations,
       stateDir: this.config.stateDir,
       ledger: this.ledger,
       overlay: (cmd) => this.emit("overlay", cmd),
@@ -457,9 +954,13 @@ export class Engine extends EventEmitter<EngineEvents> {
         ...(this.config.claudeBin ? { claudeBin: this.config.claudeBin } : {}),
       },
     };
-    // The table: what the last daemon left — a thread live when it died is ended `failed` with one row each,
-    // and nothing acts — plus the main thread's own record, idle. Every summary, event and status line reads from it.
-    const rebuilt = ThreadTable.rebuildFrom(this.ledger, { now: this.now });
+    // The table: what the last daemon left — a thread live when it died is ended `failed`, and nothing acts — plus
+    // the main thread's own record, idle. Every summary, event and status line reads from it. Read here, written by
+    // start(): building an engine writes nothing to the ledger (LM-1); its one `thread.ended` row each waits there,
+    // and only the process that holds the state dir writes them (`ownsStateDir`).
+    const at = this.now();
+    const rebuilt = ThreadTable.rebuild([...this.ledger.read(at - 86_400_000), ...this.ledger.read(at)], { now: this.now });
+    if (this.opts.ownsStateDir) this.orphanRows = rebuilt.rows;
     const table = rebuilt.table;
     if (!table.get(MAIN_THREAD_ID)) table.started(this.mainRecord());
     // Threads get the same runner and toolset options over their own lane (hands, Screen, desk lane), the memory
@@ -474,9 +975,9 @@ export class Engine extends EventEmitter<EngineEvents> {
       runnerOptions: () => runnerBase,
       toolsetOptions: () => toolsetBase,
       makeBrain: () => this.threadBrainFactory(),
-      parentFor: (task) => this.workerParentFor(task),
-      voice: () => this.workerVoice(),
-      enabled: () => this.settings.workers !== false,
+      parentFor: (task) => this.threadParentFor(task),
+      voice: () => this.threadVoice(),
+      enabled: () => this.settings.threads,
       onChange: () => this.scheduleSnapshot(),
       table,
       onEvent: (e) => this.emit("event", { type: "thread.event", event: e }),
@@ -484,8 +985,9 @@ export class Engine extends EventEmitter<EngineEvents> {
       memory: (query, signal) => this.memory.brainBlock(query, signal),
       look: () => this.compositeLook(),
       observer: this.observer,
+      userName: () => this.userName,
     });
-    this.runner = new WorkerAwareRunner({ ...runnerBase, toolset: this.toolset, pool: this.threads, lease: this.lease, desk: this.desk, observer: this.observer, serializer: serializerLike(this.serializer) });
+    this.runner = new ThreadAwareRunner({ ...runnerBase, toolset: this.toolset, pool: this.threads, lease: this.lease, desk: this.desk, observer: this.observer, serializer: serializerLike(this.serializer) });
     // Durable memory (K: "hormes preferences save across sessions"): built over the runner's
     // redactor (nothing reaches an extractor or the store unredacted), Kevin's OpenAI key when
     // there is one, and Settings.memory read live. Extraction runs from tick() only when quiet.
@@ -495,9 +997,18 @@ export class Engine extends EventEmitter<EngineEvents> {
       now: this.now,
       redact: (s) => this.runner.redactor.redact(s),
       apiKey: () => this.config.openaiApiKey,
+      // Only a key Kevin set for the brain (an LM Studio token) goes to the local server, never OPENAI_API_KEY — as the brain itself sends it.
+      brainApiKey: () => (secretsPresent().brainApiKey ? this.config.brainApiKey : undefined),
       model: () => this.config.memoryModel,
       enabled: () => this.settings.memory !== false,
+      userName: () => this.userName,
+      // Memory follows the SETTING: under `local` it runs on the server on this Mac, and while
+      // that server is down it runs on keywords and rules — never on OpenAI, whatever brain the
+      // fallback is running (docs/LOCAL.md §4).
+      local: () => this.localMemoryTarget(),
       onChange: () => this.scheduleSnapshot(),
+      // The fetch the engine was given reaches memory's model pick, embedder and extractor too (V14 / BL-12).
+      ...(opts.fetch ? { fetchImpl: opts.fetch } : {}),
       ...(opts.memory ?? {}),
     });
     // Reflexes run through the same runner as every brain call; the click pre-check asks which app is up. The
@@ -513,32 +1024,37 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.firedReflexes = new FiredReflexes(this.now, Engine.RECONCILE_WINDOW_MS);
     this.earReflexes = new EarReflexes({
       now: this.now,
-      enabled: () => this.reflexesOn(),
-      match: (u, o) => this.matchReflex(u, o),
+      enabled: () => this.reflexesEnabled(),
+      // The words each reflex was matched on, the name included: the phrase it runs with has the name stripped.
+      match: (u, o) => {
+        const reflex = this.matchReflex(u, o);
+        if (reflex) this.earWords.set(reflex, u);
+        return reflex;
+      },
       run: (reflex, phrase, via) => this.runEarReflex(reflex, phrase, via ?? "ear"),
-      // A spoken "stop" interrupts: work and speech end, the session stays open and listening.
+      // A spoken "stop" interrupts: work and speech end, the session stays open and listening. Speech is the voice no
+      // stop has cut, its transcript or its sound, as in stopOverVoice (voiceUncutAt).
       onStop: () => {
-        if (this.delegator?.active || this.threads.running() > 0 || (this.now() - this.lastOutputSpeechAt < 1200 && !this.outputGated)) void this.interrupt("ear", "said");
+        if (this.delegator?.active || this.threads.running() > 0 || (this.now() - this.voiceUncutAt() < Engine.SPEAKING_WINDOW_MS && !this.outputGated)) void this.interrupt("ear", "said");
       },
       // With ≥ 2 spawned threads live the speech is gated on the stop word and the work cut waits STOP_NAME_WAIT_MS
       // for a name; "stop the slack one" then fires the thread_stop reflex → metaReflex → stopNamed (§6). With ≤ 1
       // the ear's stop is the old one — unless Live's fragments just stopped a thread by name: the same utterance.
       liveThreads: () => this.threads.table.spawnedLiveCount(),
       recentNamedStop: () => this.delegator?.namedStopEcho("live") ?? false,
-      onGateSpeech: () => this.gateSpeech("Kevin said stop"),
+      onGateSpeech: () => this.gateSpeech(`${this.userName} said stop`),
       // A dismissal ("go to sleep", "goodnight hormes", "that's all"): the one sleep function, with the farewell.
       onSleep: (phrase) => void this.fallAsleep("said", { phrase, farewell: true }),
-      // Room talk never sleeps it: a bare "goodnight" counts only mid-exchange (Hormes spoke or was spoken to within
-      // EXCHANGE_WINDOW_MS) — and never when the words are Hormes's own line back through the microphone.
-      addressed: (phrase) => this.now() - this.lastAddressedAt < Engine.EXCHANGE_WINDOW_MS && !this.echoOfHormes(phrase),
+      // Room talk never sleeps it: a bare "goodnight" counts only mid-exchange (Hormes spoke or was addressed within
+      // EXCHANGE_WINDOW_MS — never because the microphone heard someone) — and never when the words are Hormes's own
+      // line back through the microphone.
+      addressed: (phrase) => this.inExchange() && !this.echoOfHormes(phrase),
       dictation: {
         active: () => this.dictating,
         start: () => this.startDictation(),
         stop: (reason) => this.stopDictation(reason),
         type: (text) => this.dictateText(text),
-        newline: async (count) => {
-          await this.toolset.run("key", { text: "Return", repeat: count });
-        },
+        newline: (count) => this.dictateNewline(count),
         deleteWord: async () => {
           await this.toolset.run("key", { text: "alt+Delete" });
         },
@@ -560,26 +1076,47 @@ export class Engine extends EventEmitter<EngineEvents> {
     });
   }
 
+  /** Utterances whose last input delta is remembered for PERF-6: a request reaches back a few utterances at most. */
+  static readonly SPEECH_ENDS_KEPT = 64;
+
+  /**
+   * PERF-6: the wall clock Kevin's utterance last grew at, stamped as its input delta arrives. The Delegator's
+   * `speechEndAt` reads it: a delta that has arrived is never later than a delegation handled after it, whatever
+   * Live's session timeline says (24 of 88 timeline stamps landed after their delegation).
+   */
+  private stampSpeechEnd(itemId: string): void {
+    this.speechEnds.delete(itemId);
+    this.speechEnds.set(itemId, this.now());
+    if (this.speechEnds.size <= Engine.SPEECH_ENDS_KEPT) return;
+    const oldest = this.speechEnds.keys().next();
+    if (!oldest.done) this.speechEnds.delete(oldest.value);
+  }
+
   /** A session's transcript: every finalized utterance goes on the ledger (heard / said) and out as an event. */
   private newTranscript(): Transcript {
     // The engine's clock, like every other timestamp here: a cleared Now stream compares item.at against it (K1).
     // Read lazily — the first transcript is a field initializer, built before the constructor body sets `this.now`.
-    const t = new Transcript(() => this.now());
+    const t = new Transcript(() => this.now(), 400, () => `t_${++this.utteranceSeq}`);
     t.onChange((item, kind) => {
-      if (kind === "final") {
-        this.ledger.append({ at: item.at, type: item.speaker === "kevin" ? "heard" : "said", item });
+      if (kind === "final" && item.speaker === "hormes") {
+        // A line of Hormes's goes on the record as the room-talk gate decided it: heard, or kept off the speaker
+        // (`unheard`: on the ledger only, never the Console's said rows, the continuity or the echo). Undecided yet (its
+        // turn waits for its first audible frame): written when it is (`saidDecided`).
+        const state = this.attention.saidState(item.id);
+        if (state === "pending") this.saidPending.set(item.id, item);
+        else this.saidSettled(item, state !== "unheard");
+      } else if (kind === "final") {
+        this.ledger.append({ at: item.at, type: "heard", item });
+        // design12: while the software echo guard holds the wire (Recording, or the fallback rung), each Kevin turn
+        // leaves the guard's counters beside it — a self-talk loop reads as rising `gated` with no break-through.
+        this.appendGuardRow(item.at);
         this.emit("utterance", item);
         // The main thread's pane: every utterance as it settles (typed lines included).
         this.mainLog.append({ kind: "utterance", item });
         // Kevin's final line: the spoken memory reflexes ("remember that …", "forget that") answer with a toast; every other line is pre-embedded for the delegation that may follow.
-        if (item.speaker === "kevin") {
-          void this.memory.onHeard(item, this.live?.session?.id).then((toast) => {
-            if (toast) this.toast(toast, "info");
-          });
-        }
-      } else if (!Engine.SNAPSHOT_FULL_NOW) {
-        // Phase B: a fragment does not rebuild the snapshot (≤ 5 emits/s while Kevin speaks); the final does.
-        return;
+        void this.memory.onHeard(item, this.live?.session?.id).then((toast) => {
+          if (toast) this.toast(toast, "info");
+        });
       }
       this.scheduleSnapshot();
     });
@@ -590,11 +1127,6 @@ export class Engine extends EventEmitter<EngineEvents> {
   private mainRecord(): Thread {
     const at = this.now();
     return { id: MAIN_THREAD_ID, name: "Hormes", lane: "voice", status: "idle", task: "", apps: [], startedAt: at, updatedAt: at, turns: 0, steps: 0, waits: 0, budget: { steps: 40, seconds: 300 }, canSay: true, canStop: true };
-  }
-
-  /** @deprecated the scheduler under the workers pass's name, one release. */
-  get workers(): ThreadScheduler {
-    return this.threads;
   }
 
   /** Everything said so far, earlier sessions first: what the Console shows and a resume is reminded of. */
@@ -608,11 +1140,35 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** How long the voice stays muted locally after a stop when Kevin says nothing. */
   static readonly OUTPUT_GATE_MS = 2500;
   /** "Mid-exchange": Hormes spoke or was delegated to this recently, so a bare reflex without the wake word may fire ahead of the delegation. */
-  static readonly EXCHANGE_WINDOW_MS = 8000;
+  static readonly EXCHANGE_WINDOW_MS = EXCHANGE_WINDOW_MS;
+  /**
+   * The exchange lasts at most this long after its anchor — the last turn that named Hormes, was typed or circled, or
+   * a Go / wake / resume. Without it each reply the voice gives inside the window reopens the window, and a TV the
+   * voice keeps answering holds the session open for ever (B2).
+   */
+  static readonly EXCHANGE_MAX_MS = EXCHANGE_MAX_MS;
   /** A reflex the ear fired is "already done" for Live's delegation of the same words within this long. */
   static readonly RECONCILE_WINDOW_MS = 4000;
   /** The voice counts as speaking for this long after its last transcript delta or audio frame (the phase uses the same figure). */
   static readonly SPEAKING_WINDOW_MS = 1200;
+  /**
+   * D1: whatever is running and whatever the room says, a session with no addressed turn for this long sleeps — and so
+   * does one whose idle setting is not a number. A longer idle setting is honoured as it is; an explicit 0 is off.
+   */
+  static readonly IDLE_CEILING_MS = 30 * 60_000;
+  /**
+   * After the ear's stop, Live's own transcript of the stop words arrives up to this late: an utterance that begins with
+   * a stop phrase within it is the stop's own, whatever words follow ("Stop talking.", "Hold on a second.") (V10).
+   */
+  static readonly STOP_ECHO_MS = 2000;
+  /**
+   * The Transcript's GAP_MS (@hormes/live does not export it): a fragment that starts within this of an utterance's end
+   * continues it. The gate uses it on the session timeline, since the voice's own transcript, still arriving while the
+   * gate holds, can split one of Kevin's utterances in two.
+   */
+  static readonly UTTERANCE_GAP_MS = 1400;
+  /** Why a brain turn ended when the server dropped the session under it (V1): the delegation's summary and the continuity's cue. */
+  static readonly CONNECTION_DROPPED = "the voice connection dropped";
   /** How often the frontmost window's accessibility tree is refreshed while awake, so a spoken click finds its control at once. */
   static readonly AX_WARM_MS = 500;
   /** A graceful close() unanswered for this long is terminate()d: the session bills per second while it is open. */
@@ -625,19 +1181,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   static readonly CANCEL_CAP_MS = 1500;
   /** How many finished delegations the snapshot keeps across sessions (a pause and resume must not empty the Console). */
   static readonly MAX_DELEGATIONS = 50;
-  /**
-   * Phase B (DECISIONS §9). True: the snapshot's `transcript` (200 items) and `delegations` (50, every step) keep
-   * today's shape byte for byte, and every step rebuilds it. False: `transcript` is cut to SNAPSHOT_TRANSCRIPT,
-   * `delegations` to SNAPSHOT_DELEGATIONS × SNAPSHOT_STEPS with `stepCount`, a fragment or a step no longer
-   * rebuilds it (the main pane reads `thread.transcript`). The flip is a one-line follow-up once ThreadPane("main")
-   * is the live Now and the CLI `status` / orb readers are re-verified against the cut shape.
-   */
-  static SNAPSHOT_FULL_NOW = true;
-  static readonly SNAPSHOT_TRANSCRIPT = 40;
-  static readonly SNAPSHOT_DELEGATIONS = 8;
-  static readonly SNAPSHOT_STEPS = 12;
-  /** A typed line runs as a reflex first (M5): "open safari" is a hands op within ~300 ms and the voice is told it is done. */
-  static TYPED_REFLEXES = true;
+  /** How many utterances the snapshot's `transcript` carries (the Console's Now; the ledger holds the rest). */
+  static readonly SNAPSHOT_UTTERANCES = 200;
   /** With ≥ 2 spawned threads live a stop word gates the speech at once and cuts the work this much later unless a name follows — at both sources (§6). */
   static readonly STOP_NAME_WAIT_MS = STOP_NAME_WAIT_MS;
   /** A thread pane's `append` frames are held this long and sent as one (≤ 10/s per open pane). */
@@ -649,6 +1194,12 @@ export class Engine extends EventEmitter<EngineEvents> {
     return join(this.config.stateDir, SETTINGS_FILE);
   }
 
+  /** Where an unreadable file is kept aside: `<path>.bad`, or the first free `<path>.bad-<n>` (APP-8). */
+  static keptAsidePath(path: string): string {
+    if (!existsSync(`${path}.bad`)) return `${path}.bad`;
+    for (let n = 2; ; n++) if (!existsSync(`${path}.bad-${n}`)) return `${path}.bad-${n}`;
+  }
+
   private loadSettings(): Settings {
     const base: Settings = {
       ...DEFAULT_SETTINGS,
@@ -658,47 +1209,109 @@ export class Engine extends EventEmitter<EngineEvents> {
       effort: this.config.brainEffort,
       idleSleepMinutes: this.config.idleSleepMinutes,
     };
+    if (!existsSync(this.settingsPath())) return base;
+    let saved: Record<string, unknown>;
     try {
-      if (existsSync(this.settingsPath())) {
-        const saved = JSON.parse(readFileSync(this.settingsPath(), "utf8")) as Partial<Settings>;
-        // Nested objects merge field-wise so a settings.json from before a field existed still validates.
-        return { ...base, ...saved, wake: { ...DEFAULT_WAKE, ...(saved.wake ?? {}) } };
-      }
+      const parsed: unknown = JSON.parse(readFileSync(this.settingsPath(), "utf8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not a JSON object");
+      saved = parsed as Record<string, unknown>;
     } catch (e) {
-      log.warn(`settings unreadable: ${(e as Error).message}`);
+      // A torn or hand-broken file is moved aside whole, never written over with the defaults (APP-8): what Kevin set
+      // is still in settings.json.bad, and the next save starts a clean settings.json beside it. A file already kept
+      // aside is never written over either: the next one is settings.json.bad-2, -3 and so on.
+      const bad = Engine.keptAsidePath(this.settingsPath());
+      try {
+        renameSync(this.settingsPath(), bad);
+        this.settingsBad = { text: `settings.json could not be read (${(e as Error).message}). It is kept as ${basename(bad)}. Hormes runs on the defaults.`, path: bad };
+        log.warn(`settings unreadable: ${(e as Error).message}; moved to ${bad}`);
+      } catch (moveError) {
+        log.warn(`settings unreadable: ${(e as Error).message}; could not move it aside (${(moveError as Error).message})`);
+      }
+      return base;
     }
-    return base;
+    // Only the keys Settings has; nested objects merge field-wise so a file from before a field existed still validates.
+    const known: Record<string, unknown> = {};
+    for (const key of SETTINGS_KEYS) if (key in saved) known[key] = saved[key];
+    // A hand-edited `"userName": null` (or a number) means unset; the setter's guard covers a patch, this one the file (release F1).
+    if ("userName" in known && typeof known["userName"] !== "string") {
+      log.warn(`settings: userName ${JSON.stringify(known["userName"])} read as unset (a string)`);
+      known["userName"] = "";
+    }
+    if ("workers" in saved && !("threads" in saved)) known["threads"] = saved["workers"]; // settings.json written before 2026-09-13 says `workers`
+    const wake = known["wake"];
+    // audio: absent before 2026-09-16 → DEFAULT_AUDIO. A missing known key is not "unknown", so the file is not rewritten; the block lands on the first set-settings after.
+    // audioSettingsOf keeps only well-typed fields (the app's decoder is strict).
+    const audio = known["audio"];
+    const settings: Settings = {
+      ...base,
+      ...(known as Partial<Settings>),
+      wake: { ...DEFAULT_WAKE, ...(typeof wake === "object" && wake !== null ? (wake as Partial<WakeSettings>) : {}) },
+      audio: audioSettingsOf(audio),
+    };
+    // A key Settings no longer has is written out once; a file holding only known keys is never rewritten here.
+    if (Object.keys(saved).some((k) => !(SETTINGS_KEYS as readonly string[]).includes(k))) {
+      try {
+        writeFileAtomic(this.settingsPath(), JSON.stringify(settings, null, 2));
+      } catch (e) {
+        log.warn(`settings not rewritten: ${(e as Error).message}`);
+      }
+    }
+    return settings;
   }
 
   get currentSettings(): Settings {
     return this.settings;
   }
 
-  updateSettings(patch: SettingsPatch): void {
+  /**
+   * Save a patch. `quiet`: the voice toast stays unsaid — the `set_voice` reflex passes it when
+   * it reopens the session at once (the reopen is the answer; "at the next wake" would be false).
+   */
+  updateSettings(patch: SettingsPatch, o: { readonly quiet?: boolean } = {}): void {
     const next: Record<string, unknown> = { ...this.settings };
     for (const [key, value] of Object.entries(patch)) {
+      // A brain kind this build does not know would otherwise fall through selection as Responses; it is refused here, with a line.
+      if (key === "brain" && value !== null && value !== undefined && !(BRAIN_KINDS as readonly unknown[]).includes(value)) {
+        log.warn(`settings: unknown brain ${JSON.stringify(value)} dropped (one of ${BRAIN_KINDS.join(", ")})`);
+        continue;
+      }
+      if (key === "userName" && value !== null && value !== undefined && typeof value !== "string") {
+        log.warn(`settings: userName ${JSON.stringify(value)} dropped (a string)`);
+        continue;
+      }
       if (value === null) {
+        // Clearing the name means "unset" — the account's full name again (release F1).
+        if (key === "userName") {
+          next[key] = "";
+          continue;
+        }
         // Clearing is only meaningful for optional fields; required ones keep their value.
         if (key in DEFAULT_SETTINGS) continue;
         delete next[key];
       } else if (value !== undefined) {
-        next[key] = key === "wake" ? { ...DEFAULT_WAKE, ...(value as Partial<WakeSettings>) } : value;
+        // The nested blocks merge field-wise; the audio block has no engine behaviour here — the app reads it from the snapshot.
+        next[key] = key === "wake" ? { ...DEFAULT_WAKE, ...(value as Partial<WakeSettings>) } : key === "audio" ? audioSettingsOf(value) : value;
       }
     }
     const before = this.settings;
     this.settings = next as unknown as Settings;
+    const renamed = (before.userName ?? "").trim() !== this.settings.userName.trim();
     // A different brain (or model / server) takes effect now, not at the next launch.
     if (this.brainStarted && (before.brain !== this.settings.brain || before.brainModel !== this.settings.brainModel || before.brainBaseUrl !== this.settings.brainBaseUrl || before.effort !== this.settings.effort)) {
       void this.restartBrain(`settings changed to ${this.settings.brain} ${this.settings.brainModel}`);
+    } else if (this.brainStarted && renamed) {
+      // A rename (release F1): the standing orders, Codex's base instructions and the memory extractor are all built with the name — rebuild them.
+      void this.restartBrain("the user's name changed");
     }
+    if (renamed) void this.memory.relink();
     // A voice, accent or language is fixed at session.start (session.update carries only the
-    // delegation), so a pick while awake is silent until the next session — say so, and where
-    // the button is that reopens now (voice.reopen, Kevin-pressed only: never a paid start on a menu browse).
-    if ((this.live || this.connecting) && (before.voice !== this.settings.voice || before.accent !== this.settings.accent || before.language !== this.settings.language)) {
-      this.toast("voice change heard at the next wake · Switch now in Settings to hear it", "info");
+    // delegation), so a pick while awake is silent until the next session — say so, and name
+    // the verb that reopens now (Switch now → voice.reopen, Kevin-pressed only: never a paid start on a menu browse).
+    if (!o.quiet && (this.live || this.connecting) && (before.voice !== this.settings.voice || before.accent !== this.settings.accent || before.language !== this.settings.language)) {
+      this.toast(`${Engine.voiceLine(this.settings.voice, this.settings.accent)} at the next wake · Switch now`, "info");
     }
     try {
-      writeFileSync(this.settingsPath(), JSON.stringify(this.settings, null, 2));
+      writeFileAtomic(this.settingsPath(), JSON.stringify(this.settings, null, 2));
     } catch (e) {
       this.problem(`could not save settings: ${(e as Error).message}`);
     }
@@ -710,10 +1323,20 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** Spawn the helper, probe permissions, start the brain. Does not open a session. */
   async start(): Promise<void> {
     this.startedAt = this.now();
+    // What a dead daemon left open, written before anything else this process writes: its session's close
+    // (V8 / LM-2, W2-5's contract), then one `thread.ended` row for each thread it left live (LM-1). Only by the
+    // process that holds the state dir: an engine beside a running daemon (`hormes live`) leaves the daemon's alone.
+    if (this.opts.ownsStateDir) {
+      this.closeLostSessions();
+      this.appendOrphanRows();
+    }
     this.tickTimer = setInterval(() => this.tick(), 1000);
+    if (this.settingsBad) this.problemOf("other", this.settingsBad.text, { label: "Reveal", open: this.settingsBad.path });
     // What the previous process left behind: a pause to hold again, a session it was cut
     // from, a crash report to point at, a disk with no room for shots (the K3 region below).
     this.restoreFromLedger();
+    // The schedule: the journal rebuilt, a `firing` row failed "the daemon restarted", whatever was due while down resolved (late fire or missed + Run now).
+    this.automations.load(this.now());
     this.noteCrashReports();
     this.checkDisk();
     // Retention (K1): days past the windows move to the Trash — listed in the log first; 0 = never.
@@ -733,14 +1356,105 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.agentsList = r.agents;
       this.scheduleSnapshot();
     });
-    // The brain can take a while to prove its auth; nothing else should wait for it.
-    this.brainStarted = this.startBrain().then(() => {
-      this.setupProbe = { ...this.setupProbe, brain: this.brainReady ? "ok" : "unavailable" };
-      this.scheduleSnapshot();
-      // One cheap key check at start, so Setup and the Console show the truth without a click.
-      void this.probeSetup();
-    });
+    // The brain can take a while to prove its auth; nothing else should wait for it. The local
+    // server is looked at first (one round of loopback probes), so an explicit `local` starts on
+    // a fresh listing and every other kind's Setup can say what is running on this Mac.
+    this.brainStarted = this.lookLocal()
+      .then(() => this.startBrain())
+      .then(async () => {
+        this.setupProbe = { ...this.setupProbe, brain: this.brainReady ? "ok" : "unavailable" };
+        this.armLocalHeal();
+        this.scheduleSnapshot();
+        // Memory's providers follow the brain setting: the bridge rebuilds only when its identity moved.
+        await this.memory.relink();
+        // One cheap key check at start, so Setup and the Console show the truth without a click.
+        if (this.opts.probe !== false) void this.probeSetup();
+      });
     this.scheduleSnapshot();
+  }
+
+  // -------------------------------------------------------- the local server
+  // Discovery is the engine's: one look at start, at every probe and brain restart, and — while
+  // Kevin picked `local` and no local brain is ready — every LOCAL_HEAL_MS from tick(), so a server
+  // opened after the daemon is picked up without a click. Read-only throughout (docs/LOCAL.md).
+
+  /** How often the heal timer looks while `brain === "local"` and the local brain is not ready. */
+  static readonly LOCAL_HEAL_MS = 60_000;
+
+  /** One look at the local server (pinned root under `local`, else the three loopback ports); stores it and redraws. Never throws. */
+  private async lookLocal(): Promise<LocalServerStatus> {
+    const baseUrl = this.settings.brain === "local" ? this.settings.brainBaseUrl?.trim() || undefined : undefined;
+    const ramBytes = totalmem();
+    try {
+      const status = this.opts.discoverLocal
+        ? await this.opts.discoverLocal({ baseUrl, ramBytes })
+        : await discoverLocalServer({ baseUrl, ramBytes, fetch, now: this.now, apiKey: secretsPresent().brainApiKey ? this.config.brainApiKey : undefined });
+      // A look never forgets the running brain's pick while the server still lists it (discovery itself does not pick).
+      const picked = this.brain instanceof LocalBrain ? this.brain.status.picked : undefined;
+      this.localStatus = picked && status.models.some((m) => m.id === picked) ? { ...status, picked } : status;
+    } catch (e) {
+      log.debug(`local server look failed: ${(e as Error).message}`);
+      this.localStatus = { ...LOCAL_NONE, ...(baseUrl ? { baseUrl } : {}), ramBytes, checkedAt: this.now() };
+    }
+    this.scheduleSnapshot();
+    return this.localStatus;
+  }
+
+  /** Whether the running brain is the local one and ready. */
+  private localBrainUp(): boolean {
+    return this.brainReady && this.brain instanceof LocalBrain;
+  }
+
+  /** Arm the heal timer when Kevin picked `local` and no local brain is ready; disarm it otherwise (a ready local brain, another kind). */
+  private armLocalHeal(): void {
+    this.localHealAt = this.settings.brain === "local" && !this.localBrainUp() ? this.now() + Engine.LOCAL_HEAL_MS : 0;
+  }
+
+  /**
+   * From tick(): the heal timer fell due — look again, and when the start would succeed restart the
+   * brain onto the server. "Would succeed" is the start's own question, `resolveLocalModel` (the exact
+   * id, `<id>:latest`, a unique name, the best fit — and never a listed model without tools or a cloud
+   * tag), so the timer neither restarts every minute onto a pin the server cannot run nor sits out a
+   * name the resolver takes. A server that resolved the pick and still refused the start is tried
+   * again only once its listing, root or version moved; Kevin's Retry and a settings change try it now.
+   */
+  private async healLocal(): Promise<void> {
+    if (this.brainRestart) return;
+    const status = await this.lookLocal();
+    if (this.settings.brain !== "local" || this.localBrainUp()) {
+      this.armLocalHeal();
+      return;
+    }
+    const fits = !("error" in resolveLocalModel(this.settings.brainModel.trim(), status));
+    if (fits && this.localRefusedOn !== Engine.localServerIdentity(status)) await this.restartBrain("local server appeared");
+    else this.armLocalHeal();
+  }
+
+  /** The local server as the heal compares it: root, flavour, version and the ids listed (a model loading or unloading is not a change). */
+  private static localServerIdentity(status: LocalServerStatus): string {
+    return `${status.baseUrl}|${status.flavor ?? ""}|${status.version ?? ""}|${status.models.map((m) => m.id).sort().join(",")}`;
+  }
+
+  /**
+   * Where memory runs (memory-bridge.ts `local`): under `local`, the server on this Mac with the
+   * brain's model as the extractor and the discovered embedding model — or `"offline"` while nothing
+   * answers, so item text stays on the Mac on keywords and rules; undefined under every other kind.
+   */
+  private localMemoryTarget(): LocalMemoryTarget | "offline" | undefined {
+    if (this.settings.brain !== "local") return undefined;
+    const s = this.localStatus;
+    if (!s.reachable || !s.flavor) return "offline";
+    const chatModel = (this.brain instanceof LocalBrain ? this.brain.status.picked : undefined) ?? this.settings.brainModel.trim();
+    const model = s.models.find((m) => m.id === chatModel);
+    return {
+      flavor: s.flavor,
+      baseUrl: s.baseUrl,
+      chatModel,
+      ...(model?.contextLength !== undefined ? { chatContext: model.contextLength } : {}),
+      // A thinking model reasons before its JSON unless told not to: the extractor turns it off (or down, for gpt-oss) and leaves room.
+      ...(model ? { thinking: model.capabilities.includes("thinking") } : {}),
+      ...(s.embedModel ? { embedModel: s.embedModel } : {}),
+    };
   }
 
   /** Resolves once the brain has been chosen (ready or fallen back). */
@@ -751,7 +1465,6 @@ export class Engine extends EventEmitter<EngineEvents> {
   private async probeHands(): Promise<void> {
     if (!this.hands.available) {
       this.problemOf("hands.helper", `hands helper not built (${this.config.handsBin}); run pnpm build:hands`, Engine.HANDS_REMEDY);
-      this.permissions = { ...this.permissions, screenRecording: "unknown", accessibility: "unknown" };
       return;
     }
     try {
@@ -856,10 +1569,10 @@ export class Engine extends EventEmitter<EngineEvents> {
    * and does nothing until it is removed and the app asks again.
    */
   static readonly PERMISSION_PROBLEMS: Record<HelperPermissionKind, string> = {
-    accessibility: "Accessibility not granted: clicks and typing will silently do nothing until it is (if System Settings already shows Hormes on, that row is from an earlier build — remove it and press Request)",
+    accessibility: "Accessibility not granted: clicks and typing will silently do nothing until it is (if System Settings already shows Hormes on, that row is from an earlier build: remove it and press Request)",
     screenRecording: "Screen Recording not granted: screenshots will fail until it is (if System Settings already shows Hormes on, remove that row and press Request)",
-    inputMonitoring: "Input Monitoring not granted: the keys Hormes watches for while you circle or dictate will not arrive until it is (System Settings › Privacy & Security › Input Monitoring; if it already shows Hormes on, that row is from an earlier build — remove it and ask again)",
-    fullDiskAccess: "Full Disk Access not granted: files under Desktop/Documents/Downloads/Mail/Safari will fail with EPERM until Hormes.app is added in System Settings › Privacy & Security › Full Disk Access (if it already shows Hormes on, that row is from an earlier build — remove it and add the app again)",
+    inputMonitoring: "Input Monitoring not granted: the keys Hormes watches for while you circle or dictate will not arrive until it is (System Settings › Privacy & Security › Input Monitoring; if it already shows Hormes on, that row is from an earlier build: remove it and ask again)",
+    fullDiskAccess: "Full Disk Access not granted: files under Desktop/Documents/Downloads/Mail/Safari will fail with EPERM until Hormes.app is added in System Settings › Privacy & Security › Full Disk Access (if it already shows Hormes on, that row is from an earlier build: remove it and add the app again)",
   };
 
   /** What a grant that just appeared means, for the toast. */
@@ -905,17 +1618,27 @@ export class Engine extends EventEmitter<EngineEvents> {
     return (HELPER_PERMISSION_KINDS as readonly string[]).includes(kind);
   }
 
-  /** The grant the engine currently holds for a kind: its own field for the three legacy ones, else the row. */
+  /** The grant the engine currently holds for a kind: its row's, "unknown" before any read. */
   private grantOf(kind: PermissionKind): Grant {
-    if (kind === "microphone" || kind === "screenRecording" || kind === "accessibility") return this.permissions[kind];
-    return this.permissions.all?.find((p) => p.kind === kind)?.grant ?? "unknown";
+    return grantOf(this.permissions, kind);
+  }
+
+  /** One row written: the kind's row takes the grant (and the detail when given); a kind without a row gets the catalogue's. */
+  private setRow(kind: PermissionKind, grant: Grant, detail?: string): PermissionInfo {
+    const rows: PermissionInfo[] = [...this.permissions.all];
+    const i = rows.findIndex((r) => r.kind === kind);
+    const base: Omit<PermissionInfo, "grant" | "checkedAt"> = i >= 0 ? rows[i]! : { kind, ...Engine.PERMISSION_CATALOGUE[kind] };
+    const row: PermissionInfo = { ...base, grant, ...(detail !== undefined ? { detail } : {}), checkedAt: this.now() };
+    if (i >= 0) rows[i] = row;
+    else rows.push(row);
+    this.permissions = { all: rows };
+    return row;
   }
 
   /**
-   * Fold grants for the helper's kinds into the permission state: the legacy fields,
-   * the rows of `permissions.all` (an app row keeps its label, why, ask and required;
-   * only the grant and checkedAt move; a kind the app has not listed gets the
-   * catalogue row), the problem lines and the toasts. Rows the app owns are not
+   * Fold grants for the helper's kinds into the permission rows (an app row keeps its
+   * label, why, ask and required; only the grant and checkedAt move; a kind the app
+   * has not listed gets the catalogue row), the problem lines and the toasts. Rows the app owns are not
    * touched. `source` is "helper" for the engine's own reads — the resident helper's
    * greeting at start, or a fresh `--permissions` process on the poll — which are
    * remembered in `helperGrants` and win over the app's word from then on; it is
@@ -926,23 +1649,15 @@ export class Engine extends EventEmitter<EngineEvents> {
    * must be restarted to use it).
    */
   private applyHelperRead(fresh: Partial<Record<HelperPermissionKind, boolean>>, source: "helper" | "app" = "helper"): { changed: boolean; regained: boolean } {
-    const at = this.now();
-    let changed = this.permissions.all === undefined;
+    let changed = false;
     let regained = false;
-    const rows: PermissionInfo[] = [...(this.permissions.all ?? [])];
-    const fields = { microphone: this.permissions.microphone, screenRecording: this.permissions.screenRecording, accessibility: this.permissions.accessibility };
     for (const kind of HELPER_PERMISSION_KINDS) {
       const seen = fresh[kind];
       if (seen === undefined) continue;
       const state: Grant = seen ? "granted" : "denied";
       if (source === "helper") this.helperGrants[kind] = state;
       const before = this.grantOf(kind);
-      const i = rows.findIndex((r) => r.kind === kind);
-      const base: Omit<PermissionInfo, "grant" | "checkedAt"> = i >= 0 ? rows[i]! : { kind, ...Engine.PERMISSION_CATALOGUE[kind] };
-      const row: PermissionInfo = { ...base, grant: state, checkedAt: at };
-      if (i >= 0) rows[i] = row;
-      else rows.push(row);
-      if (kind === "accessibility" || kind === "screenRecording") fields[kind] = state;
+      const row = this.setRow(kind, state);
       if (before === state) continue;
       changed = true;
       const text = Engine.PERMISSION_PROBLEMS[kind];
@@ -952,13 +1667,12 @@ export class Engine extends EventEmitter<EngineEvents> {
         // cut the helper's own greeting short and report a failure that never happened.
         if ((kind === "accessibility" || kind === "screenRecording") && before === "denied") regained = true;
         this.clearProblemText(text);
-        if (before !== "unknown") this.toast(`${base.label} granted — ${Engine.GRANTED_NOTE[kind]}`, "info");
+        if (before !== "unknown") this.toast(`${row.label} granted · ${Engine.GRANTED_NOTE[kind]}`, "info");
       } else {
         this.problemOf(Engine.permissionProblemKind(kind), text, Engine.permissionRemedy(kind));
-        if (before === "granted") this.toast(`${base.label} was revoked`, "warn");
+        if (before === "granted") this.toast(`${row.label} was revoked`, "warn");
       }
     }
-    this.permissions = { ...fields, all: rows };
     return { changed, regained };
   }
 
@@ -1021,11 +1735,10 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   private static readonly MICROPHONE_PROBLEM = "Microphone access denied; Hormes cannot hear you";
 
-  setMicrophonePermission(state: Permissions["microphone"]): void {
-    this.permissions = { ...this.permissions, microphone: state };
+  /** The microphone is the app's to read: its problem line follows the grant the app reports. */
+  private microphoneProblem(state: Grant): void {
     if (state === "denied") this.problemOf("permission.microphone", Engine.MICROPHONE_PROBLEM, Engine.permissionRemedy("microphone"));
     else if (state === "granted") this.clearProblemText(Engine.MICROPHONE_PROBLEM);
-    this.scheduleSnapshot();
   }
 
   /** The typed kind of a missing grant: the four the contract names, `permission.other` for the rest. */
@@ -1078,28 +1791,22 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   /**
-   * One permission as the app read it (any kind). The three legacy fields follow;
-   * the row in `permissions.all` takes the grant (a kind not listed yet gets the
-   * catalogue row, so `hormes status` sees it before the app's first full list).
-   * For the four helper kinds see `applyAppWord`: the row's grant is the engine's
-   * own when it has read one; the detail and checkedAt are the app's.
+   * One permission as the app read it (any kind, the microphone included). The row in
+   * `permissions.all` takes the grant (a kind not listed yet gets the catalogue row, so
+   * `hormes status` sees it before the app's first full list); the microphone's problem
+   * line follows its grant. For the four helper kinds see `applyAppWord`: the row's grant
+   * is the engine's own when it has read one; the detail and checkedAt are the app's.
    */
   setPermission(which: string, state: Grant, detail?: string): void {
-    if (which === "microphone") this.setMicrophonePermission(state);
     if (!Engine.isPermissionKind(which)) {
       log.debug(`permission message for an unknown kind ${which}; ignored`);
       this.scheduleSnapshot();
       return;
     }
     const word = Engine.isHelperKind(which) ? this.applyAppWord(which, state) : { regained: false };
-    const rows: PermissionInfo[] = [...(this.permissions.all ?? [])];
-    const i = rows.findIndex((p) => p.kind === which);
-    const base: Omit<PermissionInfo, "grant" | "checkedAt"> = i >= 0 ? rows[i]! : { kind: which, ...Engine.PERMISSION_CATALOGUE[which] };
     const grant = Engine.isHelperKind(which) ? this.grantOf(which) : state;
-    const row: PermissionInfo = { ...base, grant, ...(detail !== undefined ? { detail } : {}), checkedAt: this.now() };
-    if (i >= 0) rows[i] = row;
-    else rows.push(row);
-    this.permissions = { ...this.permissions, all: rows };
+    this.setRow(which, grant, detail);
+    if (which === "microphone") this.microphoneProblem(grant);
     this.scheduleSnapshot();
     if (word.regained) void this.restartHandsAfterGrant();
   }
@@ -1125,63 +1832,160 @@ export class Engine extends EventEmitter<EngineEvents> {
     const rows: PermissionInfo[] = [...byKind.values()].map((p) => (Engine.isHelperKind(p.kind) ? { ...p, grant: this.grantOf(p.kind) } : p));
     for (const kind of HELPER_PERMISSION_KINDS) {
       if (byKind.has(kind)) continue;
-      const kept = this.permissions.all?.find((r) => r.kind === kind);
+      const kept = this.permissions.all.find((r) => r.kind === kind);
       if (kept) rows.push(kept);
     }
-    const pick = (kind: PermissionKind): Grant | undefined => rows.find((p) => p.kind === kind)?.grant;
-    const mic = pick("microphone");
-    if (mic !== undefined && mic !== this.permissions.microphone) this.setMicrophonePermission(mic);
-    this.permissions = {
-      ...this.permissions,
-      all: rows,
-      screenRecording: pick("screenRecording") ?? this.permissions.screenRecording,
-      accessibility: pick("accessibility") ?? this.permissions.accessibility,
-    };
+    const micBefore = this.grantOf("microphone");
+    this.permissions = { all: rows };
+    const mic = this.grantOf("microphone");
+    if (mic !== micBefore) this.microphoneProblem(mic);
     this.scheduleSnapshot();
     if (regained) void this.restartHandsAfterGrant();
   }
 
-  /** Stop the current brain (cancelling any running task) and start the configured one. */
-  async restartBrain(reason: string): Promise<void> {
+  /** The settings a selection reads: kind, model, server root, effort — what `updateSettings` restarts the brain for. */
+  private brainIdentity(): string {
+    const s = this.settings;
+    // The skips too: one added or cleared while a pass runs is read by one more pass.
+    return `${s.brain}|${s.brainModel}|${s.brainBaseUrl ?? ""}|${s.effort}|${this.userName}|${[...this.brainSkips.keys()].join(",")}`;
+  }
+
+  /**
+   * Stop the current brain (cancelling any running task) and start the configured one. A restart asked
+   * for while one runs joins it — and when the running pass had already read the settings that
+   * request changed (a click during the heal timer's own restart), the pass runs once more on what
+   * stands now, so the brain never ends on settings Kevin has since moved away from.
+   */
+  async restartBrain(reason: string, o: { readonly skip?: { readonly kind: SelectableBrain } & BrainSkip } = {}): Promise<void> {
+    // A login or a usage limit that failed mid-run joins the kinds the walk passes over; a restart for any other
+    // reason (Retry, keys, a setting, a rename) tries every backend again.
+    if (o.skip) this.brainSkips.set(o.skip.kind, { failure: o.skip.failure, why: o.skip.why });
+    else this.brainSkips.clear();
     if (this.brainRestart) return this.brainRestart;
     this.brainRestart = (async () => {
-      log.info(`restarting brain: ${reason}`);
-      await this.delegator?.cancel("brain restarting");
-      // Workers run brains of the old kind: they go with it.
-      await this.bounded(this.workers.stopAll());
-      const old = this.brain;
-      this.brain = undefined;
-      this.workerBrainFactory = undefined;
-      this.brainReady = false;
-      this.brainDetail = "restarting";
-      this.setupProbe = { ...this.setupProbe, brain: "unchecked" };
-      this.scheduleSnapshot();
-      try {
-        await old?.stop();
-      } catch (e) {
-        log.warn(`old brain did not stop cleanly: ${(e as Error).message}`);
-      }
-      const wasResponses = old instanceof ResponsesBrain;
-      await this.startBrain();
-      this.setupProbe = { ...this.setupProbe, brain: this.brainReady ? "ok" : "unavailable" };
-      if (this.live && this.brain) {
-        // Live fixes the delegation target (client vs Responses) when the session
-        // starts, so a swap across that line needs a fresh session; within a kind the
-        // proxy carries on and a Responses brain is simply re-bound.
-        const isResponses = (this.brain as Brain | undefined) instanceof ResponsesBrain;
-        if (isResponses !== wasResponses) {
-          this.toast("brain changed; reconnecting the voice session", "info");
-          await this.fallAsleep("brain-changed");
-          void this.wake("brain changed");
-        } else {
-          this.rebindBrain();
-        }
-      }
-      this.scheduleSnapshot();
+      let why = reason;
+      do {
+        await this.selectionPass(why);
+        why = "settings changed during the restart";
+      } while (this.selectedAgainst !== this.brainIdentity());
     })().finally(() => {
       this.brainRestart = undefined;
     });
     return this.brainRestart;
+  }
+
+  /** One restart: the old brain and its threads stop, the local server is looked at, the kind is selected, Live is re-bound, memory follows. */
+  private async selectionPass(reason: string): Promise<void> {
+    log.info(`restarting brain: ${reason}`);
+    await this.delegator?.cancel("brain restarting");
+    // Threads run brains of the old kind: they go with it.
+    await this.bounded(this.threads.stopAll());
+    const old = this.brain;
+    this.brain = undefined;
+    this.threadFactoryOfKind = undefined;
+    this.brainReady = false;
+    this.brainDetail = "restarting";
+    this.setupProbe = { ...this.setupProbe, brain: "unchecked" };
+    this.scheduleSnapshot();
+    try {
+      await old?.stop();
+    } catch (e) {
+      log.warn(`old brain did not stop cleanly: ${(e as Error).message}`);
+    }
+    const wasResponses = old instanceof ResponsesBrain;
+    await this.lookLocal();
+    await this.startBrain();
+    this.setupProbe = { ...this.setupProbe, brain: this.brainReady ? "ok" : "unavailable" };
+    this.armLocalHeal();
+    if (this.live && this.brain) {
+      // Live fixes the delegation target (client vs Responses) when the session
+      // starts, so a swap across that line needs a new session, which carries the
+      // conversation on; within a kind the proxy carries on and a Responses brain is
+      // simply re-bound.
+      const isResponses = (this.brain as Brain | undefined) instanceof ResponsesBrain;
+      if (isResponses !== wasResponses) {
+        // The reopen flushes the speaker: the line that says why the brain changed (E-SIGNEDOUT) is heard out first.
+        const line = this.failureLine;
+        if (line && line.live === this.live) {
+          this.acrossWait = line;
+          await line.settled;
+          this.acrossWait = undefined;
+        }
+        await this.reopenAcross(reason);
+      } else {
+        this.rebindBrain();
+      }
+    }
+    this.failureLine?.now();
+    this.failureLine = undefined;
+    this.scheduleSnapshot();
+    // The brain setting may have moved memory's providers (local ↔ OpenAI ↔ keywords).
+    await this.memory.relink();
+  }
+
+  /**
+   * The brain in use moved across the client / Responses line while a session is open. Live fixes the delegation when
+   * a session starts, so the open one is paused and reopened at once with the conversation carried on, as a reconnect
+   * carries it: the same chain on the ledger, silent unless Kevin was mid-request. Never a sleep and a fresh wake,
+   * which drops the conversation. A handshake still in flight was set up for the old delegation: it finishes first.
+   * The new session's connect is not awaited: a selection pass calls this from inside the restart that connect()
+   * waits for.
+   */
+  private async reopenAcross(why: string): Promise<void> {
+    const live = this.live;
+    if (!live || this.stopping) return;
+    // A connect makes its session only after the restart it waits for, so one with `live` made is past that wait.
+    if (this.connecting && this.connectDone) await this.connectDone;
+    // Nothing open (asleep, paused, a handshake that failed): the next session opens on the brain in use.
+    if (this.live !== live || !live.session || this.connecting || this.pauseInfo || this.sleeping) return;
+    this.toast("brain changed; reconnecting the voice session", "info");
+    await this.pause({ quiet: true });
+    const pause = this.pauseInfo;
+    if (!pause) return; // a sleep raced the pause: nothing is held
+    log.info(`${why}: the delegation moved to ${this.brain instanceof ResponsesBrain ? "Responses" : "the client"}; reopening the session with the conversation`);
+    void this.connect(`reconnect (${why})`, { pause, continuity: this.continuityFor(pause, "reconnected"), how: "reconnected" });
+  }
+
+  /** How long the voice may pause inside a line before it counts as said (`watchLine`). */
+  static readonly LINE_QUIET_MS = 700;
+  /** The longest a reopen waits on a line (`watchLine`): the voice may never say it. */
+  static readonly LINE_CAP_MS = 8000;
+
+  /**
+   * Watch `live` for the line just queued to it: said once its first output-transcript delta has come and then
+   * LINE_QUIET_MS pass with no delta and no audible frame. Settled early when the session goes, and at LINE_CAP_MS.
+   * Real timers, like the farewell's: they pace the voice, not the session clock.
+   */
+  private watchLine(live: LiveSession): LineWatch {
+    const t0 = performance.now();
+    let lastAt: number | undefined;
+    let done = false;
+    let resolve!: () => void;
+    const settled = new Promise<void>((r) => (resolve = r));
+    const onDelta = (): void => {
+      lastAt = performance.now();
+    };
+    // Audible frames stretch the line once it has begun; the API's silence frames do not.
+    const onAudio = (): void => {
+      if (lastAt !== undefined && this.outputLevel >= Engine.AUDIBLE_OUTPUT_LEVEL) lastAt = performance.now();
+    };
+    const end = (): void => {
+      if (done) return;
+      done = true;
+      clearInterval(poll);
+      live.off("outputTranscript", onDelta);
+      this.off("audio", onAudio);
+      resolve();
+    };
+    const poll = setInterval(() => {
+      const now = performance.now();
+      const gone = this.live !== live || live.currentState !== "started" || this.pauseInfo !== undefined || this.sleeping !== undefined;
+      if (gone || (lastAt !== undefined && now - lastAt >= Engine.LINE_QUIET_MS) || now - t0 >= Engine.LINE_CAP_MS) end();
+    }, 50);
+    poll.unref?.();
+    live.on("outputTranscript", onDelta);
+    this.on("audio", onAudio);
+    return { live, settled, now: end };
   }
 
   /** Secrets go to ~/.hormes/env; the config is re-read and the brain restarted. */
@@ -1204,12 +2008,14 @@ export class Engine extends EventEmitter<EngineEvents> {
     let openaiKey: SetupStatus["openaiKey"] = "missing";
     if (this.config.openaiApiKey) {
       try {
-        const r = await fetch(`https://api.openai.com/v1/models/${encodeURIComponent(this.config.liveModel)}`, {
+        const r = await (this.opts.fetch ?? fetch)(`https://api.openai.com/v1/models/${encodeURIComponent(this.config.liveModel)}`, {
           headers: { authorization: `Bearer ${this.config.openaiApiKey}` },
           signal: AbortSignal.timeout(8000),
         });
-        openaiKey = r.status === 200 ? "ok" : r.status === 401 ? "invalid" : r.status === 404 ? "ok" : "invalid";
-        if (r.status === 404) this.problemOf("voice.key", `OpenAI key works but ${this.config.liveModel} is not listed for it`, Engine.SETUP_REMEDY);
+        // 404: the key answered (so it is valid) but the Live model is not enabled on its project — its own
+        // word (release F4), never "ok": the first wake would fail with the voice.key problem below.
+        openaiKey = r.status === 200 ? "ok" : r.status === 401 ? "invalid" : r.status === 404 ? "noLiveModel" : "invalid";
+        if (r.status === 404) this.problemOf("voice.key", noLiveModelLine(this.config.liveModel), Engine.SETUP_REMEDY);
         // The key answered: a missing or stale key is not the problem any more; nor is reaching the host.
         if (r.status === 200) this.clearProblems("voice.key");
         this.clearProblems("voice.connection", (t) => t.startsWith("could not reach api.openai.com"));
@@ -1218,13 +2024,15 @@ export class Engine extends EventEmitter<EngineEvents> {
         openaiKey = "unchecked";
       }
     }
+    // The local server, for every kind: Setup says "Ollama 0.34.0 · 3 models" under the Local option before Kevin commits.
+    await this.lookLocal();
     await this.ready();
     this.setupProbe = { openaiKey, brain: this.brainReady ? "ok" : "unavailable" };
     this.scheduleSnapshot();
-    return this.setupStatus();
+    return this.setupNow();
   }
 
-  private setupStatus(): SetupStatus {
+  private setupNow(): SetupStatus {
     return {
       openaiKey: this.setupProbe.openaiKey,
       brain: this.setupProbe.brain,
@@ -1235,79 +2043,93 @@ export class Engine extends EventEmitter<EngineEvents> {
       ...(this.brainReady && this.brain && this.brain !== this.opts.brain ? { brainResolved: this.brain.kind as Exclude<Settings["brain"], "auto"> } : {}),
       liveModel: this.config.liveModel,
       secrets: secretsPresent(),
+      local: this.localStatus,
+      dataPaths: this.dataPathsNow(),
     };
   }
 
+  /** The four "where words go" rows, from the one function the doctor prints too (@hormes/core `dataPaths`). */
+  private dataPathsNow(): SetupStatus["dataPaths"] {
+    const resolved = this.brainReady && this.brain && this.brain !== this.opts.brain ? (this.brain.kind as Exclude<Settings["brain"], "auto">) : undefined;
+    return dataPaths({
+      brain: this.settings.brain,
+      brainModel: this.settings.brainModel,
+      ...(resolved ? { brainResolved: resolved } : {}),
+      brainDetail: this.brain?.detail ?? this.brainDetail,
+      local: this.localStatus,
+      memory: this.memory.summary(),
+      hasOpenAIKey: Boolean(this.config.openaiApiKey),
+      liveModel: this.config.liveModel,
+    });
+  }
+
   private async startBrain(): Promise<void> {
+    // The settings this pass selects against; a patch landing after this read is a pass of its own (restartBrain).
+    this.selectedAgainst = this.brainIdentity();
+    // A new pass: a slow start an older one left running never takes over from what this one picks.
+    const seq = ++this.selectionSeq;
+    this.dropPendingSwap();
+    this.brainRank = Number.POSITIVE_INFINITY;
+    this.brainPassed = [];
     if (this.opts.brain) {
       this.brain = this.opts.brain;
-      // A test brain has no second thread of its own; the `makeWorkerBrain` seam stands in.
-      this.workerBrainFactory = undefined;
+      this.brainRank = 0;
+      // A test brain has no second thread of its own; the `makeThreadBrain` seam stands in.
+      this.threadFactoryOfKind = undefined;
       const r = await this.brain.start();
       this.brainReady = r.ready;
       this.brainDetail = r.detail;
       return;
     }
+    // The rows the last selection raised go first — the amber local row, the fallback lines, the probe
+    // lines (the local LAN line, the compatible key warning; nothing else raises brain.probe) — so a switch
+    // of kind leaves nothing about the old one standing; what still holds is raised again below.
+    this.clearProblems("brain.local");
+    this.clearProblems("brain.unavailable");
+    this.clearProblems("brain.probe");
+    this.brainRuntimeRow = undefined;
+    this.passedRows = [];
     const wanted = this.settings.brain;
     // Settings.brainModel is "" for "that backend's default"; only a real id is an override.
     const model = this.settings.brainModel.trim() || undefined;
-    const looksOpenAI = /^(gpt-|o\d|chatgpt)/i.test(model ?? "");
-    const looksClaude = /^claude/i.test(model ?? "");
     const baseUrl = this.settings.brainBaseUrl?.trim() || this.config.brainBaseUrl;
     // Same modules as the static imports above; loaded here so this body stays self-contained.
     const { AUTO_BRAIN_ORDER } = await import("@hormes/protocol");
-    const { AnthropicBrain, CodexBrain, OpenAICompatibleBrain, probeCodex, resolveCompatibleApiKey } = await import("@hormes/brain");
+    const { ANTHROPIC_WALK_PROBE_MS, AnthropicBrain, CodexBrain, OpenAICompatibleBrain, probeCodex, resolveCompatibleApiKey } = await import("@hormes/brain");
     type Kind = Exclude<Settings["brain"], "auto">;
 
     // One cheap look at the Codex install (binary, version, login) serves the
-    // "configured?" question here and the brain's own start() below.
-    const codexProbe = await probeCodex({ bin: this.config.codexBin });
+    // "configured?" question here and the brain's own start() below. The test seam starts no CLI.
+    const seam = this.opts.brainOf;
+    const codexProbe: CodexProbe = seam
+      ? { bin: undefined, version: undefined, signedIn: false, authMode: undefined, desktopRunning: false, configModel: undefined, detail: "not probed (brainOf)" }
+      : await probeCodex({ bin: this.config.codexBin });
 
-    /**
-     * "Configured" means Kevin did something that names this backend: a binary
-     * and a login, a key, a server URL. Under `auto`, an unconfigured backend is
-     * skipped with a log line only; a configured one that cannot start gets a
-     * problem() line, because that is a thing he can fix.
-     */
-    const notConfigured = (kind: Kind): string | undefined => {
-      switch (kind) {
-        case "codex":
-          if (!codexProbe.bin) return codexProbe.detail; // nothing installed
-          if (codexProbe.version && !codexProbe.signedIn) return codexProbe.detail; // installed, never signed in
-          return undefined; // signed in — or a binary that will not run, which start() reports
-        case "claude-code":
-          return this.config.claudeBin || this.config.anthropicApiKey || existsSync(join(process.env["HOME"] ?? "", ".claude")) ? undefined : "no claude binary, Claude login or ANTHROPIC_API_KEY on this Mac";
-        case "anthropic-api":
-          return this.config.anthropicApiKey ? undefined : "ANTHROPIC_API_KEY is not set";
-        case "openai-compatible":
-          return baseUrl ? undefined : "no server URL (Settings or HORMES_BRAIN_BASE_URL)";
-        case "openai-responses":
-          return undefined;
-      }
-    };
+    const facts: BrainFacts = { wanted, codex: codexProbe, claudeBin: this.config.claudeBin, claudeHome: existsSync(join(process.env["HOME"] ?? "", ".claude")), anthropicApiKey: this.config.anthropicApiKey, baseUrl };
+    const notConfigured = (kind: Kind): string | undefined => brainNotConfigured(kind, facts);
 
-    // Every brain proves itself before it takes a task. The same builder makes a worker's
-    // brain over its lane runner: a Codex worker is its own app-server process with one
-    // thread, no primer (a spare's boot is a process, not a model request) and the
-    // worker's id on the bridge env; the HTTP and Claude kinds are a second instance;
+    // Every brain proves itself before it takes a task. The same builder makes a spawned
+    // thread's brain over its lane runner: a Codex thread is its own app-server process with
+    // one conversation, no primer (a spare's boot is a process, not a model request) and the
+    // thread's id on the bridge env; the HTTP and Claude kinds are a second instance;
     // Live's own Responses delegation has no thread of its own to give.
-    type Worker = { readonly runner: ToolRunner; readonly workerId: string; readonly secondsCap: number };
-    const build = (kind: Kind, worker?: Worker): { brain: Brain; label: string; warning?: string } | undefined => {
-      const runner = worker?.runner ?? this.runner;
+    const build = (kind: Kind, spec?: ThreadBrainSpec): { brain: Brain; label: string; warning?: string } | undefined => {
+      const runner = spec?.runner ?? this.runner;
       switch (kind) {
         case "codex":
           return {
             label: "Codex",
             brain: new CodexBrain({
               runner,
+              userName: this.userName,
               probe: codexProbe,
               stateDir: this.config.stateDir,
               socketPath: this.config.socketPath,
-              // Under `auto` a leftover Claude id is not an override for Codex; an explicit choice keeps what Kevin set.
-              ...(model && !(wanted === "auto" && looksClaude) ? { model } : {}),
+              // Under `auto` another vendor's leftover id is not an override for Codex; an explicit choice keeps what Kevin set.
+              ...(model && !(wanted === "auto" && foreignModel("codex", model)) ? { model } : {}),
               effort: this.settings.effort,
-              // A worker: its id on the bridge env (the daemon routes its tool calls to its lane), one thread, no primer, the pool's wall clock as the backstop.
-              ...(worker ? { worker: worker.workerId, primeThreads: false, maxWallMs: worker.secondsCap * 1000 } : {}),
+              // A spawned thread: its id on the bridge env (the daemon routes its tool calls to its lane), one conversation, no primer, the pool's wall clock as the backstop.
+              ...(spec ? { thread: spec.threadId, primeThreads: false, maxWallMs: spec.secondsCap * 1000 } : {}),
             }),
           };
         case "claude-code":
@@ -1315,15 +2137,18 @@ export class Engine extends EventEmitter<EngineEvents> {
             label: "Claude Code",
             brain: new ClaudeBrain({
               runner,
+              userName: this.userName,
               stateDir: this.config.stateDir,
-              // Under `auto` a leftover OpenAI id must not sink the Claude login; an explicit choice keeps what Kevin set.
-              ...(model && !(wanted === "auto" && looksOpenAI) ? { model } : {}),
+              // Under `auto` another vendor's leftover id must not sink the Claude login; an explicit choice keeps what Kevin set.
+              ...(model && !(wanted === "auto" && foreignModel("claude-code", model)) ? { model } : {}),
               effort: this.settings.effort,
               ...(this.config.claudeBin ? { pathToClaudeCodeExecutable: this.config.claudeBin } : {}),
             }),
           };
         case "anthropic-api":
-          return { label: "Anthropic API", brain: new AnthropicBrain({ runner, apiKey: this.config.anthropicApiKey, model, effort: this.settings.effort }) };
+          // F-AUTO-PROBE: a walk (`auto`, or `codex` walking on) stops waiting at its patience and lets this key check go on,
+          // so a slow but valid key still takes over; an explicit pick has nothing to move on to, so its check is capped at 5 s.
+          return { label: "Anthropic API", brain: new AnthropicBrain({ runner, userName: this.userName, apiKey: this.config.anthropicApiKey, model, effort: this.settings.effort, ...(spec ? { maxWallMs: spec.secondsCap * 1000 } : {}), ...(wanted === "auto" || wanted === "codex" ? { probeTimeoutMs: ANTHROPIC_WALK_PROBE_MS } : {}) }) };
         case "openai-compatible": {
           // Only a key Kevin set for this brain (HORMES_BRAIN_API_KEY) goes to an arbitrary
           // host; config.brainApiKey falls back to OPENAI_API_KEY, which belongs to OpenAI alone.
@@ -1335,16 +2160,46 @@ export class Engine extends EventEmitter<EngineEvents> {
           return {
             label: "OpenAI-compatible",
             ...(key.warning ? { warning: key.warning } : {}),
-            brain: new OpenAICompatibleBrain({ runner, baseUrl, apiKey: key.apiKey, model }),
+            brain: new OpenAICompatibleBrain({ runner, userName: this.userName, baseUrl, apiKey: key.apiKey, model, ...(spec ? { maxWallMs: spec.secondsCap * 1000 } : {}) }),
           };
         }
+        case "local":
+          // The model on this Mac: discovered (or pinned by brainBaseUrl), Kevin's id or the best fit; only a
+          // key Kevin set for this brain (an LM Studio token) ever goes to it, never OPENAI_API_KEY. A
+          // thread's brain shares main's discovery and sends no thread_* tools of its own.
+          return {
+            label: "Local",
+            brain: new LocalBrain({
+              runner,
+              userName: this.userName,
+              baseUrl: this.settings.brainBaseUrl?.trim() || undefined,
+              model: this.settings.brainModel.trim(),
+              effort: this.settings.effort,
+              threads: () => this.settings.threads && !spec,
+              status: this.localStatus,
+              ramBytes: this.localStatus.ramBytes || totalmem(),
+              apiKey: secretsPresent().brainApiKey ? this.config.brainApiKey : undefined,
+              maxWallMs: spec ? spec.secondsCap * 1000 : undefined,
+              onStatus: (status) => {
+                this.localStatus = status;
+                this.scheduleSnapshot();
+              },
+            }),
+          };
         case "openai-responses":
-          if (worker) return undefined;
+          if (spec) return undefined;
           // The model override only applies when Kevin chose this backend; under `auto` it may be another vendor's id.
-          return { label: "OpenAI Responses", brain: new ResponsesBrain({ runner: this.runner, model: wanted === "openai-responses" ? model : undefined, effort: "low" }) };
+          return { label: "OpenAI Responses", brain: new ResponsesBrain({ runner: this.runner, userName: this.userName, model: wanted === "openai-responses" ? model : undefined, effort: "low" }) };
       }
     };
-    const workerFactoryFor = (kind: Kind): ThreadBrainFactory | undefined => (kind === "openai-responses" ? undefined : (w) => build(kind, w)?.brain);
+    const threadFactoryFor = (kind: Kind): ThreadBrainFactory | undefined => (seam || kind === "openai-responses" ? undefined : (spec) => build(kind, spec)?.brain);
+    // The test seam stands in for both questions: a kind it gives is configured, and that is the brain it starts.
+    const configured = (kind: Kind): string | undefined => (seam ? (seam[kind] ? undefined : "not given (brainOf)") : kind === wanted ? undefined : notConfigured(kind));
+    const make = (kind: Kind): { brain: Brain; label: string; warning?: string } | undefined => {
+      if (!seam) return build(kind);
+      const factory = seam[kind];
+      return factory ? { brain: factory(), label: BRAIN_LABELS[kind] } : undefined;
+    };
 
     // `auto` walks the contract order (codex → claude-code → anthropic-api →
     // openai-compatible → openai-responses) and takes the first that is ready.
@@ -1352,58 +2207,356 @@ export class Engine extends EventEmitter<EngineEvents> {
     // any other explicit choice keeps its fallback below, the Live session's own
     // Responses delegation.
     const order: readonly Kind[] = wanted === "auto" || wanted === "codex" ? AUTO_BRAIN_ORDER : [wanted];
+    const walks = order.length > 1;
+    // The logins and usage limits that failed mid-run (E-SIGNEDOUT) are passed over until a restart for any other reason.
+    const skips = walks ? new Map(this.brainSkips) : new Map<SelectableBrain, BrainSkip>();
+    // F-AUTO-PROBE: a start that takes longer than this goes on in the background while the walk starts the next
+    // client brain. Every start still running races the one the walk waits on, so whichever proves itself first takes
+    // the Go: the one that outranks the others at once, a lower one until a better one proves itself and takes over
+    // at the next quiet moment. No start is waited on past its patience, the last client brain's included: when no
+    // client brain is left to start, the walk lands on Responses at once. A start that proves itself after that takes
+    // over at the next quiet moment; with a session open that is a reconnect (Live fixes the delegation when the
+    // session starts), which carries the conversation on (`trySwap`).
+    const patience = this.opts.brainPatienceMs ?? Engine.BRAIN_PATIENCE_MS;
+    const slow: SlowStart[] = [];
     const tried: string[] = []; // for the log: every kind passed over, and why
     const failed: string[] = []; // labels of configured backends that would not start
+    const passed: string[] = []; // labels of the brains passed over for a lost login or a usage limit
     let skipped = 0; // kinds that were simply not configured
-    for (const kind of order) {
+    const adopt = (rank: number, kind: Kind, brain: Brain, detail: string): void => {
+      this.brain = brain;
+      this.brainRank = rank;
+      this.threadFactoryOfKind = threadFactoryFor(kind);
+      this.brainReady = true;
+      if (kind === "local") this.localBrainReady(brain as LocalBrain);
+      // Landing on Responses under `auto` deserves a why: which backends broke
+      // (they have a problem() line each) and whether the rest were merely absent.
+      // A brain still starting ahead of this one is the whole story: it takes over when it is up.
+      const still = slow.filter((x) => x.rank < rank).map((x) => x.label);
+      const why = still.length ? `${still.join(", ")} still starting` : Engine.walkWhy(passed, failed, skipped);
+      this.brainDetail = why && ((wanted === "auto" && kind === "openai-responses") || still.length) ? `${detail} (${wanted === "auto" ? "auto: " : ""}${why})` : detail;
+      log.info(`${wanted}: using ${kind}${tried.length ? ` after ${tried.join("; ")}` : ""}`);
+      this.raisePassedRows();
+      // The starts still running may outrank it: the first to prove itself takes over at the next quiet moment.
+      for (const x of slow) void x.starting.then((r) => this.slowStarted(x, r, seq, threadFactoryFor(x.kind)));
+    };
+    /** A configured backend that cannot start is worth a line in the Console. */
+    const refused = (kind: Kind, label: string, detail: string): void => {
+      tried.push(`${label}: ${detail}`);
+      failed.push(label);
+      // For `local` the line is Kevin's to act on (amber, with the command to run) and the fallback is said out loud:
+      // his brain was free, and until the server is back the work bills OpenAI; memory stays on the Mac.
+      if (kind === "local") {
+        const problem = this.localProblem(detail);
+        // The pick resolved and the server still refused: the heal timer waits for the server to change; Retry and a settings change do not.
+        this.localRefusedOn = problem.refused ? Engine.localServerIdentity(this.localStatus) : undefined;
+        this.problemOf("brain.local", problem.text, problem.remedy);
+        this.problemOf("brain.unavailable", `Local brain unavailable (${detail}); using the OpenAI backend instead, so until it is back the brain's work goes to OpenAI too. Memory stays local.`, Engine.BRAIN_REMEDY);
+        return;
+      }
+      this.problemOf("brain.unavailable", `${label} brain unavailable (${detail}); ${walks ? "trying the next backend" : "using the OpenAI backend instead"}`, Engine.BRAIN_REMEDY);
+    };
+    /**
+     * The first to land of: every start still running, in the walk's order (so the higher one wins a tie), then the
+     * candidate's own start, then the patience (undefined).
+     */
+    const landed = (candidate: SlowStart | undefined, patienceOver: Promise<undefined> | undefined): Promise<{ x: SlowStart; r: { ready: boolean; detail: string } } | undefined> =>
+      Promise.race([...[...slow, ...(candidate ? [candidate] : [])].map((x) => x.starting.then((r) => ({ x, r }))), ...(patienceOver ? [patienceOver] : [])]);
+    /** A slow start landed while the walk waited on something else: ready, it takes the Go; failed, it gets its line. */
+    const slowLanded = async (x: SlowStart, r: { ready: boolean; detail: string }): Promise<boolean> => {
+      slow.splice(slow.indexOf(x), 1);
+      if (r.ready) return true;
+      await x.brain.stop().catch(() => undefined);
+      refused(x.kind, x.label, r.detail);
+      return false;
+    };
+    walk: for (const [rank, kind] of order.entries()) {
       // The kind Kevin asked for is always tried; the rest only when configured.
-      const skip = kind === wanted ? undefined : notConfigured(kind);
+      const skip = configured(kind);
       if (skip) {
         log.info(`${wanted}: skipping ${kind} (${skip})`);
         tried.push(`${kind} not configured`);
         skipped++;
         continue;
       }
-      const candidate = build(kind);
-      if (!candidate) continue;
-      if (candidate.warning) this.problemOf("brain.probe", candidate.warning, Engine.PROBE_REMEDY);
-      const r = await candidate.brain.start();
-      if (r.ready) {
-        this.brain = candidate.brain;
-        this.workerBrainFactory = workerFactoryFor(kind);
-        this.brainReady = true;
-        // Landing on Responses under `auto` deserves a why: which backends broke
-        // (they have a problem() line each) and whether the rest were merely absent.
-        const why = [failed.length ? `${failed.join(", ")} could not start` : "", skipped ? "no other brain is signed in or configured" : ""].filter(Boolean).join("; ");
-        this.brainDetail = wanted === "auto" && kind === "openai-responses" && why ? `${r.detail} (auto: ${why})` : r.detail;
-        log.info(`${wanted}: using ${kind}${tried.length ? ` after ${tried.join("; ")}` : ""}`);
-        return;
+      const lost = skips.get(kind);
+      if (lost) {
+        // Its row names the fix and the brain used meanwhile (`raisePassedRows`, once the walk lands).
+        this.brainPassed = [...this.brainPassed, [kind, lost]];
+        const keyed = KEY_BRAINS.has(kind);
+        tried.push(`${BRAIN_LABELS[kind]}: ${lost.failure === "auth" ? (keyed ? "key refused" : "signed out") : "usage limit"}: ${lost.why}`);
+        passed.push(`${BRAIN_LABELS[kind]} ${lost.failure === "auth" ? (keyed ? "key refused" : "signed out") : "at its usage limit"}`);
+        continue;
       }
-      await candidate.brain.stop().catch(() => undefined);
-      tried.push(`${candidate.label}: ${r.detail}`);
-      failed.push(candidate.label);
-      // A configured backend that cannot start is worth a line in the Console.
-      this.problemOf("brain.unavailable", `${candidate.label} brain unavailable (${r.detail}); ${order.length > 1 ? "trying the next backend" : "using the OpenAI backend instead"}`, Engine.PROBE_REMEDY);
+      // Responses races the starts still running like any candidate; it is ready at once, so it takes the Go and they
+      // take over when they prove themselves (`adopt`).
+      const candidate = make(kind);
+      if (!candidate) continue;
+      if (candidate.warning) this.problemOf("brain.probe", candidate.warning, Engine.BRAIN_REMEDY);
+      const c: SlowStart = { rank, kind, brain: candidate.brain, label: candidate.label, starting: candidate.brain.start().catch((e: unknown) => ({ ready: false, detail: (e as Error).message })) };
+      // Only a walk has a next backend to move on to; Responses itself is the end of it.
+      const timer = walks && kind !== "openai-responses" ? deadline(patience) : undefined;
+      try {
+        for (;;) {
+          const next = await landed(c, timer?.passed);
+          if (!next) {
+            log.info(`${wanted}: ${kind} has not proved itself in ${patience} ms; trying the next backend while it starts`);
+            tried.push(`${c.label} still starting`);
+            slow.push(c);
+            continue walk;
+          }
+          if (next.x !== c) {
+            // A start the walk moved on from proved itself first: it outranks this one, so it takes the Go now and
+            // this one goes on with the rest (it stops when it lands, never ahead of a brain that outranks it).
+            if (await slowLanded(next.x, next.r)) {
+              slow.push(c);
+              adopt(next.x.rank, next.x.kind, next.x.brain, next.r.detail);
+              return;
+            }
+            continue;
+          }
+          if (next.r.ready) {
+            adopt(rank, kind, c.brain, next.r.detail);
+            return;
+          }
+          await c.brain.stop().catch(() => undefined);
+          refused(kind, c.label, next.r.detail);
+          continue walk;
+        }
+      } finally {
+        timer?.clear();
+      }
     }
-    // An explicit choice that could not start: the Live session's own Responses delegation always can.
-    const responses = new ResponsesBrain({ runner: this.runner, effort: "low" });
+    // An explicit choice that could not start (or a walk with no Responses step, the test seam's): the Live session's
+    // own Responses delegation always can. A start still running past its patience takes over when it proves itself.
+    const responses = new ResponsesBrain({ runner: this.runner, userName: this.userName, effort: "low" });
     const r = await responses.start();
+    if (slow.length) {
+      adopt(order.length, "openai-responses", responses, r.detail);
+      return;
+    }
     this.brain = responses;
-    this.workerBrainFactory = undefined;
+    this.brainRank = order.length;
+    this.threadFactoryOfKind = undefined;
     this.brainReady = r.ready;
     this.brainDetail = r.detail;
+    this.raisePassedRows();
   }
 
-  /** Called by the shell when the brain fails to authenticate mid-run. */
-  private async swapToResponses(reason: string): Promise<void> {
-    this.problemOf("brain.unavailable", `brain failed (${reason}); switching to the OpenAI backend for the next session`, Engine.PROBE_REMEDY);
-    await this.brain?.stop();
-    const responses = new ResponsesBrain({ runner: this.runner, effort: "low" });
-    await responses.start();
-    this.brain = responses;
-    this.workerBrainFactory = undefined;
+  /** Why the walk landed where it did, for the brain's detail line: what it passed over, what failed, what was absent. */
+  private static walkWhy(passed: readonly string[], failed: readonly string[], skipped: number): string {
+    return [passed.join(", "), failed.length ? `${failed.join(", ")} could not start` : "", skipped ? "no other brain is signed in or configured" : ""].filter(Boolean).join("; ");
+  }
+
+  /**
+   * The rows for the brains the last walk passed over (E-SIGNEDOUT), each with its own fix and the brain in use
+   * meanwhile. Raised when the walk lands, and again when a slow start takes over, so the name stays true.
+   */
+  private raisePassedRows(): void {
+    for (const text of this.passedRows) this.clearProblemText(text);
+    this.passedRows = [];
+    const kind = this.brain?.kind;
+    const using = kind === undefined ? undefined : kind in BRAIN_LABELS ? BRAIN_LABELS[kind as SelectableBrain] : kind;
+    const meanwhile = using ? ` Using ${using} meanwhile.` : "";
+    for (const [skipped, s] of this.brainPassed) {
+      const label = BRAIN_LABELS[skipped];
+      const text = s.failure === "auth" ? `${lostWords(skipped, label)} (${s.why}). ${SIGN_IN_HINTS[skipped]}${meanwhile}` : `${label} hit its usage limit (${s.why}). Press Retry once it resets.${meanwhile}`;
+      this.passedRows.push(text);
+      this.problemOf("brain.unavailable", text, Engine.BRAIN_REMEDY);
+    }
+  }
+
+  /** How long the walk waits on one brain's start before it moves on (F-AUTO-PROBE): no Go waits longer on one probe. */
+  static readonly BRAIN_PATIENCE_MS = 5000;
+
+  /**
+   * A start the walk stopped waiting on has finished. Ready, and still outranking the brain in use in the same
+   * selection pass, it is queued to take over (`trySwap`); otherwise it stops. A failed one that outranked the brain
+   * in use gets the walk's line; one the brain in use outranks was never going to be used, so it goes quietly.
+   */
+  private slowStarted(x: SlowStart, r: { ready: boolean; detail: string }, seq: number, threadFactory: ThreadBrainFactory | undefined): void {
+    const outranks = seq === this.selectionSeq && x.rank < this.brainRank;
+    const current = outranks && x.rank < (this.pendingSwap?.rank ?? Number.POSITIVE_INFINITY);
+    if (!r.ready || !current) {
+      void x.brain.stop().catch(() => undefined);
+      if (!r.ready && outranks) this.problemOf("brain.unavailable", `${x.label} brain unavailable (${r.detail})`, Engine.BRAIN_REMEDY);
+      else if (!r.ready) log.info(`auto: ${x.label} could not start (${r.detail}); a brain that outranks it is in use`);
+      return;
+    }
+    this.dropPendingSwap();
+    this.pendingSwap = { ...x, detail: r.detail, seq, threadFactory };
+    log.info(`auto: ${x.label} proved itself after the walk moved on; it takes over when nothing runs`);
+    this.trySwap();
+  }
+
+  /**
+   * The queued slow start takes over, once nothing runs on the brain in use (a turn, a thread, a restart, a
+   * handshake): from the swap on, the proxy hands it every task. Called when it is queued and from tick(). A swap
+   * from Responses with a session open reopens the session (`reopenAcross`), so it also waits until nobody is in an
+   * exchange with the voice and no sleep is due: the reconnect then cuts nothing anyone is saying or hearing.
+   */
+  private trySwap(): void {
+    const next = this.pendingSwap;
+    if (!next) return;
+    if (next.seq !== this.selectionSeq) {
+      this.dropPendingSwap();
+      return;
+    }
+    if (this.brainRestart || this.connecting || this.delegator?.active !== undefined || this.threads.running() > 0) return;
+    const across = next.brain instanceof ResponsesBrain !== this.brain instanceof ResponsesBrain;
+    const open = this.live?.session !== undefined;
+    if (across && open && (this.sleeping !== undefined || this.sleepDeadlineAt !== undefined || this.inExchange())) return;
+    this.pendingSwap = undefined;
+    const old = this.brain;
+    this.brain = next.brain;
+    this.brainRank = next.rank;
+    this.threadFactoryOfKind = next.threadFactory;
     this.brainReady = true;
-    this.brainDetail = "responses delegation (fallback)";
+    this.brainDetail = next.detail;
+    this.setupProbe = { ...this.setupProbe, brain: "ok" };
+    log.info(`auto: switched to ${next.label} from ${old?.kind ?? "nothing"}`);
+    // The rows about the brains the walk passed over name the one in use meanwhile.
+    this.raisePassedRows();
+    this.scheduleSnapshot();
+    if (across && open) void this.reopenAcross(`${next.label} took over`);
+    else this.rebindBrain();
+    // The spares were the old kind's; they go with it. Memory follows the brain in use.
+    void (async () => {
+      await this.bounded(this.threads.stopAll());
+      await old?.stop().catch((e: unknown) => log.warn(`old brain did not stop cleanly: ${(e as Error).message}`));
+      await this.memory.relink();
+    })();
+  }
+
+  /** A queued swap that will not happen: its brain stops. */
+  private dropPendingSwap(): void {
+    const next = this.pendingSwap;
+    this.pendingSwap = undefined;
+    if (next) void next.brain.stop().catch(() => undefined);
+  }
+
+  /**
+   * The local brain came up: the rows about it go, and what is left to say is informational —
+   * a trained window under LOCAL_NUM_CTX_MIN (Hormes's tools alone are ~11k tokens), or a
+   * pinned root off this Mac (the words leave for the network). Both texts are docs/LOCAL.md §10's.
+   */
+  private localBrainReady(brain: LocalBrain): void {
+    this.clearProblems("brain.local");
+    this.clearProblems("brain.unavailable", (t) => t.startsWith("Local brain unavailable"));
+    const status = brain.status;
+    const id = this.settings.brainModel.trim() || status.picked || "";
+    const model = status.models.find((m) => m.id === id);
+    if (model?.contextLength !== undefined && model.contextLength < LOCAL_NUM_CTX_MIN) {
+      this.problemOf("brain.local", `Local brain: ${model.id}'s window is ${Math.round(model.contextLength / 1024)}k tokens; Hormes's tools alone are ~11k. Pick a larger model.`, Engine.SETUP_REMEDY);
+    }
+    const host = hostOf(status.baseUrl);
+    if (host && !isLoopbackHost(host)) this.problemOf("brain.probe", `Local brain on ${new URL(status.baseUrl).host}: leaves this Mac for your network`);
+  }
+
+  /**
+   * The amber row for a local brain that did not start, from what the last look found: the text
+   * table of docs/LOCAL.md §10 — nothing answering, nothing that can call tools (with the pull to
+   * run), the picked id gone (with its pull), else the resolver's own sentence. `copy` is the
+   * command Kevin runs himself; no surface ever runs it. `refused`: the pick resolved and the
+   * server itself turned the start down — the heal timer holds off until that server changes.
+   */
+  private localProblem(detail: string): { text: string; remedy: ProblemRemedy; refused?: true } {
+    const status = this.localStatus;
+    const pinned = this.settings.brainBaseUrl?.trim();
+    if (!status.reachable) {
+      const where = pinned ? `at ${hostOf(status.baseUrl) ? new URL(status.baseUrl).host : pinned}` : "on this Mac (127.0.0.1:11434, :1234, :8080)";
+      return { text: `Local brain: nothing answers ${where}. Open Ollama, or install it (see docs/LOCAL.md).`, remedy: Engine.LOCAL_REMEDY };
+    }
+    const server = serverLabel(status);
+    const wanted = this.settings.brainModel.trim();
+    const resolved = resolveLocalModel(wanted, status);
+    if ("error" in resolved) {
+      if (!wanted) {
+        if (status.flavor !== "ollama") return { text: `Local brain: ${server} is up but nothing on it can call tools. Load a model that can.`, remedy: Engine.LOCAL_REMEDY };
+        const s = status.suggested ?? suggestedPull(status.ramBytes);
+        return { text: `Local brain: ${server} is up but nothing on it can call tools. In a terminal: ${s.command} (${Math.round(s.sizeBytes / 1e9)} GB, fits this Mac).`, remedy: { ...Engine.LOCAL_REMEDY, copy: s.command } };
+      }
+      const listed = status.models.some((m) => m.id === wanted || m.id === `${wanted}:latest` || m.id.split(":")[0] === wanted);
+      if (!listed && !/:cloud$|-cloud$/i.test(wanted)) {
+        const have = status.models.map((m) => m.id);
+        const has = have.length ? `it has ${have.slice(0, 6).join(", ")}${have.length > 6 ? ` and ${have.length - 6} more` : ""}` : "it lists nothing";
+        return { text: `Local brain: ${wanted} is not on ${server} (${has}). Pull it, or pick another.`, remedy: status.flavor === "ollama" ? { ...Engine.SETUP_REMEDY, copy: `ollama pull ${wanted}` } : Engine.SETUP_REMEDY };
+      }
+      return { text: resolved.error, remedy: Engine.SETUP_REMEDY };
+    }
+    // The model resolved and the server still refused the start (a token, a 5xx): the brain's own sentence, with Retry.
+    return { text: `Local brain: ${detail}`, remedy: Engine.LOCAL_REMEDY, refused: true };
+  }
+
+  /**
+   * What a task's result says about the brain itself (E-SIGNEDOUT), read by the proxy after every main-lane task. A
+   * login or key the server refused: a typed row with its fix, the brain not ready, and, when the selection walks
+   * (`auto`, or `codex`), a restart that passes the signed-out kind over. A usage limit or a quota: the same walk, or
+   * a row that says to try later. A passing rate limit or an unreachable server: a row of its own, the brain left as
+   * it is. A task that finishes clears the row and restores ready. Returns the error line Kevin hears instead, when
+   * there is a better one than the raw message.
+   */
+  private noteBrainResult(brain: Brain, r: BrainResult): string | undefined {
+    if (brain !== this.brain) return undefined; // a brain the engine has since replaced
+    const kind = (brain.kind in BRAIN_LABELS ? brain.kind : undefined) as SelectableBrain | undefined;
+    const label = kind ? BRAIN_LABELS[kind] : brain.kind;
+    if (r.status === "done") {
+      if (this.brainRuntimeRow) {
+        this.clearProblemText(this.brainRuntimeRow);
+        this.brainRuntimeRow = undefined;
+      }
+      if (!this.brainReady) {
+        this.brainReady = true;
+        this.setupProbe = { ...this.setupProbe, brain: "ok" };
+        this.scheduleSnapshot();
+      }
+      return undefined;
+    }
+    if (r.status !== "failed") return undefined;
+    const failure = classifyBrainFailure(r.error);
+    if (!failure) return undefined;
+    const raw = (r.error ?? "").replace(/\s+/g, " ").trim();
+    const why = raw.length > 160 ? `${raw.slice(0, 159)}…` : raw;
+    if (failure === "auth" || failure === "quota") {
+      if (failure === "auth") {
+        this.brainReady = false;
+        this.setupProbe = { ...this.setupProbe, brain: "unavailable" };
+      }
+      const walks = !this.opts.brain && (this.settings.brain === "auto" || this.settings.brain === "codex") && kind !== undefined && kind !== "openai-responses";
+      const lost = failure === "auth" ? lostWords(kind, label) : `${label} hit its usage limit`;
+      if (walks) {
+        // The walk passes this kind over, with every other it passed over since the last Retry, and raises its row
+        // (the fix, and the brain used meanwhile) once it lands. The restart waits for this turn to end: it cancels
+        // whatever runs, and this turn's failure must still be said. A walk that lands across the Responses line
+        // reopens the session, which flushes the speaker: it waits until the voice has said this line (`watchLine`).
+        log.warn(`${lost} mid-run (${why}); selecting the next backend`);
+        this.failureLine?.now();
+        this.failureLine = this.live ? this.watchLine(this.live) : undefined;
+        setTimeout(() => {
+          if (!this.stopping) void this.restartBrain(lost, { skip: { kind, failure, why } });
+        }, 0);
+        return `${lost}. Switching to the next brain. Ask again.`;
+      }
+      if (failure === "quota") {
+        // A usage limit or a quota lasts hours or needs billing: a minute does not clear it. The server's own words
+        // say when it resets, when they say.
+        this.raiseBrainRow(`${label} brain hit its usage limit (${why}). Try again later.`);
+        return undefined;
+      }
+      const hint = kind ? SIGN_IN_HINTS[kind] : "Sign it in, then press Retry.";
+      this.raiseBrainRow(`${lostWords(kind, label, { brain: true })} (${why}). ${hint}`);
+      this.scheduleSnapshot();
+      return `${lostWords(kind, label)}. ${hint}`;
+    }
+    this.raiseBrainRow(failure === "rate" ? `${label} brain is rate limited (${why}). Try again in a minute.` : `${label} brain could not reach its server (${why}).`);
+    return undefined;
+  }
+
+  /** The one runtime row about the brain in use: a new one replaces the last. */
+  private raiseBrainRow(text: string): void {
+    if (this.brainRuntimeRow && this.brainRuntimeRow !== text) this.clearProblemText(this.brainRuntimeRow);
+    this.brainRuntimeRow = text;
+    this.problemOf("brain.unavailable", text, Engine.BRAIN_REMEDY);
   }
 
   // -------------------------------------------------------------- session
@@ -1426,10 +2579,10 @@ export class Engine extends EventEmitter<EngineEvents> {
     const brain = this.brain;
     const delegation =
       brain instanceof ResponsesBrain
-        ? responsesDelegationConfig({ model: this.settings.brain === "openai-responses" ? this.settings.brainModel : undefined, effort: "low" })
+        ? responsesDelegationConfig({ model: this.settings.brain === "openai-responses" ? this.settings.brainModel : undefined, effort: "low", userName: this.userName })
         : ({ type: "client" } as const);
-    const base = buildLiveInstructions({ alwaysOn: true });
-    const language = languageSection("Kevin", this.settings.language, this.settings.accent);
+    const base = buildLiveInstructions({ alwaysOn: true, userName: this.userName });
+    const language = languageSection(this.userName, this.settings.language, this.settings.accent);
     const about = this.memory.voiceBlock();
     return {
       model: this.config.liveModel,
@@ -1454,7 +2607,15 @@ export class Engine extends EventEmitter<EngineEvents> {
    * the session that is about to start is kept instead of closed at once.
    */
   async go(): Promise<void> {
+    if (this.connecting && this.pauseAtStart) {
+      // Pause, then Go, inside one handshake: the session that is about to start is kept.
+      this.pauseAtStart = false;
+      log.info("go: the pause pressed during the handshake is off; the session is kept");
+      return;
+    }
     if (this.pauseInfo) return this.resume();
+    // A dismissal's farewell still holds the session: not a stop to re-arm. connect() ends the farewell and opens anew.
+    if (this.farewellEnd) return this.connect("go");
     if (this.live || this.connecting) {
       if (!this.wantAwake) {
         log.info(`go: re-armed the ${this.connecting ? "connect" : "session"} a stop had disarmed`);
@@ -1469,7 +2630,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     return this.connect("go");
   }
 
-  /** Open a Live session (legacy verb). While paused it is a resume. Idempotent while one is open or opening. */
+  /** Open a Live session (`go`). While paused it is a resume. Idempotent while one is open or opening. */
   async wake(reason = "command"): Promise<void> {
     if (this.pauseInfo) return this.resume();
     return this.connect(reason);
@@ -1482,28 +2643,44 @@ export class Engine extends EventEmitter<EngineEvents> {
    * reconnect after the server dropped it (`how`; the toast says "back" for the last).
    * A stop or sleep that lands while the socket opens sets `wantAwake` false; the
    * session is then closed the moment it exists (it billed for the handshake, nothing
-   * more) and the transport stays asleep.
+   * more) and the transport stays asleep. A Go or a wake during a dismissal's farewell
+   * (up to FAREWELL_START_MS + FAREWELL_CAP_MS) wins over the word: the farewell ends
+   * now, the sleep closes its session, and a fresh one opens.
    */
-  private async connect(reason: string, resume?: { readonly pause: PauseInfo; readonly continuity: string; readonly how?: "paused" | "restarted" | "reconnected" }): Promise<void> {
+  private async connect(reason: string, resume?: { readonly pause: PauseInfo; readonly continuity: string; readonly how?: ResumeHow }): Promise<void> {
+    if (this.farewellEnd) {
+      // Re-armed instead, the sleep would close the session anyway and leave Go swallowed: asleep, wantAwake true.
+      log.info(`${reason}: pressed during the farewell; it ends now and a fresh session opens after the sleep`);
+      this.farewellEnd();
+      await this.sleeping;
+    }
     log.info(`wake requested (${reason})`);
     this.wantAwake = true;
     if (this.live || this.connecting) return;
     if (!this.config.openaiApiKey) {
       this.endVoiceReconnect();
-      this.problemOf("voice.key", "OPENAI_API_KEY is missing; set it in ~/.hormes/env or .env.local", Engine.SETUP_REMEDY);
+      this.problemOf("voice.key", "OPENAI_API_KEY is missing; set it in ~/.hormes/env (Setup › Voice writes it)", Engine.SETUP_REMEDY);
       this.setPhase("error");
       return;
     }
     this.connecting = true;
-    if (!reason.startsWith("reconnect")) this.kevinSpoke();
-    else this.lastAddressedAt = this.now();
+    let connected!: () => void;
+    this.connectDone = new Promise<void>((resolve) => (connected = resolve));
+    // A Go, a wake or a resume is Kevin's press: presence, and an addressed turn. A reconnect after the server dropped
+    // the session is not: it carries the idle clock as it stood (WG-8), or a network that drops every few minutes
+    // would hold a silent room's session open for ever.
+    const reconnect = reason.startsWith("reconnect");
+    if (!reconnect) this.kevinSpoke();
     this.setPhase("connecting");
     await this.ready();
     // A brain swap in flight (keys changed, settings changed) leaves `this.brain` undefined for a moment; wire() needs it.
     if (this.brainRestart) await this.brainRestart.catch(() => undefined);
     if (!this.wantAwake) {
       this.connecting = false;
+      this.connectDone = undefined;
+      connected();
       this.setPhase("asleep");
+      this.releaseHeldFires();
       return;
     }
     // A fresh process whose predecessor was cut mid-conversation: the first Go inside the
@@ -1527,10 +2704,15 @@ export class Engine extends EventEmitter<EngineEvents> {
       const res = await live.start();
       const at = this.now();
       this.sessionStartedAt = at;
-      this.lastAddressedAt = at;
+      if (!reconnect) this.addressed();
       this.usageSeconds = 0;
+      this.usageRow = { sessionId: res.id, at, seconds: 0, written: false };
       this.contextRatio = undefined;
+      // A new session starts with an empty input buffer: the cap the last one held went with it (V11).
+      this.capReopenPending = false;
+      this.clearProblems("voice.limit", (t) => Engine.SESSION_CAP.test(t));
       this.ledger.append({ at, type: "session.started", sessionId: res.id, voice: this.settings.voice, language: this.settings.language, accent: this.settings.accent, ...(resume ? { resumedFrom: resume.pause.sessionId } : {}) });
+      this.audioTelemetry.open(res.id, res.audio?.format);
       // Grants live with the conversation: a resume continues the chain it left, a new session starts one.
       this.confirmations.beginConversation(resume ? (this.ledger.chainRootOf(resume.pause.sessionId) ?? resume.pause.sessionId) : res.id);
       this.usageBase = { ...this.usageBase, sessions: this.usageBase.sessions + 1 };
@@ -1545,7 +2727,17 @@ export class Engine extends EventEmitter<EngineEvents> {
       if (resume) {
         this.ledger.append({ at, type: "resume", sessionId: res.id, resumedFrom: resume.pause.sessionId, pausedMs: at - resume.pause.at });
         this.pauseInfo = undefined;
-        this.toast(resume.how === "reconnected" ? "back" : "resumed", "info");
+        if (!this.pauseAtStart) this.toast(this.resumeToast(resume.how), "info");
+      }
+      if (this.pauseAtStart) {
+        // Pause landed during the handshake (V12): the session closes the moment it exists and the conversation is
+        // held, as a pause holds one — it billed for the handshake, nothing more. The toast was said at the press.
+        this.pauseAtStart = false;
+        this.endVoiceReconnect();
+        this.clearProblems("voice.connection");
+        log.info(`session ${res.id} started after a pause; closing it at once and holding the pause`);
+        void this.pauseSession(live, { quiet: true });
+        return;
       }
       if (this.muted) live.mute();
       this.setPhase(this.muted ? "muted" : "listening");
@@ -1568,14 +2760,34 @@ export class Engine extends EventEmitter<EngineEvents> {
         this.setPhase("error");
         // The conversation the server cut is not lost with the failed start: Kevin's Go (or Retry)
         // carries it on with the same continuity — the network being down is the common case here.
-        if (resume?.how === "reconnected" && !this.heldReconnect) {
+        if ((resume?.how === "reconnected" || resume?.how === "voice change") && !this.heldReconnect) {
           this.heldReconnect = resume.pause;
           log.info(`the reconnect failed; the conversation (${resume.pause.sessionId}) is held for the next Go until ${new Date(resume.pause.sleepsAt).toISOString()}`);
         }
       }
     } finally {
       this.connecting = false;
+      this.pauseAtStart = false;
+      this.connectDone = undefined;
+      connected();
+      this.releaseHeldFires();
     }
+  }
+
+  /**
+   * The handshake is over: the fires that came during it (`holdForSession`) are said by the session it opened, one
+   * instruction each, as an awake fire is — or, when none opened (stopped, paused at start, failed), their rings and
+   * lines go to the app's speaker now, the phase already quiet (the app holds a frame that beats the snapshot).
+   */
+  private releaseHeldFires(): void {
+    if (this.heldFires.length === 0) return;
+    const held = this.heldFires.splice(0);
+    const open = this.live && this.live.currentState === "started" && (this.phase === "listening" || this.phase === "muted") ? this.live : undefined;
+    for (const h of held) {
+      if (open) open.appendInstructions(null, h.instruction);
+      else for (const e of h.fallback) this.emit("event", e);
+    }
+    log.info(`automations: ${held.length} fire${held.length === 1 ? "" : "s"} from the handshake ${open ? "said by the session" : "rung by the speaker (no session opened)"}`);
   }
 
   /**
@@ -1620,6 +2832,9 @@ export class Engine extends EventEmitter<EngineEvents> {
    */
   private detachLive(live: LiveSession): void {
     if (this.live !== live) return;
+    // The session's last usage row before its close (nothing when it already closed, or never started).
+    this.noteUsage("detach");
+    this.usageRow = undefined;
     // The meter never dips: what the session has billed so far counts now; the closed row adds the rest.
     this.foldUsage(live, this.usageSeconds);
     this.live = undefined;
@@ -1628,20 +2843,26 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.outputLevel = 0;
     this.outlivedSince = 0;
     if (this.delegator) {
-      this.lastDelegations = [...this.lastDelegations, ...this.delegator.all()].slice(-Engine.MAX_DELEGATIONS);
+      // Disposed first: the records it closes as the session goes (a cut turn, a room delegation that waited for a
+      // name) are kept as the ledger has them.
       this.delegator.dispose();
+      this.lastDelegations = [...this.lastDelegations, ...this.delegator.all()].slice(-Engine.MAX_DELEGATIONS);
       this.delegator = undefined;
       // The main turn went with its Delegator; the spawned threads did not (the scheduler is the engine's).
       this.threads.publish(this.threads.table.status(MAIN_THREAD_ID, "idle"));
     }
     // Whatever was still open is an utterance now (on the ledger, out as an event), and
-    // this session's words move to the held record; the next session starts its own clock.
+    // this session's words move to the held record; the next session starts its own clock. A voice turn the room-talk
+    // gate had not decided never sounded: its lines are marked unheard first.
+    this.attention.close();
     this.transcript.settle(Number.MAX_SAFE_INTEGER);
     this.heldTranscript = [...this.heldTranscript, ...this.transcript.all()].slice(-Engine.HELD_TRANSCRIPT_ITEMS);
     this.transcript = this.newTranscript();
+    this.speechEnds.clear();
     if (this.dictating) this.stopDictation("asleep");
     this.outputGateUntil = 0;
     this.gatedFrames = 0;
+    this.stopHeard = undefined;
     this.stopAxWarm();
     this.earReflexes.forgetAll();
     this.scheduleSnapshot();
@@ -1655,15 +2876,26 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.usageFolded.set(live, total);
   }
 
-  /** Today's Live seconds from the ledger: closed sessions' usage, and how many sessions started. */
+  /**
+   * Today's Live seconds from the ledger, each session once: a closed session's `session.closed` row (a lost close
+   * included); a session with no closed row its last `session.usage` row (a daemon died with it open, and no start has
+   * closed it yet); the open session is the meter's own (`usageToday`). And how many sessions started.
+   */
   private loadUsageToday(): void {
     const now = this.now();
     let seconds = 0;
     let sessions = 0;
+    const closed = new Set<string>();
+    const lastUsage = new Map<string, number>();
     for (const row of this.ledger.read(now)) {
-      if (row.type === "session.closed") seconds += Number(row.usageSeconds) || 0;
+      if (row.type === "session.closed") {
+        seconds += Number(row.usageSeconds) || 0;
+        closed.add(row.sessionId);
+      } else if (row.type === "session.usage") lastUsage.set(row.sessionId, Number(row.usageSeconds) || 0);
       else if (row.type === "session.started") sessions += 1;
     }
+    const open = this.live?.session?.id;
+    for (const [id, usage] of lastUsage) if (!closed.has(id) && id !== open) seconds += usage;
     // A session open across midnight is one of today's sessions too.
     if (this.live?.session) sessions += 1;
     const day = Ledger.fileNameFor(now);
@@ -1672,6 +2904,78 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.usageDay = day;
     // A new local day (K1): the retention sweep runs once, at the next tick with no session up (`runPendingSweep`); the day that just ended is today − 1 and never moves.
     if (rolled) this.sweepPending = true;
+  }
+
+  /** At most one `session.usage` row per open session this often (V8 / LM-2): a crash loses no more than this. */
+  static readonly USAGE_ROW_MS = 60_000;
+
+  /**
+   * V8 / LM-2: the open session's billed seconds on the ledger, so a daemon that dies with a session open leaves
+   * them behind. The figure is the server's, never less than the seconds the session has been open (it bills per
+   * second, and `session.usage.updated` arrives late), as the pause row counts it. A `report` is written at once
+   * while the session has no row yet; after that a report or the `tick` writes at most one row a USAGE_ROW_MS;
+   * `detach` writes whatever moved. Only for the open session, and only while it is not closed.
+   */
+  private noteUsage(why: "report" | "tick" | "detach"): void {
+    const row = this.usageRow;
+    const id = this.live?.session?.id;
+    if (!row || row.sessionId !== id) return;
+    const now = this.now();
+    const seconds = Math.max(this.usageSeconds, Math.floor((now - this.sessionStartedAt) / 1000));
+    if (!(seconds > row.seconds)) return;
+    const due = why === "detach" || now - row.at >= Engine.USAGE_ROW_MS || (why === "report" && !row.written);
+    if (!due) return;
+    this.usageRow = { sessionId: id, at: now, seconds, written: true };
+    this.ledger.append({ at: now, type: "session.usage", sessionId: id, usageSeconds: seconds });
+  }
+
+  /**
+   * V8 / LM-2 (W2-5's contract): the session a dead daemon left open, closed before this process writes anything.
+   * Each session the ledger calls open (no closed row, no later start) gets `session.closed` with SESSION_LOST_REASON,
+   * the seconds of its last `session.usage` row (a ledger from before those rows: its last pause row's, else 0), and
+   * as its `at` the newest `at` in the newest day file: the dead daemon's last write, never earlier than any row of
+   * the session. So the close lands in the dead daemon's last day however late this start is, and sorts after the
+   * session's rows. Every reader then counts the session once, from that row. Only the process that holds the state
+   * dir runs it (`ownsStateDir`). A session whose close cannot be read or written (a full or read-only disk) is
+   * logged and skipped, so the sweep never stops the start; the next start tries again.
+   */
+  private closeLostSessions(): void {
+    let ids: string[];
+    let at = Number.NEGATIVE_INFINITY;
+    try {
+      ids = this.ledger.unclosedSessionIds();
+      if (ids.length === 0) return;
+      const newest = this.ledger.days().at(-1);
+      if (newest) for (const row of this.ledger.read(Date.parse(`${newest.replace(/\.jsonl$/, "")}T12:00:00`))) if (row.at > at) at = row.at;
+    } catch (e) {
+      log.warn(`sessions left open: the ledger could not be read (${(e as Error).message}); nothing closed`);
+      return;
+    }
+    if (!Number.isFinite(at)) return;
+    for (const id of ids) {
+      try {
+        const rows = this.ledger.readSession(id);
+        const usage = rows.findLast((r) => r.type === "session.usage" && r.sessionId === id) ?? rows.findLast((r) => r.type === "pause" && r.sessionId === id);
+        const usageSeconds = usage && "usageSeconds" in usage ? Number(usage.usageSeconds) || 0 : 0;
+        this.ledger.append({ at, type: "session.closed", sessionId: id, reason: SESSION_LOST_REASON, usageSeconds });
+        log.info(`session ${id} was open when the previous engine ended; closed it as ${SESSION_LOST_REASON} at ${new Date(at).toISOString()} with ${usageSeconds} s billed`);
+      } catch (e) {
+        log.warn(`session ${id} was left open and is not closed yet: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  /** LM-1: the `thread.ended` rows the construction-time rebuild owes (one per thread the dead daemon left live), written once. */
+  private appendOrphanRows(): void {
+    const rows = this.orphanRows;
+    this.orphanRows = [];
+    for (const row of rows) {
+      try {
+        this.ledger.append(row);
+      } catch (e) {
+        log.warn(`a thread.ended row was not written: ${(e as Error).message}`);
+      }
+    }
   }
 
   /** The meter: today's closed sessions plus what the open one has billed so far. */
@@ -1705,10 +3009,25 @@ export class Engine extends EventEmitter<EngineEvents> {
       return "proxy";
     },
     start: async () => ({ ready: this.brainReady, detail: this.brainDetail }),
-    handle: (task, sink) => {
+    handle: async (task, sink) => {
+      // Kevin asked again while the voice still said why the brain changed (E-SIGNEDOUT): the session is reopened for
+      // the new brain now, and his words ride into it with the conversation (the reconnect answers a request it cut).
+      if (this.acrossWait) {
+        this.acrossWait.now();
+        return { status: "cancelled" };
+      }
       const b = this.brain;
-      if (!b) return Promise.resolve({ status: "failed", summary: "the brain is restarting; ask again in a moment" } as Awaited<ReturnType<Brain["handle"]>>);
-      return b.handle(task, sink);
+      // `error`, not `summary`: the Delegator speaks a failure's error (F-PROXY-RESTARTING).
+      if (!b) return { status: "failed", error: "the brain is restarting; ask again in a moment" };
+      let r: BrainResult;
+      try {
+        r = await b.handle(task, sink);
+      } catch (e) {
+        r = { status: "failed", error: (e as Error).message };
+      }
+      const said = this.noteBrainResult(b, r);
+      // The typed line is what Kevin hears, as it is: a failed result's summary is said without the error's head.
+      return said ? { ...r, error: said, summary: said } : r;
     },
     cancel: () => this.brain?.cancel() ?? Promise.resolve(),
     stop: () => this.brain?.stop() ?? Promise.resolve(),
@@ -1723,6 +3042,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       live,
       transcript: this.transcript,
       brain: this.brainProxy,
+      userName: () => this.userName,
       // Kevin hears the first acting tool as it lands ("clicking the search bar"), not
       // a narration generation before it: the model's first output is the tool call.
       voiceFirstTool: true,
@@ -1747,7 +3067,7 @@ export class Engine extends EventEmitter<EngineEvents> {
             reflexes: {
               match: (u) => this.matchReflex(u),
               run: (reflex, sink) => this.runReflex(reflex, sink),
-              inExchange: () => this.now() - this.lastAddressedAt < Engine.EXCHANGE_WINDOW_MS,
+              inExchange: () => this.inExchange(),
               // The ear may have done these words already; the delegation then only confirms.
               // The prefire check only peeks: a claim there would hide the reflex from the delegation.
               reconcile: (u) => this.reconcileReflex(u),
@@ -1755,27 +3075,32 @@ export class Engine extends EventEmitter<EngineEvents> {
             },
           }),
       // Paused (or dictating, or going to sleep): delegations are recorded and refused, never run.
-      refuse: () => (this.paused ? "paused" : this.dictating ? "Kevin is dictating" : this.sleeping ? "going to sleep" : undefined),
+      refuse: () => (this.paused ? "paused" : this.dictating ? `${this.userName} is dictating` : this.sleeping ? "going to sleep" : undefined),
+      // The room-talk gate (LC-7): Live's delegation for words nobody said to Hormes is refused before the brain, the
+      // eyes, the sleep cue or anything running (B5) — after a bounded wait for a late name when they look like room
+      // talk — and room lines are left out of an addressed request.
+      addressed: (item) => this.attention.addressed(item),
+      delegationAddressed: (liveId, item) => {
+        const v = this.attention.delegation(liveId, item, live.nowMs);
+        return typeof v === "string" ? v !== "room" : v.then((x) => x !== "room");
+      },
+      // …and when the refused words may have been Kevin's unnamed answer to a question of Hormes's, he hears one cue.
+      onNotAddressed: () => this.cueTheName(),
       // A spoken "stop" is an interrupt: the whole of what is running and being said ends; the session stays.
       onStop: (reason) => void this.interrupt(reason, "said"),
       // …and with ≥ 2 threads live the speech half comes first, on the stop word, while the work cut waits for a name.
-      onGateSpeech: () => this.gateSpeech("Kevin said stop"),
-      // The session timeline's zero on the wall clock: the triggering utterance's end becomes timings.speechEndAt.
-      sessionStartedAt: () => this.sessionStartedAt,
+      onGateSpeech: () => this.gateSpeech(`${this.userName} said stop`),
+      // PERF-6: when the triggering utterance ended, on the wall clock: its last input delta's arrival (a typed line's
+      // own time). Never Live's timeline placed through session.started: the two clocks drift.
+      speechEndAt: (item) => this.speechEnds.get(item.id) ?? (item.source === "typed" ? item.at : undefined),
       // Live's path for a dismissal (the voice's attention gate is the addressing test there): the one sleep function.
       onSleep: (phrase) => void this.fallAsleep("said", { phrase, farewell: true }),
-      // The threads a delegation's brain split off: the parent drains before it finishes; Kevin's yes reaches the floor's lane.
-      workers: {
-        drain: (id, signal) => this.threads.drain(id, signal),
-        running: (id) => this.threads.running(id),
-        resume: (laneId) => this.threads.resume(laneId),
-        floorLane: () => this.threads.floorLane(),
-        inExchange: () => this.now() - this.lastAddressedAt < Engine.EXCHANGE_WINDOW_MS,
-      },
-      // The table and the scheduler: thread verbs and follow-ups by name answered before the supersede, the 350 ms stop rule, the overflow rule.
+      // The table and the scheduler: thread verbs and follow-ups by name answered before the supersede, the 350 ms stop rule,
+      // the overflow rule, the parent's drain before it finishes, Kevin's yes reaching the floor's lane.
       threads: this.delegatorThreads(),
       // The composite look for notes[0], raced with the eyes' shot; a cache read of what the reading helper already knows.
-      look: () => this.compositeLook(),
+      // With threads live, one more line names them (TH-3).
+      look: () => this.mainLook(),
       // What Hormes knows about Kevin, ≤ BRAIN_MEMORY_TOKENS per delegation, raced at 250 ms
       // (B4 wires `DelegatorOptions.memory` and `BrainTask.memory`; spread so it typechecks before that lands).
       ...this.memoryForDelegator(),
@@ -1793,12 +3118,20 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.emit("reflex", label, ms, prefired);
     });
     this.delegator = delegator;
+    // The exchange this session starts in: a Go, a wake or a resume opens one at the session start (connect() has
+    // counted Kevin's press already); a reconnect carries one only if it was open when the server dropped the last.
+    this.attention.reset(this.inExchange(), { acks: live.acknowledgesAppends === true });
 
     // A session that was paused, stopped or replaced still emits for a moment (its
     // closed event, a last frame): nothing from it may touch the transport's state.
     const current = (): boolean => this.live === live;
     live.on("audio", (pcm) => {
       if (!current()) return;
+      // The room-talk gate decides a voice turn by its first audible frame at the latest: a turn nobody asked for (an
+      // answer to the room) is dropped whole, its silence too, until the voice has been quiet VOICE_TURN_GAP_MS.
+      const level = rms(pcm);
+      const asked = this.attention.frame(pcm, level >= Engine.AUDIBLE_OUTPUT_LEVEL, live.nowMs);
+      this.audioTelemetry.delta(live.session?.id, pcm.length, this.now() < this.outputGateUntil || !asked);
       // After a stop the voice is muted here until Kevin speaks or the gate lapses:
       // the API has no interrupt, so a sentence already in flight is simply not played.
       if (this.now() < this.outputGateUntil) {
@@ -1806,33 +3139,77 @@ export class Engine extends EventEmitter<EngineEvents> {
         this.outputLevel = 0;
         return;
       }
-      this.outputLevel = rms(pcm);
+      if (!asked) {
+        this.outputLevel = 0;
+        return;
+      }
+      this.outputLevel = level;
       this.lastOutputAudioAt = this.now();
       this.emit("audio", pcm);
     });
     live.on("inputTranscript", (delta, s, e) => {
       if (!current()) return;
-      if (this.outputGateUntil) this.liftOutputGate("Kevin spoke");
-      this.kevinSpoke();
-      this.transcript.push({ speaker: "kevin", delta, startMs: s, endMs: e });
+      // Whatever the microphone heard — Kevin, a TV, two people talking. Presence (he may be in the room), never
+      // attention: the idle clock moves on an addressed turn, and words that name Hormes are one (W1-1).
+      this.lastHeardAt = this.now();
+      this.markKevin();
+      const item = this.transcript.push({ speaker: "kevin", delta, startMs: s, endMs: e });
+      this.stampSpeechEnd(item.id);
+      // Judged as it arrives: typed, named, inside the exchange, or the room's. Words that name Hormes are a turn for
+      // the idle clock once per utterance (Live splits one breath around the voice's words: "Jar" | reply | "head" is
+      // one name): a TV that says the name once and talks on is one turn, not one per fragment.
+      const heard = this.attention.heard(item, delta, s);
+      if (heard.named && item.id !== this.namedItemId) {
+        this.namedItemId = item.id;
+        this.named();
+      }
+      this.playReleased(heard.released);
+      // The output gate holds for a stop until Kevin says something new (V10); a stop said over the voice while
+      // nothing runs is cut here, since the Delegator judges stops only while work runs (V9).
+      if (this.outputGateUntil && (this.now() >= this.outputGateUntil || this.newSpeech(delta, item, s, e))) this.liftOutputGate(`${this.userName} spoke`);
+      if (!this.outputGateUntil) this.stopOverVoice(item);
     });
     live.on("outputTranscript", (delta, s, e) => {
       if (!current()) return;
-      // What the model said goes on the record even when the gate kept it off the speaker.
-      this.transcript.push({ speaker: "hormes", delta, startMs: s, endMs: e });
+      // What the model said goes on the record even when a gate kept it off the speaker.
+      const said = this.transcript.push({ speaker: "hormes", delta, startMs: s, endMs: e });
       if (this.now() < this.outputGateUntil) return; // muted locally: not "speaking"
-      this.lastOutputSpeechAt = this.now();
-      this.lastAddressedAt = this.now();
-      this.recomputePhase();
+      // Words of a turn nobody asked for are on the record and nothing more: not speech, not a turn, no exchange. A
+      // granted turn's words reach the engine through `voiceSpoke`, at once or at the turn's first audible frame.
+      this.attention.output(delta, s, e, said.id);
     });
-    live.on("delegation", () => {
+    live.on("delegation", (liveId) => {
       if (!current()) return;
-      this.kevinSpoke();
+      // Live judged the words addressed: attention — when the engine agrees (the Delegator refuses the room's). Not
+      // presence (RAIL-14) — the model acting is not Kevin at the Mac. Words merely inside the window move the idle
+      // clock, never the ceiling's.
+      const counted = (v: Verdict): void => {
+        if (current() && v !== "room") this.addressed({ engaged: v !== "window" });
+      };
+      const v = this.attention.delegation(liveId, this.transcript.last("kevin"), live.nowMs);
+      if (typeof v === "string") counted(v);
+      else void v.then(counted);
+    });
+    // An append that asks the voice for words (LiveSession's `ask`): the first voice turn after it is the engine's, with
+    // the append's provenance — an aside (the pre-sleep clause, the cue), the result of work only the window admitted,
+    // or Hormes's own turn to Kevin.
+    live.on("ask", (_channel, delegationId, eventId, content) => {
+      if (current()) this.attention.ask({ aside: this.announcing || this.cueing, delegationId, eventId, content });
+    });
+    // The server took an append in: the voice's answer to it can begin only now.
+    live.on("appended", (channel, clientEventId) => {
+      if (current() && channel !== "thinking" && clientEventId) this.attention.acked(clientEventId);
+    });
+    // A Responses backend speaks its own result for the work Kevin asked for: that turn is asked for too.
+    live.on("responseEvent", (delegationId, event) => {
+      if (!current() || delegationId === null || delegationId !== this.delegator?.active?.liveId) return;
+      if (String(event["type"] ?? "").startsWith("response.output_text")) this.attention.ask({ delegationId });
     });
     live.on("usage", (seconds, ratio) => {
       if (!current()) return;
       this.usageSeconds = seconds;
       this.contextRatio = ratio;
+      this.noteUsage("report");
       this.scheduleSnapshot();
     });
     live.on("error", (e, cid) => {
@@ -1847,6 +3224,11 @@ export class Engine extends EventEmitter<EngineEvents> {
       // reached session.started has no started row and gets no closed row.
       this.foldUsage(live, usage);
       const id = live.session?.id;
+      // Its closed row is its last word on usage: no `session.usage` row after it.
+      if (id && this.usageRow?.sessionId === id) this.usageRow = undefined;
+      // The playback figures first, so the row sits inside the session it describes.
+      const playout = id ? this.audioTelemetry.close(id, this.audioState) : undefined;
+      if (playout) this.ledger.append(playout);
       if (id) this.ledger.append({ at: this.now(), type: "session.closed", sessionId: id, reason, usageSeconds: usage });
       // Its rows are complete: memory reads them at the next quiet tick (never while a session is up).
       if (id) this.memory.sessionClosed(id);
@@ -1855,7 +3237,11 @@ export class Engine extends EventEmitter<EngineEvents> {
         this.scheduleSnapshot();
         return;
       }
-      // The open session ended under us: expired, the connection dropped, or the server closed it.
+      // The open session ended under us: expired, the connection dropped, or the server closed it. A brain turn still
+      // running belongs to the conversation that just ended (V1): it is cut here, with its delegation, before the
+      // Delegator goes — left running, no Stop, Pause or sleep could reach it (they speak to the next Delegator) and
+      // the daemon would keep taking its tool calls. The reconnect's continuity says it was cut.
+      this.cutBrainTurn(reason === "expired" || reason === "connection_lost" ? Engine.CONNECTION_DROPPED : "the voice session closed");
       this.detachLive(live);
       if (!id) {
         // The socket closed before session.started (refused, network down): start() rejects and connect()'s
@@ -1875,7 +3261,7 @@ export class Engine extends EventEmitter<EngineEvents> {
         // window): the continuity is built when that connect runs, so the gap it names is the real one;
         // it decays as a pause would, and memory does not read the conversation while it is held.
         const at = this.now();
-        this.heldReconnect = { at, sessionId: id, usageSeconds: usage, sleepsAt: at + Math.max(Engine.PAUSE_MIN_MS, this.settings.idleSleepMinutes * 60_000) };
+        this.heldReconnect = { at, sessionId: id, usageSeconds: usage, sleepsAt: at + this.pauseHoldMs() };
         // Re-checked when it fires: a stop or a pause in the meantime wins over the reconnect.
         this.cancelReconnectTimer();
         this.reconnectTimer = setTimeout(() => {
@@ -1889,32 +3275,46 @@ export class Engine extends EventEmitter<EngineEvents> {
     });
   }
 
-  /** The legacy verb: the `sleep` command without a cause. */
-  sleep(): Promise<void> {
-    return this.fallAsleep("command");
-  }
-
-  /** How long the voice gets for its one-word farewell before the session closes regardless. */
+  /** How long the voice gets for its one-word farewell, counted from its first words, before the session closes regardless. */
   static readonly FAREWELL_CAP_MS = 1800;
-  /** Quiet after the farewell's first words (no transcript delta, no audible frame) before the close. */
+  /**
+   * The time the word may take to begin after it is asked for. GPT-Live-1 answers an append in 1.89 s median and
+   * 2.25 s p90 to the first audible frame, and in 2.0 s or less to the first transcript (LC-5, n=10, 2026-10-06). A cap
+   * counted from the ask closed the session before "night." was heard.
+   */
+  static readonly FAREWELL_START_MS = 3000;
+  /** Quiet after the farewell's sound (no transcript delta, no audible frame) before the close. */
   static readonly FAREWELL_QUIET_MS = 300;
-  static readonly FAREWELL_LINE = 'Kevin dismissed you. Say exactly one word — "night." — and nothing else.';
+  /**
+   * The quiet after the word's transcript until its first audible frame: the transcript leads the sound by 166-466 ms,
+   * median ~315 (LC-5, n=10), so FAREWELL_QUIET_MS counted from the transcript usually closed before the word was heard.
+   */
+  static readonly FAREWELL_ONSET_MS = 700;
+  /** The farewell with the user's name (release F1); FAREWELL_LINE is the default name's, what the tests pin. */
+  static farewellLine(userName: string): string {
+    return `${userName} dismissed you. Say exactly one word — "night." — and nothing else.`;
+  }
+  static readonly FAREWELL_LINE = Engine.farewellLine("Kevin");
   /** The voice said its farewell on its own (Live's path) within this long: no second one is asked for. */
   private static readonly FAREWELL_SAID_MS = 2000;
 
   /**
-   * Sleep — the ONE closer for every cause: a spoken dismissal ("said"), the idle
-   * timer, a pause that decayed, a brain swap, the blob dropped into the dock, the
-   * app's sleep command, the transport's Stop (which writes its own `stop` row first)
-   * and shutdown. Idempotent: the ear, Live's delegation and the dock saying so at once
-   * are one sleep. Order: the `sleep` row (before the detach, so it lands in the
-   * closing session's log) → everything a stop cuts (both helpers, the lease, every
-   * worker, the questions, the delegation) → for a dismissal, one word from the voice
-   * (FAREWELL_LINE, unless it already said "night."), waited for until its first words
-   * plus FAREWELL_QUIET_MS, capped at FAREWELL_CAP_MS — the session bills meanwhile →
-   * detach and close (`sleep:<cause>`) → phase asleep → toast → the worker processes
-   * end. Without a farewell the phase flips before the first await, which `pressStop`
-   * needs (asleep synchronously). From paused, the held conversation is let go.
+   * Sleep — the ONE closer for every cause: a dismissal ("said": the ear, Live's
+   * delegation or the composer), the idle timer, a pause that decayed, a brain swap,
+   * the blob dropped into the dock, the app's sleep command, the transport's Stop
+   * (which writes its own `stop` row first) and shutdown. Idempotent: the ear, Live's
+   * delegation and the dock saying so at once are one sleep. Order: the `sleep` row
+   * (before the detach, so it lands in the closing session's log) → everything a stop
+   * cuts (both helpers, the lease, every thread, the questions, the delegation) → for
+   * a dismissal, one word from the voice (FAREWELL_LINE, unless it already said
+   * "night."), waited for: 3 s for the word to begin (FAREWELL_START_MS), then 300 ms
+   * quiet after its sound (FAREWELL_QUIET_MS; 700 ms, FAREWELL_ONSET_MS, before the
+   * first audible frame), capped at 1.8 s from the first words (FAREWELL_CAP_MS); the
+   * session closing ends the wait at once. The session bills meanwhile → detach and
+   * close (`sleep:<cause>`) → phase asleep → toast → the thread processes end. Without
+   * a farewell the phase flips before the first await, which `pressStop` needs
+   * (asleep synchronously). From paused, or with a reconnect held, the held
+   * conversation is let go, and its `sleep` row tells the next process so.
    */
   fallAsleep(cause: SleepCause, o: { readonly phrase?: string | undefined; readonly farewell?: boolean | undefined } = {}): Promise<void> {
     if (this.sleeping) {
@@ -1927,21 +3327,25 @@ export class Engine extends EventEmitter<EngineEvents> {
       const live = this.live;
       const wasPaused = this.pauseInfo !== undefined;
       const wasConnecting = this.connecting;
+      // A conversation the server cut that a reconnect was to carry on (the 500 ms window, or a failed reconnect held for Go).
+      const wasHeld = this.heldReconnect !== undefined || this.reconnectTimer !== undefined;
       const sessionId = live?.session?.id;
       this.wantAwake = false;
       this.pauseInfo = undefined;
+      this.pauseAtStart = false;
       // The held conversation is let go — a pause's, and the one a pending reconnect was to carry on.
       this.dropHeldReconnect();
-      // Only when there is something to put to sleep: asleep already, there is nothing to record.
+      // Only when there is something to put to sleep: asleep already, there is nothing to record. A held conversation
+      // is something: the row is what tells the next process not to resume it (restoreFromLedger).
       const farewell = o.farewell === true && live !== undefined && !wasConnecting && live.currentState === "started" && !this.outputGated;
-      if (live || wasPaused || wasConnecting) this.ledger.append({ at: t0, type: "sleep", cause, ...(o.phrase ? { phrase: o.phrase } : {}), ...(sessionId ? { sessionId } : {}), ...(farewell ? { farewell: true } : {}) });
+      if (live || wasPaused || wasConnecting || wasHeld) this.ledger.append({ at: t0, type: "sleep", cause, ...(o.phrase ? { phrase: o.phrase } : {}), ...(sessionId ? { sessionId } : {}), ...(farewell ? { farewell: true } : {}) });
       // Quiet: the closing session speaks for the whole stop; nothing else is appended to it.
       const { cancel } = this.cutEverything(`going to sleep (${cause})`, "sleep");
       if (farewell && live) {
         // Live's path: the voice may have said "night." before its delegation landed here — then only the word's tail is waited for.
-        const said = this.transcript.last("hormes");
+        const said = this.lastSaid();
         const alreadySaid = said !== undefined && t0 - said.at < Engine.FAREWELL_SAID_MS && /\b(night|sleeping)\b/i.test(said.text);
-        if (!alreadySaid) live.appendInstructions(null, Engine.FAREWELL_LINE);
+        if (!alreadySaid) live.appendInstructions(null, Engine.farewellLine(this.userName));
         await this.farewell(live, alreadySaid);
       }
       if (live && !this.connecting) {
@@ -1955,8 +3359,10 @@ export class Engine extends EventEmitter<EngineEvents> {
       if (cause === "said") this.toast("night", "info");
       else if (cause === "dock") this.toast("asleep", "info");
       log.info(`asleep (${cause}${o.phrase ? `: "${o.phrase}"` : ""}${farewell ? ", after the farewell" : ""})`);
-      // The worker processes — the spare too — and the brain's own cancel; neither holds anything up.
-      await this.bounded(Promise.all([this.workers.stopAll(), cancel]));
+      // The thread processes — the spare too — and the brain's own cancel; neither holds anything up.
+      await this.bounded(Promise.all([this.threads.stopAll(), cancel]));
+      // Asleep in the notch, the weights need not sit in memory: a local brain lets them go (Ollama keep_alive 0); warmUp() reloads them at wake.
+      await this.bounded((this.brain?.cool?.() ?? Promise.resolve()).catch((e: Error) => log.debug(`brain cool at sleep: ${e.message}`)));
     })();
     this.sleeping = run.finally(() => {
       this.sleeping = undefined;
@@ -1966,42 +3372,68 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   /**
-   * Wait for the farewell: the voice's first output-transcript delta after the
-   * append, then FAREWELL_QUIET_MS with no further delta and no audible frame; or
-   * FAREWELL_CAP_MS. `spoken`: the word is already out — only its tail is waited
-   * for. Real timers (they pace the voice, not the session clock); every one is
-   * cleared however the wait ends.
+   * Wait for the farewell. The word gets FAREWELL_START_MS to begin (its first
+   * output-transcript delta after the append), then FAREWELL_CAP_MS from that delta at
+   * most. Inside that, the close comes after FAREWELL_QUIET_MS with no further delta and
+   * no audible frame once the word's sound is heard, and after FAREWELL_ONSET_MS before
+   * it (the transcript leads the sound). The session closing, or leaving `started`, ends
+   * the wait at once: there is nothing left to hear, and a sleep still waiting would
+   * swallow the next dismissal. `spoken`: the word is already out, so only its tail is
+   * waited for, within FAREWELL_CAP_MS. Real timers (they pace the voice, not the
+   * session clock); every timer and listener is cleared however the wait ends.
    */
   private farewell(live: LiveSession, spoken = false): Promise<void> {
     return new Promise<void>((resolve) => {
       let quiet: NodeJS.Timeout | undefined;
       let done = false;
+      // The word has begun (its first transcript delta), and its sound has been heard (an audible frame).
+      let begun = spoken;
+      let heard = spoken;
       const finish = (): void => {
         if (done) return;
         done = true;
         clearTimeout(cap);
         if (quiet) clearTimeout(quiet);
         live.off("outputTranscript", onDelta);
+        live.off("state", onState);
+        live.off("closed", finish);
         this.off("audio", onAudio);
         this.farewellEnd = undefined;
         resolve();
       };
       const armQuiet = (): void => {
         if (quiet) clearTimeout(quiet);
-        quiet = setTimeout(finish, Engine.FAREWELL_QUIET_MS);
+        quiet = setTimeout(finish, heard ? Engine.FAREWELL_QUIET_MS : Engine.FAREWELL_ONSET_MS);
         quiet.unref?.();
       };
-      const onDelta = (): void => armQuiet();
+      const onDelta = (): void => {
+        if (!begun) {
+          // The word has begun: from here it gets FAREWELL_CAP_MS at most.
+          begun = true;
+          clearTimeout(cap);
+          cap = setTimeout(finish, Engine.FAREWELL_CAP_MS);
+          cap.unref?.();
+        }
+        armQuiet();
+      };
       // Audible frames stretch the quiet window once the word has begun; the API's silence frames do not.
       const onAudio = (): void => {
-        if (quiet && this.outputLevel >= Engine.AUDIBLE_OUTPUT_LEVEL) armQuiet();
+        if (!quiet || this.outputLevel < Engine.AUDIBLE_OUTPUT_LEVEL) return;
+        heard = true;
+        armQuiet();
       };
-      const cap = setTimeout(finish, Engine.FAREWELL_CAP_MS);
+      const onState = (state: string): void => {
+        if (state !== "started") finish();
+      };
+      let cap = setTimeout(finish, spoken ? Engine.FAREWELL_CAP_MS : Engine.FAREWELL_START_MS);
       cap.unref?.();
       live.on("outputTranscript", onDelta);
+      live.on("state", onState);
+      live.on("closed", finish);
       this.on("audio", onAudio);
       this.farewellEnd = finish;
-      if (spoken) armQuiet();
+      if (live.currentState !== "started") finish();
+      else if (spoken) armQuiet();
     });
   }
 
@@ -2031,23 +3463,123 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   /**
+   * The app's audio graph read back (design12): kept in the snapshot for `status`, the doctor and
+   * the Console; `undefined` when the app disconnects. `since` is stamped here when `running`
+   * goes true so the surfaces can say how long the graph has been up. Coalesced: a frame equal
+   * to the last one schedules nothing. The engine does nothing else with it — the graph is the
+   * app's, and the one setting behind it (`Settings.audio`) is written only by set-settings.
+   */
+  reportAudioState(state: AudioState | undefined): void {
+    const before = this.audioState;
+    if (state === undefined) {
+      this.audioState = undefined;
+      if (before) this.scheduleSnapshot();
+      return;
+    }
+    const since = state.running ? (before?.running ? before.since : this.now()) : undefined;
+    const next: AudioState = { ...state, ...(since !== undefined ? { since } : {}) };
+    if (before && sameAudioState(before, next)) return;
+    this.audioState = next;
+    this.audioTelemetry.frame(next);
+    this.scheduleSnapshot();
+  }
+
+  /** One `audio.guard` row per Kevin turn while the guard is on (design12): the counters as the app last reported them. */
+  private appendGuardRow(at: number): void {
+    const a = this.audioState;
+    if (!a?.guardOn) return;
+    const sessionId = this.live?.session?.id;
+    this.ledger.append({
+      at,
+      type: "audio.guard",
+      ...(sessionId ? { sessionId } : {}),
+      tailMs: a.guardTailMs,
+      ...(a.guardHeldMs !== undefined ? { heldMs: a.guardHeldMs } : {}),
+      gated: a.gated,
+      chunks: a.chunks,
+      breakthroughs: a.breakthroughs,
+      fallback: a.fallback,
+    });
+  }
+
+  /**
    * Text Kevin typed in the Console (DECISIONS §10). On the record FIRST — `Transcript.pushTyped`, so the `heard`
    * row is written and the request window, the yes check and the reflexes read typed words as they read speech —
-   * then, with TYPED_REFLEXES on, offered to the ear's grammar (a hands op within ~300 ms and the voice told it is
+   * then offered to the ear's grammar (a hands op within ~300 ms and the voice told it is
    * done), a typed yes armed as a spoken one is (or relayed to the thread whose question holds the floor, never
    * superseding the main turn), and finally the one instruction to Live. Typing while paused resumes first: the
    * words reach the new session. Typing while ASLEEP is REFUSED with a toast and the text kept in the composer —
    * `Settings.typedWakes` (default false): a stray Return must never open a paid session; with it on, the line
    * wakes Hormes and reaches the new session. One log line with ms per call.
+   *
+   * The exception, BEFORE the resume or wake: a voice or accent typed while paused or asleep ("switch voice to
+   * marin", the `set_voice` reflex) is a pick, and a pick is free. Run first — the reflex only patches the setting
+   * with no session open — so the session that opens next speaks it and there is nothing left to reopen: one paid
+   * start at most, never the old voice's session closed a moment after it opened. Paused, or asleep with
+   * typedWakes off, the words are done with here (a toast says when it is heard); with typedWakes on the wake
+   * opens on the new voice and the reflex is already handled.
+   *
+   * The composer is the fourth sleep entry (after the ear, Live's delegation and the sleep command): a typed
+   * dismissal ("that's all for now", the `sleep` grammar) goes to `fallAsleep("said")`, never to Live as words. Awake,
+   * Live is asked for its farewell and nothing else. Paused or with a reconnect held, it sleeps with no farewell and
+   * opens no session. Asleep, it is a toast and nothing opens, even with typedWakes on. During a handshake it waits
+   * for the session like any line, then sleeps it.
    */
   async sayText(text: string): Promise<void> {
     const t0 = performance.now();
     const t = text.trim();
     if (!t) return;
-    if (this.pauseInfo) await this.resume();
+    let picked: { readonly did: string } | undefined;
+    if (!this.live && this.matchReflex(t)?.kind === "set_voice") {
+      const outcome = await this.earReflexes.typed(t, this.now(), { free: true });
+      if (outcome?.ok) {
+        const answer = outcome.result.kind === "text" ? outcome.result.text : "";
+        const when = this.pauseInfo ? "heard when the session resumes" : "heard at the next Go";
+        const wakes = !this.pauseInfo && this.settings.typedWakes === true;
+        // An unknown name is the reflex's own line; a pick is the voice and when it speaks — unless the wake is the answer.
+        if (answer) this.toast(answer, "warn");
+        else if (!wakes) this.toast(`${Engine.voiceLine(this.settings.voice, this.settings.accent)} · ${when}`, "info");
+        if (!wakes) {
+          log.info(`say-text: ${t.length} chars while ${this.pauseInfo ? "paused" : "asleep"} → ${outcome.reflex.label} (${answer || when}) in ${Math.round(performance.now() - t0)} ms; no session opened`);
+          return;
+        }
+        picked = { did: answer };
+      }
+    }
+    // A dismissal typed with no session open is never a reason to open one. Paused, or with a reconnect held, it lets
+    // the held conversation go: asleep, no farewell, nothing billed. Asleep, there is nothing to put to sleep, whatever
+    // Settings.typedWakes says. A handshake in flight keeps the path below: the line waits for its session, then sleeps it.
+    if (!this.live && !this.dictating && parseReflex(t)?.kind === "sleep") {
+      if (this.pauseInfo || this.heldReconnect) {
+        const held = this.pauseInfo ? "paused" : "a reconnect was held";
+        await this.fallAsleep("said", { phrase: t });
+        log.info(`say-text: ${t.length} chars while ${held} → a dismissal; asleep, no session opened (${Math.round(performance.now() - t0)} ms)`);
+        return;
+      }
+      if (!this.connecting) {
+        this.toast("asleep already", "info");
+        log.info(`say-text: ${t.length} chars while asleep → a dismissal; nothing to put to sleep, no session opened (${Math.round(performance.now() - t0)} ms)`);
+        return;
+      }
+    }
+    // A handshake in flight (Go a moment ago, a resume, a reconnect): the line waits for its session (V6).
+    const waited = this.connecting && !this.live && this.connectDone !== undefined;
+    if (waited) await this.connectDone;
+    else if (this.pauseInfo) await this.resume();
+    if (!this.live && this.pauseInfo) {
+      // The resume failed (the network is down): the conversation is still held, and the words did not go (V6).
+      this.toast("not sent · could not resume, still paused", "warn");
+      log.info(`say-text: ${t.length} chars while paused → the resume failed in ${Math.round(performance.now() - t0)} ms; not sent`);
+      return;
+    }
+    if (!this.live && waited) {
+      this.toast("not sent · could not wake", "warn");
+      log.info(`say-text: ${t.length} chars during a handshake → the session did not open in ${Math.round(performance.now() - t0)} ms; not sent`);
+      return;
+    }
     if (!this.live) {
       if (this.settings.typedWakes !== true) {
-        this.toast("asleep — press Go", "warn");
+        this.toast("asleep · press Go", "warn");
         log.info(`say-text: ${t.length} chars while asleep → refused in ${Math.round(performance.now() - t0)} ms (Settings.typedWakes off; the text stays in the composer)`);
         return;
       }
@@ -2061,14 +3593,25 @@ export class Engine extends EventEmitter<EngineEvents> {
     const live = this.live;
     this.kevinSpoke();
     const item = this.transcript.pushTyped(t, live.nowMs);
+    // Typed to Hormes: addressed, and the exchange is open from it. The append below is the ask (LiveSession's `ask`).
+    if (item) this.attention.typed(item);
+    // A typed dismissal ("that's all for now") is typed to Hormes, so addressed, and the engine is its entry, as the ear
+    // is for speech. GPT-Live-1 answers a typed dismissal "night." but raises no delegation for it (LC-4, 2026-10-06,
+    // 0 of 3), so left to Live's delegation the session stayed open and billing. Live gets only the farewell line.
+    if (!this.dictating && parseReflex(t)?.kind === "sleep") {
+      if (item) this.delegator?.typedHandled(item);
+      log.info(`say-text: ${t.length} chars → a dismissal; asleep after the farewell (${Math.round(performance.now() - t0)} ms)`);
+      void this.fallAsleep("said", { phrase: t, farewell: true });
+      return;
+    }
     const isYes = YES_PATTERN.test(t);
     if (isYes) {
       // A typed yes while a thread's question holds the floor is that thread's: relayed, the main turn untouched.
       const floor = this.threads.floorThread();
       if (floor && floor.id !== MAIN_THREAD_ID) {
-        const r = await this.threads.answerYes(floor.id);
+        const r = await this.threads.answerYes(floor.id, { words: t });
         if (item) this.delegator?.typedHandled(item);
-        live.appendInstructions(null, r.ok ? `Kevin just typed "${t}": his yes went to ${floor.name}'s question. Say one word and wait.` : `Kevin just typed "${t}", but ${r.reason ?? "it was refused"}. Tell him in one sentence.`);
+        live.appendInstructions(null, r.ok ? `${this.userName} just typed "${t}": that yes went to ${floor.name}'s question. Say one word and wait.` : `${this.userName} just typed "${t}", but ${r.reason ?? "it was refused"}. Tell ${this.userName} in one sentence.`);
         log.info(`say-text: yes → ${floor.name} (${r.ok ? "relayed" : (r.reason ?? "refused")}) in ${Math.round(performance.now() - t0)} ms`);
         return;
       }
@@ -2077,9 +3620,12 @@ export class Engine extends EventEmitter<EngineEvents> {
     }
     // The reflex first (M5): the hands act before the voice has decided anything; the instruction then says so,
     // and the words are done with (they must not ride into the next spoken request).
-    let did: string | undefined;
-    let meta = false;
-    if (Engine.TYPED_REFLEXES && !isYes) {
+    let did: string | undefined = picked?.did;
+    let meta = picked !== undefined;
+    if (picked) {
+      // The pick ran before the wake (above); the new session speaks with it, and Live's delegation for the words reconciles as done.
+      if (item) this.delegator?.typedHandled(item);
+    } else if (!isYes) {
       const outcome = await this.earReflexes.typed(t, this.now());
       if (outcome?.ok) {
         meta = outcome.reflex.meta === true;
@@ -2089,18 +3635,44 @@ export class Engine extends EventEmitter<EngineEvents> {
         if (item) this.delegator?.typedHandled(item);
       }
     }
-    const typed = `Kevin just typed (treat it exactly like speech): "${t}".`;
-    live.appendInstructions(
-      null,
-      did === undefined
-        ? `${typed} Respond to it now; delegate if it asks for anything the backend does.`
+    if (this.live !== live) {
+      // The reflex reopened the session (a voice switch): the new one carries its own first line; the closed one hears nothing.
+      log.info(`say-text: ${t.length} chars → the session was reopened by the reflex (${(did || "handled").slice(0, 60)}) in ${Math.round(performance.now() - t0)} ms`);
+      return;
+    }
+    // A reflex's answer is Hormes's own words; a long one (a status table) is cut to what the answer line holds.
+    const said = did === undefined ? undefined : cutToTokens(did, Engine.TYPED_ANSWER_TOKENS);
+    const respond =
+      said === undefined
+        ? "Respond to it now; delegate if it asks for anything the backend does."
         : meta
-          ? did
-            ? `${typed} Hormes already answered it: "${did}" Say that to Kevin, in these words, and wait.`
-            : `${typed} Hormes already handled it. Say one word and wait.`
-          : `${typed} Hormes already did it: ${did} Say one word, or the answer, and wait.`,
-    );
-    log.info(`say-text: ${t.length} chars → ${live.session?.id ?? "(connecting)"} in ${Math.round(performance.now() - t0)} ms${did !== undefined ? ` (reflex: ${(did || "handled").slice(0, 60)})` : ""}`);
+          ? said
+            ? `Hormes already answered it: "${said}" Say that to ${this.userName}, in these words, and wait.`
+            : "Hormes already handled it. Say one word and wait."
+          : `Hormes already did it: ${said} Say one word, or the answer, and wait.`;
+    // Every append is capped at 500 tokens (V5): a long paste goes over as parts to read, then one short line to answer.
+    const appends = Engine.typedAppends(this.userName, t, respond);
+    for (const text of appends) live.appendInstructions(null, text);
+    log.info(`say-text: ${t.length} chars → ${live.session?.id ?? "(connecting)"}${appends.length > 1 ? ` in ${appends.length - 1} part${appends.length > 2 ? "s" : ""}` : ""} in ${Math.round(performance.now() - t0)} ms${did !== undefined ? ` (reflex: ${(did || "handled").slice(0, 60)})` : ""}`);
+  }
+
+  /** Tokens one append may carry: nine tenths of Live's 500-token cap, so no estimate sits on the cap. */
+  static readonly APPEND_TOKENS = 450;
+  /** Tokens a reflex's answer may take on the line that asks Live to say it (`sayText`). */
+  static readonly TYPED_ANSWER_TOKENS = 300;
+
+  /**
+   * The appends a typed line goes to Live as (V5). One, when the line and what to do with it fit an append.
+   * Otherwise the text in parts to read, its line breaks kept, each within APPEND_TOKENS with the words around it,
+   * then one short line that says to answer. A text that fits one part is not "part 1 of 1".
+   */
+  static typedAppends(userName: string, text: string, respond: string): string[] {
+    const whole = `${userName} just typed (treat it exactly like speech): "${text}". ${respond}`;
+    if (typedTokens(whole) <= Engine.APPEND_TOKENS) return [whole];
+    const head = (i: number, n: number): string => (n === 1 ? `${userName} just typed a long message. Read it and do not answer yet: "` : `${userName} just typed a long message, part ${i + 1} of ${n}. Read it and do not answer yet: "`);
+    const parts = splitTyped(text, Engine.APPEND_TOKENS - typedTokens(`${head(998, 999)}"`));
+    const n = parts.length;
+    return [...parts.map((part, i) => `${head(i, n)}${part}"`), `That was all of what ${userName} just typed${n === 1 ? "" : `, in ${n} parts`}. Treat it exactly like speech. ${respond}`];
   }
 
   /**
@@ -2120,17 +3692,44 @@ export class Engine extends EventEmitter<EngineEvents> {
     // Both helpers' pending requests (each signals its own in-flight type), the lease, every thread, the acting queue.
     const dropped = this.pool.cancelAll(reason);
     this.lease.cancelAll(reason);
-    const workers = this.threads.cancelAll(reason);
+    const threads = this.threads.cancelAll(reason);
     this.serializer.drain(reason);
     const { jobs } = this.runner.abortTask(abortReason);
+    // A brain turn the runner still carries with no delegation behind it (V1: it outlived a session the server
+    // dropped, and ignored its abort) is cut too: the brain's own cancel, and the runner let go, so the daemon's
+    // tool.run guard refuses whatever it still sends.
+    const orphan = this.runningTurn() === undefined && this.runner.attached ? this.brainProxy.cancel() : undefined;
+    if (orphan) this.runner.attach(undefined);
     // The question on the floor and every queued one go; the grants sleep until the same conversation resumes.
     this.confirmations.clear();
     this.desk.clear();
     if (this.dictating) this.stopDictation("said");
     this.earReflexes.quiesce();
     // Quiet: the caller's one instruction (interrupt) or the closing session (stop, pause) speaks for the whole stop.
-    const cancel = Promise.all([this.delegator?.cancel(reason, { quiet: true }) ?? Promise.resolve(), workers]);
+    const cancel = Promise.all([this.delegator?.cancel(reason, { quiet: true }) ?? Promise.resolve(), threads, orphan]);
     return { running, dropped, jobs, cancel };
+  }
+
+  /** The delegation whose brain turn is running now (not one that is only draining its threads). */
+  private runningTurn(): Delegation | undefined {
+    const active = this.delegator?.active;
+    return active !== undefined && active.id !== this.delegator?.draining?.id ? active : undefined;
+  }
+
+  /**
+   * The session ended under a brain turn (V1): the turn is cut with its delegation — finished `cancelled` with `why`,
+   * the brain's own cancel called (capped, never awaited here), the task's background jobs stopped — and the runner
+   * let go before the Delegator is disposed, so nothing it still sends acts. A delegation only draining its threads
+   * is left to them: its brain is done, and the threads are the engine's.
+   */
+  private cutBrainTurn(why: string): void {
+    const turn = this.runningTurn();
+    if (!turn && !this.runner.attached) return;
+    if (turn && this.delegator) void this.bounded(this.delegator.cancel(why, { quiet: true }));
+    else void this.bounded(this.brainProxy.cancel());
+    this.runner.abortTask(why);
+    this.runner.attach(undefined);
+    log.info(`${why}: ${turn ? `cancelled ${turn.id}` : "an orphaned brain turn cancelled"}; the runner is let go`);
   }
 
   /**
@@ -2139,16 +3738,105 @@ export class Engine extends EventEmitter<EngineEvents> {
    * gate set here is not lifted by the words that asked for it) and the
    * `interrupt` command. Work and speech end, the session stays open and
    * listening: the voice is gated locally (Live cannot be interrupted) until Kevin
-   * speaks or OUTPUT_GATE_MS pass, told once to stop speaking and wait, and a toast
+   * says something new or OUTPUT_GATE_MS pass, told once to stop speaking and wait, and a toast
    * says "stopped". A `stop` ledger row (how said/pressed) names the cut delegation.
    */
   async interrupt(source = "interrupt", how: "pressed" | "said" = "said"): Promise<void> {
     const t0 = this.now();
-    const reason = `Kevin ${how} stop`;
+    const reason = `${this.userName} ${how} stop`;
     const open = this.openSession();
     // The gate first, so a frame arriving between here and the flush is dropped too.
-    if (open) this.outputGateUntil = t0 + Engine.OUTPUT_GATE_MS;
+    if (open) {
+      // A stop the gate already holds for (the speech half came first, ≥ 2 threads) stays the one it holds for.
+      const held = this.outputGated ? this.stopHeard : undefined;
+      this.outputGateUntil = t0 + Engine.OUTPUT_GATE_MS;
+      this.lastGateAt = t0;
+      this.stopHeard = how === "said" ? (held ?? this.spokenStop()) : undefined;
+    }
     await this.cutWork(source, how, reason, open, t0);
+  }
+
+  /**
+   * A spoken stop, for the gate (V10): now, and the utterance on Live's transcript that carries it (Kevin's open one).
+   * On Live's path that is the utterance the stop word arrived in (this runs a microtask after its fragment); on the
+   * ear's, Live may not have heard the words yet, and its transcript of them is recognised when it comes.
+   */
+  private spokenStop(): StopHeard {
+    const open = this.transcript.last("kevin");
+    const carries = open && !open.final ? open : undefined;
+    if (carries) this.lastStopItemId = carries.id;
+    return { at: this.now(), itemId: carries?.id, endMs: carries?.endMs };
+  }
+
+  /**
+   * Whether an input delta lifts the gate a stop set. Punctuation alone never does; after a pressed stop any words do.
+   * After a spoken stop nothing inside the stop's own utterance does, whatever follows the stop word ("Stop talking.",
+   * "Stop right there.", "Stop, Hormes."): the same item, or words that start within UTTERANCE_GAP_MS of its end. A
+   * new utterance lifts it once it says something: not while it is only the name or a filler ("Jar", "um"), and not
+   * when it begins with a stop phrase. That is another stop, and within STOP_ECHO_MS it is Live's own transcript of
+   * the stop the ear acted on, the stop's utterance from then on.
+   */
+  private newSpeech(delta: string, item: TranscriptItem, startMs: number, endMs: number): boolean {
+    if (!/[\p{L}\p{N}]/u.test(delta)) return false;
+    const stop = this.stopHeard;
+    if (!stop) return true;
+    if (item.id === stop.itemId || (stop.endMs !== undefined && startMs <= stop.endMs + Engine.UTTERANCE_GAP_MS)) {
+      this.holdStopUtterance(stop, item, endMs);
+      return false;
+    }
+    const said = saidWords(item.text);
+    if (!said) return false;
+    if (STOP_HEAD.test(said)) {
+      if (this.now() - stop.at < Engine.STOP_ECHO_MS) this.holdStopUtterance(stop, item, endMs);
+      return false;
+    }
+    return true;
+  }
+
+  /** This utterance carries the stop: it ends where its latest words end, and it is never judged a stop again. */
+  private holdStopUtterance(stop: StopHeard, item: TranscriptItem, endMs: number): void {
+    stop.itemId = item.id;
+    stop.endMs = Math.max(stop.endMs ?? endMs, endMs, item.endMs);
+    this.lastStopItemId = item.id;
+  }
+
+  /**
+   * V9: a stop said over Hormes's voice while nothing runs. The Delegator judges stops only while work runs and the
+   * ear may be down (Speech not granted, the dictation model missing, reflexes off), so Live's transcript is judged
+   * here: the current utterance (the transcript's own merge rule) begins with a stop phrase or ends in "stop" /
+   * "cancel", Hormes spoke within SPEAKING_WINDOW_MS (voiceUncutAt: its transcript or its sound, and no stop has cut
+   * it since) and the words are not Hormes's own line back through the microphone.
+   * The speech half of a stop (the voice gated, the speaker flushed) and its row; once per utterance. No instruction.
+   * The rest of the utterance never lifts the gate: "can you stop by the store" cannot be told from "can you stop
+   * talking" until it is over, so a false stop holds the voice until the lapse or his next utterance.
+   */
+  private stopOverVoice(item: TranscriptItem): void {
+    if (item.id === this.lastStopItemId) return;
+    if (this.delegator?.active !== undefined || this.threads.running() > 0) return;
+    if (this.now() - this.voiceUncutAt() >= Engine.SPEAKING_WINDOW_MS) return;
+    const words = normalizeUtterance(item.text);
+    if (!STOP_HEAD.test(words) && !/\b(stop|cancel)\b[\s.!?,]*$/i.test(item.text)) return;
+    if (this.echoOfHormes(words)) return;
+    const open = this.openSession();
+    if (!open) return;
+    const t0 = this.now();
+    this.gateSpeech(`${this.userName} said stop over the voice`);
+    this.lastStopItemId = item.id;
+    this.stopHeard = { at: t0, itemId: item.id, endMs: item.endMs };
+    this.ledger.append({ at: t0, type: "stop", how: "said" });
+    this.toast("stopped", "info");
+  }
+
+  /**
+   * When the voice last spoke with no stop cutting it since: its transcript or its sound, whichever is later, and 0
+   * when a stop has cut both. Live's barge-in cuts its transcript first while the sound of the interrupted words plays
+   * on (LC-6 trial 2: the transcript 1322 ms old and the sound 490 ms old at the fragment). The voice heard before the
+   * last gate is not counted: that stop silenced it, so Kevin's next words are not said over it. A pressed stop and
+   * then "hold on, what time is it" is one stop, and his question's answer is not gated.
+   */
+  private voiceUncutAt(): number {
+    const at = Math.max(this.lastOutputSpeechAt, this.lastAudibleOutputAt);
+    return at > this.lastGateAt ? at : 0;
   }
 
   /** Only a session that has started is spoken to: one still opening has no id for the row and would hear "stop speaking" as its first instruction after session.started. */
@@ -2164,7 +3852,10 @@ export class Engine extends EventEmitter<EngineEvents> {
   gateSpeech(reason: string): void {
     const open = this.openSession();
     if (!open) return;
-    this.outputGateUntil = this.now() + Engine.OUTPUT_GATE_MS;
+    // Always a spoken stop word (the ear's or Live's fragments): only new speech lifts it (V10).
+    this.stopHeard = (this.outputGated ? this.stopHeard : undefined) ?? this.spokenStop();
+    this.lastGateAt = this.now();
+    this.outputGateUntil = this.lastGateAt + Engine.OUTPUT_GATE_MS;
     this.gatedFrames = 0;
     this.flushSpeaker();
     this.recomputePhase();
@@ -2175,16 +3866,12 @@ export class Engine extends EventEmitter<EngineEvents> {
   private async cutWork(source: string, how: "pressed" | "said", reason: string, open: LiveSession | undefined, t0: number): Promise<void> {
     const { running, dropped, jobs, cancel } = this.cutEverything(reason, "stop");
     if (open || running) this.ledger.append({ at: t0, type: "stop", how, ...(running ? { cancelled: running.id } : {}) });
-    open?.appendInstructions(null, `${reason}. Stop speaking now and wait.`);
+    // It asks for silence, not words: no ask (a 6 s grant for the next voice turn would hand it to an answer to the room).
+    open?.appendInstructions(null, `${reason}. Stop speaking now and wait.`, { ask: false });
     this.toast(open || running || jobs ? "stopped" : "nothing running", "info");
     this.recomputePhase();
     await this.bounded(cancel);
     log.info(`interrupt (${source}, ${how}) in ${this.now() - t0}ms: ${running ? `cancelled ${running.id}` : "nothing was running"}; ${dropped} hands request(s) dropped; ${jobs} background job(s) stopped; voice gated for ${Engine.OUTPUT_GATE_MS} ms`);
-  }
-
-  /** The pre-transport name of `interrupt`; the bench and older notes say it. */
-  stopEverything(source = "stop", how: "pressed" | "said" = "pressed"): Promise<void> {
-    return this.interrupt(source, how);
   }
 
   /**
@@ -2206,7 +3893,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     // A reconnect pending after expired / connection_lost (the 500 ms window, or the row still
     // counting): the session is detached and not yet connecting, but something is running.
     const wasReconnecting = this.voiceReconnectSince > 0;
-    const workersRunning = this.workers.running() > 0;
+    const threadsRunning = this.threads.running() > 0;
     this.wantAwake = false;
     // Kevin's Stop wins over a restart's resume: the conversation the previous process was
     // cut from is not picked up by the next Go once he has said stop in this one — nor the
@@ -2214,11 +3901,11 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.ledgerResumeUsed = true;
     this.lostSession = undefined;
     this.dropHeldReconnect();
-    const { running, dropped, jobs, cancel } = this.cutEverything("Kevin pressed stop", "stop");
+    const { running, dropped, jobs, cancel } = this.cutEverything(`${this.userName} pressed stop`, "stop");
     this.endVoiceReconnect();
     // The stop row is written whenever there was something to stop — a pending reconnect
     // included, so the next process reads Kevin's word and does not resume the cut session.
-    const happened = live !== undefined || wasConnecting || wasPaused || wasReconnecting || running !== undefined || workersRunning || jobs > 0;
+    const happened = live !== undefined || wasConnecting || wasPaused || wasReconnecting || running !== undefined || threadsRunning || jobs > 0;
     if (happened) this.ledger.append({ at: t0, type: "stop", how: "pressed", ...(running ? { cancelled: running.id } : {}) });
     // The closing half is the one sleep function's (its own row after the stop row, the pause let go,
     // detach and close, phase asleep before the first await); the cut above makes its cut a no-op.
@@ -2229,12 +3916,13 @@ export class Engine extends EventEmitter<EngineEvents> {
     log.info(`stop (${source}) in ${this.now() - t0}ms: ${live ? `session ${live.session?.id ?? "(connecting)"} closed` : wasPaused ? "pause ended" : "no session"}; ${running ? `cancelled ${running.id}` : "nothing was running"}; ${dropped} hands request(s) dropped; ${jobs} background job(s) stopped`);
   }
 
-  /** The gate ends early when Kevin speaks; the clock ends it otherwise. */
+  /** The gate ends early when Kevin says something new; the clock ends it otherwise. */
   private liftOutputGate(why: string): void {
     if (!this.outputGateUntil || this.paused) return;
     if (this.now() < this.outputGateUntil) log.debug(`output gate lifted (${why}) after dropping ${this.gatedFrames} frame(s)`);
     this.outputGateUntil = 0;
     this.gatedFrames = 0;
+    this.stopHeard = undefined;
   }
 
   /** True while the voice is being muted locally after a stop. */
@@ -2251,6 +3939,8 @@ export class Engine extends EventEmitter<EngineEvents> {
    */
   private async lookAtScreen(sink: BrainSink): Promise<BrainAttachment | undefined> {
     if (this.brain instanceof ResponsesBrain) return undefined;
+    // A text-only model (a local one without vision) has nowhere to put the pixels: no pre-warm shot for it.
+    if (this.brain?.acceptsImages === false) return undefined;
     if (!this.hands.ready && !this.hands.available) return undefined;
     this.runner.attach(sink);
     try {
@@ -2264,6 +3954,14 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   /** A reflex through the runner, its steps in the delegation when there is one (a prefire has none yet). */
   private async runReflex(reflex: Reflex, sink?: BrainSink): Promise<ReflexOutcome> {
+    // A dictation toggle Live delegated (the ear leaves a bare "start dictating" to Live when nobody named Hormes):
+    // the engine's own dictation, as on the ear's path. There is no tool for it, and the brain must not get the task.
+    if (reflex.kind === "dictate_start" || reflex.kind === "dictate_stop") {
+      const dispatchedAt = this.now();
+      if (reflex.kind === "dictate_start") this.startDictation();
+      else this.stopDictation("said");
+      return { reflex, result: { kind: "text", text: "OK" }, ms: 0, ok: true, dispatchedAt };
+    }
     if (sink) this.runner.attach(sink);
     try {
       return await this.reflexRunner.run(reflex);
@@ -2286,9 +3984,9 @@ export class Engine extends EventEmitter<EngineEvents> {
   // task, the parent's voice, the brain kind's factory, the two helpers, the memory block, the composite look —
   // and answers the thread verbs, the thread.* commands and the panes from its table.
 
-  /** The runner a `tool.run {worker}` frame lands on (the daemon's `runnerFor`; the field stays `worker` on the wire, the value is the thread id); undefined for a thread nobody owns — refused there. */
-  runnerFor(worker: string): ToolRunner | undefined {
-    return this.threads.runnerFor(worker);
+  /** The runner a `tool.run {thread}` frame lands on (the daemon's `runnerFor`); undefined for a thread nobody owns — refused there. */
+  runnerFor(threadId: string): ToolRunner | undefined {
+    return this.threads.runnerFor(threadId);
   }
 
   /**
@@ -2302,12 +4000,12 @@ export class Engine extends EventEmitter<EngineEvents> {
   private speakPromoted(name: string, question: string): void {
     if (this.threads.speakQuestion(name, question)) return;
     const d = this.delegator?.active;
-    if (d) this.delegator?.workerSay(d.id, "Hormes", `May I ${question}? Say yes.`);
-    else this.live?.appendInstructions(null, `Your earlier question is Kevin's to answer now. Ask him: "${question}".`);
+    if (d) this.delegator?.threadSay(d.id, "Hormes", `May I ${question}? Say yes.`);
+    else this.live?.appendInstructions(null, `Your earlier question is ${this.userName}'s to answer now. Ask ${this.userName}: "${question}".`);
   }
 
   /** The delegation a main-lane task belongs to, with Kevin's words for the thread's gates; a thread of main's sits at depth one. */
-  private workerParentFor(task: BrainTask | undefined): ThreadParent | undefined {
+  private threadParentFor(task: BrainTask | undefined): ThreadParent | undefined {
     if (!task) return undefined;
     const d = this.delegator?.all().find((x) => x.liveId === task.delegationId && x.status === "running");
     if (!d) return undefined;
@@ -2319,16 +4017,16 @@ export class Engine extends EventEmitter<EngineEvents> {
    * parent's `say(text, false)` and 600 ms coalescer while the parent runs or drains, and
    * the record's own Live id (`Thread.liveId`) once its slot has closed.
    */
-  private workerVoice(): ThreadVoice | undefined {
+  private threadVoice(): ThreadVoice | undefined {
     return this.delegator;
   }
 
   /** The factory the scheduler builds a thread's brain with; each lane gets its own acting queue (I1: one act in flight PER lane). */
   private threadBrainFactory(): ThreadBrainFactory | undefined {
-    const inner = this.opts.makeWorkerBrain ?? this.workerBrainFactory;
+    const inner = this.opts.makeThreadBrain ?? this.threadFactoryOfKind;
     if (!inner) return undefined;
     return (spec) => {
-      if (spec.runner instanceof LaneRunner) spec.runner.setHooks({ serializer: serializerLike(new ActingSerializer()) });
+      if (spec.runner instanceof LaneRunner) spec.runner.setHooks({ serializer: serializerLike(new ActingSerializer({ userName: () => this.userName })) });
       return inner(spec);
     };
   }
@@ -2351,11 +4049,18 @@ export class Engine extends EventEmitter<EngineEvents> {
     return cut;
   }
 
-  /** The Delegator's view of the threads (`DelegatorOptions.threads`): names, lines, verbs and the overflow hooks, all from the table and the scheduler. */
-  private delegatorThreads(): NonNullable<DelegatorOptions["threads"]> {
+  /**
+   * The Delegator's view of the threads (`DelegatorOptions.threads`): names, lines, verbs, the overflow hooks, the
+   * parent's drain and Kevin's yes to the floor's lane — all from the table and the scheduler.
+   */
+  private delegatorThreads(): DelegatorThreads {
     const t = this.threads;
     const live = (name: string): Thread | undefined => t.table.byNameLive(name);
     return {
+      drain: (id, signal) => t.drain(id, signal),
+      running: (id) => t.running(id),
+      resume: (threadId, opts) => t.resume(threadId, opts),
+      inExchange: () => this.inExchange(),
       liveNames: () => t.threadNames(),
       recentNames: () =>
         t
@@ -2431,9 +4136,51 @@ export class Engine extends EventEmitter<EngineEvents> {
         }
         return { kind: "text", text: t.statusLine(name) };
       }
+      case "set_voice":
+        return this.setVoiceReflex(reflex);
       default:
         return { kind: "error", message: `not a reflex: ${reflex.kind} is not the engine's to answer` };
     }
+  }
+
+  /**
+   * "Switch voice to Marin" / "speak with a British accent", said or typed: the ONLY reflex that writes
+   * a setting. The pick is saved through `updateSettings`; then, with a session open and idle, the
+   * session is reopened on the new voice at once (Kevin asked aloud — that is the explicit press) and
+   * the new voice says "Marin here." from its continuity, so the result text is empty. Busy (a task or a
+   * thread runs): the current voice says "Marin at the next wake." — no reopen, nothing cancelled.
+   * Asleep, paused or connecting: the setting alone, never a connect — a reflex must not open a paid
+   * session (typed, `sayText` runs it BEFORE its resume or wake for that reason: the session that opens
+   * next speaks the pick, and one start is all it costs). A name that is not a `VOICES` id changes
+   * nothing. Idempotent: the session already speaking this way (the slower source repeating the ear's
+   * words) is answered with silence.
+   */
+  private async setVoiceReflex(reflex: Reflex): Promise<ToolResult> {
+    const voiceIn = typeof reflex.input["voice"] === "string" ? reflex.input["voice"].trim() : undefined;
+    const accentIn = typeof reflex.input["accent"] === "string" ? reflex.input["accent"].trim().toLowerCase() : undefined;
+    const voice = voiceIn?.toLowerCase();
+    if (voice !== undefined && !(VOICES as readonly string[]).includes(voice)) return { kind: "text", text: `no voice called ${voiceIn} — the list is in Settings` };
+    if (accentIn !== undefined && !(ACCENTS as readonly string[]).includes(accentIn)) return { kind: "text", text: `no accent called ${accentIn} — American, British or none` };
+    if (voice === undefined && accentIn === undefined) return { kind: "error", message: "set_voice names neither a voice nor an accent" };
+    const accent = accentIn as Accent | undefined;
+    const wantVoice = voice ?? this.settings.voice;
+    const wantAccent = accent ?? this.settings.accent;
+    const name = Engine.voiceName(wantVoice);
+    const open = this.live?.session !== undefined && !this.connecting && !this.pauseInfo && !this.sleeping;
+    if (open && this.sessionVoice === wantVoice && this.sessionAccent === wantAccent && this.settings.voice === wantVoice && this.settings.accent === wantAccent) {
+      log.info(`set_voice: ${name} already — nothing to do`);
+      return { kind: "text", text: "" };
+    }
+    const busy = this.delegator?.active !== undefined || this.threads.running() > 0;
+    const reopen = open && !busy;
+    this.updateSettings(voice !== undefined ? { voice } : { accent: accent as Accent }, { quiet: reopen });
+    if (reopen) {
+      await this.reopenVoice({ how: "voice change" });
+      return { kind: "text", text: "" };
+    }
+    if (open) return { kind: "text", text: `${name} at the next wake.` };
+    log.info(`set_voice: ${name} saved while ${this.pauseInfo ? "paused" : this.connecting ? "connecting" : "asleep"}; heard at the next wake — no session opened`);
+    return { kind: "text", text: "" };
   }
 
   /**
@@ -2446,10 +4193,10 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (!line) return;
     const d = this.delegator?.active;
     if (d && this.delegator) {
-      this.delegator.workerSay(d.id, "Hormes", line);
+      this.delegator.threadSay(d.id, "Hormes", line);
       return;
     }
-    this.live?.appendInstructions(null, `Say this to Kevin now, in these words: "${line}" Then wait.`);
+    this.live?.appendInstructions(null, `Say this to ${this.userName} now, in these words: "${line}" Then wait.`);
   }
 
   // ---- the main thread's record: idle between turns, thinking/acting with the Delegator's phase, a question while one waits.
@@ -2465,14 +4212,14 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.mainLog.append({ kind: "delegation", delegation: d });
       this.threads.publish(this.threads.table.turn(MAIN_THREAD_ID, d.id, d.request));
     }
-    // Today every change rebuilds the snapshot; Phase B keeps the per-step rebuild off the wire (a card, a status still do).
-    if (Engine.SNAPSHOT_FULL_NOW || fresh || d.status !== "running") this.scheduleSnapshot();
+    // Every change rebuilds the snapshot: the Console's cards read their steps from it.
+    this.scheduleSnapshot();
   }
 
   private onMainStep(id: string, step: DelegationStep): void {
     this.mainLog.append({ kind: "step", delegationId: id, step });
     // A thread's line on the parent's record is the thread's, not a step of main's.
-    if (step.worker) return;
+    if (step.thread) return;
     if (step.kind !== "tool" && step.kind !== "screenshot" && step.kind !== "confirm" && step.kind !== "error") return;
     this.threads.publish(
       this.threads.table.step(MAIN_THREAD_ID, {
@@ -2490,7 +4237,7 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   /** The Delegator's phase on the main record — `idle` reads `waiting-kevin` while the main lane's question holds the floor. */
   private mainPhase(phase: "thinking" | "acting" | "idle"): void {
-    const status = phase === "idle" && this.desk.floor?.laneId === WorkerAwareRunner.ACTOR ? "waiting-kevin" : phase;
+    const status = phase === "idle" && this.desk.floor?.laneId === ThreadAwareRunner.ACTOR ? "waiting-kevin" : phase;
     this.threads.publish(this.threads.table.status(MAIN_THREAD_ID, status));
   }
 
@@ -2504,7 +4251,7 @@ export class Engine extends EventEmitter<EngineEvents> {
         this.toast("nothing running on the main thread", "info");
         return;
       }
-      await this.delegator.parkRunning("Kevin stopped this thread", { status: "cancelled", summary: "Kevin stopped this thread" });
+      await this.delegator.parkRunning(`${this.userName} stopped this thread`, { status: "cancelled", summary: `${this.userName} stopped this thread` });
       this.toast("main thread stopped", "info");
       log.info(`thread.stop main: parked ${running.id}; the threads carry on`);
       return;
@@ -2551,14 +4298,14 @@ export class Engine extends EventEmitter<EngineEvents> {
       if (!yes) {
         // The main lane's question alone goes — on the floor or queued. Its record leaves `waiting-kevin` now (no
         // Delegator phase follows a click), and the voice, which a spoken no would have reached, is told the same.
-        const question = this.desk.pendingOf(WorkerAwareRunner.ACTOR)?.description;
+        const question = this.desk.pendingOf(ThreadAwareRunner.ACTOR)?.description;
         if (question === undefined) {
           this.toast("no question is waiting", "info");
           return;
         }
-        this.desk.drop(WorkerAwareRunner.ACTOR);
+        this.desk.drop(ThreadAwareRunner.ACTOR);
         this.threads.publish(this.threads.table.status(MAIN_THREAD_ID, this.delegator?.active ? "thinking" : "idle"));
-        this.live?.appendInstructions(null, `Kevin denied "${question.slice(0, 160)}" in the Console. Say one word and wait.`);
+        this.live?.appendInstructions(null, `${this.userName} denied "${question.slice(0, 160)}" in the Console. Say one word and wait.`);
         this.toast("denied", "info");
         log.info(`thread.answer no main: dropped "${question.slice(0, 80)}"`);
         return;
@@ -2567,7 +4314,7 @@ export class Engine extends EventEmitter<EngineEvents> {
         this.toast("no question is waiting", "info");
         return;
       }
-      if (floor.laneId !== WorkerAwareRunner.ACTOR) {
+      if (floor.laneId !== ThreadAwareRunner.ACTOR) {
         this.toast(`another question is on the floor: ${floor.name}'s`, "warn");
         log.info(`thread.answer yes main refused: the floor is ${floor.name}'s`);
         return;
@@ -2693,6 +4440,13 @@ export class Engine extends EventEmitter<EngineEvents> {
     open.pending = [];
     const total = this.threadLog(threadId)?.total ?? entries[entries.length - 1]!.seq;
     this.emit("event", { ...this.threadTranscript(threadId, entries, total, false), mode: "append" });
+  }
+
+  /** notes[0] for a main-lane task: the composite look, then one line naming the live threads, so a thread started on an earlier request can be read, waited for or stopped by name (TH-3). */
+  private async mainLook(): Promise<string | undefined> {
+    const look = await this.compositeLook();
+    const threads = this.threads.table.liveNote(this.userName);
+    return [look, threads].filter(Boolean).join("\n") || undefined;
   }
 
   /**
@@ -2943,7 +4697,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   // --------------------------------------------------------------- marks
-  // Kevin circles a region on screen (⌥⇧C, then a stroke): the engine records it
+  // Kevin circles a region on screen (⌃⌥C, then a stroke): the engine records it
   // as a pending mark at once, tells Live, screenshots it through the hands, and
   // the next delegation carries it (waiting for the capture if it is still going).
 
@@ -2954,23 +4708,33 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** A circle nobody asked about for this long is not context any more; it leaves rather than ride into an unrelated task. */
   private static readonly PENDING_MARK_TTL_MS = 15 * 60_000;
 
-  private async addMark(rawRect: Rect, path?: readonly Point[]): Promise<void> {
+  private async addMark(rawRect: Rect, path?: readonly Point[], opts?: { readonly source?: "window"; readonly element?: ScreenMark["element"] }): Promise<void> {
     const bbox = normalizeRect(rawRect);
     const id = newId("mark");
     const at = this.now();
     const size = `${Math.round(bbox.w)}×${Math.round(bbox.h)} at ${Math.round(bbox.x)},${Math.round(bbox.y)}`;
+    const window = opts?.source === "window";
     // Registered before the capture, so a delegation fired while the hands work
-    // sees a mark to wait for instead of missing it.
-    const mark: ScreenMark = { id, rect: bbox, ...(path && path.length > 0 ? { path } : {}), at, consumed: false };
+    // sees a mark to wait for instead of missing it. A window mark carries how it was
+    // made and what it is; its rect is the window's frame already.
+    const mark: ScreenMark = { id, rect: bbox, ...(path && path.length > 0 ? { path } : {}), at, consumed: false, ...(window ? { source: "window" as const, ...(opts?.element ? { element: opts.element } : {}) } : {}) };
     this.marks = [...this.marks, mark].slice(-Engine.MAX_MARKS);
     this.scheduleSnapshot();
+    // A circle is Kevin pointing something out to Hormes: the exchange opens from now, and its cap counts from here.
+    if (this.live) this.attention.gesture(this.live.nowMs);
     // Asleep, the mark simply waits for the next session; awake, the voice hears about it now.
-    this.live?.appendInstructions(null, `Kevin just circled a region of his screen (${size}). The brain will see the image with the next task; acknowledge briefly if he is asking about it.`);
+    this.live?.appendInstructions(
+      null,
+      window
+        ? `${this.userName} just captured a window of the screen (${opts?.element?.app ?? "a window"}, ${Math.round(bbox.w)}×${Math.round(bbox.h)}). The brain will see the image with the next task; acknowledge briefly if ${this.userName} is asking about it.`
+        : `${this.userName} just circled a region of the screen (${size}). The brain will see the image with the next task; acknowledge briefly if ${this.userName} is asking about it.`,
+    );
     // What did he surround? The element under the stroke's centroid and the window
     // list say; the mark snaps to the smallest frame that holds the centroid and
-    // sits mostly inside his stroke. Failing that, the stroke's own box stands.
+    // sits mostly inside his stroke. Failing that, the stroke's own box stands. A
+    // window is already the target: no probes, no snap.
     const capture = (async () => {
-      const snapped = await this.resolveMarkTarget(bbox, path);
+      const snapped = window ? (opts?.element ? { rect: bbox, element: opts.element } : undefined) : await this.resolveMarkTarget(bbox, path);
       if (snapped) this.marks = this.marks.map((m) => (m.id === id ? { ...m, rect: snapped.rect, ...(snapped.element ? { element: snapped.element } : {}) } : m));
       const rect = snapped?.rect ?? bbox;
       const what = snapped?.element ? ` (${[snapped.element.role, snapped.element.title ? `"${snapped.element.title}"` : "", snapped.element.app ? `in ${snapped.element.app}` : ""].filter(Boolean).join(" ")})` : "";
@@ -2994,6 +4758,39 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.emit("overlay", { cmd: "orb.trace", points: roundedRectPoints(target.rect), closed: true, tone: "mark", ttlMs: 6000, ...(label ? { label: label.slice(0, 40) } : {}), reason: "mark" });
   }
 
+  /** A mark id as `newId("mark")` mints it: "mark_" and lowercase base36. Anything else is malformed and ignored. */
+  private static readonly MARK_ID = /^mark_[a-z0-9]+$/;
+
+  /**
+   * The × on one thumbnail: the mark leaves now, consumed or not. A capture still in flight
+   * for it finishes into nothing — captureMark writes through `this.marks.map`, which no
+   * longer finds the id. An unknown or malformed id changes nothing and says nothing: the
+   * snapshot is the truth.
+   */
+  private removeMark(id: string): void {
+    if (!Engine.MARK_ID.test(id)) return;
+    if (!this.marks.some((m) => m.id === id)) return;
+    this.marks = this.marks.filter((m) => m.id !== id);
+    this.markConsumedAt.delete(id);
+    this.scheduleSnapshot();
+  }
+
+  /** The notch's Window box: the front window as a mark, whole, no snap. Works asleep. No front window: a toast, no mark. */
+  private async markFrontWindow(): Promise<void> {
+    const fm = await this.hands.request<FrontmostInfo>("frontmost", {}, 1500).catch((e: Error) => {
+      log.debug(`mark.window: ${e.message}`);
+      return undefined;
+    });
+    const w = fm?.window;
+    if (!w || !(w.w >= 16 && w.h >= 16)) {
+      this.toast("No front window to capture", "warn");
+      return;
+    }
+    const element: NonNullable<ScreenMark["element"]> = { role: "window", ...(w.title ? { title: w.title } : {}), ...(fm.app ? { app: fm.app } : {}) };
+    void this.addMark({ x: w.x, y: w.y, w: w.w, h: w.h }, undefined, { source: "window", element });
+    this.toast(`Captured ${fm.app || "window"} · ${Math.round(w.w)}×${Math.round(w.h)}`);
+  }
+
   /** Over this share of a frame inside the padded stroke box, the frame is what Kevin surrounded. */
   private static readonly MARK_SNAP_COVERAGE = 0.6;
 
@@ -3003,9 +4800,11 @@ export class Engine extends EventEmitter<EngineEvents> {
    * biggest thing mostly inside his stroke. (The element under the centroid of a
    * circled dialog is a label inside it; the label always fits, the dialog is what
    * he meant. A circled button: the window around it fails the coverage test and
-   * the button is the largest fit.) Both probes run at once and either may fail
-   * (no Accessibility, no helper): then the box itself stands, with the app under
-   * the centroid noted when the window list could say.
+   * the button is the largest fit.) The only window is the topmost one under the centroid
+   * (the list is front to back): a window behind it, even its own app's, is not what he
+   * sees there (RF-7). Both probes run at once and
+   * either may fail (no Accessibility, no helper): then the box itself stands, with the
+   * app under the centroid noted when the window list could say.
    */
   private async resolveMarkTarget(bbox: Rect, path?: readonly Point[]): Promise<{ rect: Rect; element?: ScreenMark["element"] } | undefined> {
     const centroid = path && path.length >= 2 ? centroidOf(path) : { x: bbox.x + bbox.w / 2, y: bbox.y + bbox.h / 2 };
@@ -3020,8 +4819,10 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (el?.frame && el.frame.w > 0 && el.frame.h > 0) {
       candidates.push({ rect: el.frame, element: { ...(el.role ? { role: el.role } : {}), ...(el.title || el.description ? { title: (el.title || el.description) as string } : {}), ...(el.app ? { app: el.app } : {}) } });
     }
-    const under = (wins?.windows ?? []).filter((w) => w.w > 0 && w.h > 0 && contains({ x: w.x, y: w.y, w: w.w, h: w.h }, centroid));
-    for (const w of under) candidates.push({ rect: { x: w.x, y: w.y, w: w.w, h: w.h }, element: { role: "AXWindow", ...(w.title ? { title: w.title } : {}), ...(w.app ? { app: w.app } : {}) } });
+    // The topmost window under the centroid, and only it. The list is front to back (a sheet or a dialog sits in front
+    // of its document), so a window behind it is hidden there, whichever app it belongs to.
+    const top = (wins?.windows ?? []).find((w) => w.w > 0 && w.h > 0 && contains({ x: w.x, y: w.y, w: w.w, h: w.h }, centroid));
+    if (top) candidates.push({ rect: { x: top.x, y: top.y, w: top.w, h: top.h }, element: { role: "AXWindow", ...(top.title ? { title: top.title } : {}), ...(top.app ? { app: top.app } : {}) } });
     const fits = candidates.filter((c) => contains(c.rect, centroid) && c.rect.w * c.rect.h >= 16 && coverage(c.rect, padded) >= Engine.MARK_SNAP_COVERAGE).sort((a, b) => b.rect.w * b.rect.h - a.rect.w * a.rect.h);
     const best = fits[0];
     if (best) {
@@ -3029,7 +4830,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       return { rect: normalizeRect(best.rect), element: best.element };
     }
     // Nothing fits the stroke; his box stands, with the app it is over when known.
-    const app = under.sort((a, b) => a.w * a.h - b.w * b.h)[0]?.app ?? el?.app;
+    const app = top?.app ?? el?.app;
     return app ? { rect: bbox, element: { app } } : undefined;
   }
 
@@ -3132,6 +4933,11 @@ export class Engine extends EventEmitter<EngineEvents> {
    * paused: mic PCM is dropped, the ear ignored, reflexes off, levels 0; typing in
    * the Console resumes first. Unresumed, the pause decays to sleep at `sleepsAt`
    * (idleSleepMinutes, at least a minute).
+   *
+   * Pressed while the voice reconnects after the server dropped the session (the 500 ms window,
+   * or a failed reconnect held for Go), the conversation the server cut is what is held — no
+   * session opens behind the press (V12). Pressed during a handshake, the session closes the
+   * moment it starts and the pause holds (`pauseAtStart`).
    */
   async pause(o: { readonly quiet?: boolean } = {}): Promise<void> {
     if (this.sleeping) {
@@ -3143,23 +4949,39 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.toast("asleep already", "info");
       return;
     }
+    if (this.connecting) {
+      // A wake's, a resume's or a reconnect's handshake: it is not cut mid-way (the server would bill the socket
+      // anyway); connect() closes the session at session.started and holds the pause. A Stop meanwhile still wins.
+      if (!this.pauseAtStart) {
+        this.pauseAtStart = true;
+        if (!o.quiet) this.toast("paused · meter stopped", "info");
+        log.info("pause during the handshake: the session closes the moment it starts");
+      }
+      return;
+    }
     if (this.pauseInfo) {
       this.toast("paused already", "info");
       return;
     }
     const live = this.live;
-    if (!live?.session || this.connecting) {
-      this.toast(this.connecting ? "still connecting" : "asleep already", "info");
+    if (!live?.session) {
+      if (this.heldReconnect || this.reconnectTimer || this.voiceReconnectSince) return this.pauseHeldReconnect(o);
+      this.toast("asleep already", "info");
       return;
     }
+    return this.pauseSession(live, o);
+  }
+
+  /** Pause an open session: everything perceptible ends as a stop does, the session closes, the conversation is held. */
+  private async pauseSession(live: LiveSession, o: { readonly quiet?: boolean }): Promise<void> {
     const t0 = this.now();
-    const sessionId = live.session.id;
+    const sessionId = live.session?.id ?? "?";
     // The meter bills per second of open session; `session.usage.updated` arrives late,
     // so the figure at the pause is at least the seconds the session has been open.
     const usageSeconds = Math.max(this.usageSeconds, Math.floor((t0 - this.sessionStartedAt) / 1000));
     const { running, dropped, cancel } = this.cutEverything("paused", "pause");
     this.wantAwake = false;
-    this.pauseInfo = { at: t0, sessionId, usageSeconds, sleepsAt: t0 + Math.max(Engine.PAUSE_MIN_MS, this.settings.idleSleepMinutes * 60_000) };
+    this.pauseInfo = { at: t0, sessionId, usageSeconds, sleepsAt: t0 + this.pauseHoldMs() };
     this.ledger.append({ at: t0, type: "pause", sessionId, usageSeconds });
     this.detachLive(live);
     this.closeWithDeadline(live, "pause");
@@ -3170,6 +4992,34 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   /**
+   * Pause while the voice reconnects (V12): the session is already gone, so the conversation the server cut becomes
+   * the paused one — the pending reconnect is cancelled (no session opens behind the press), its counting row ends,
+   * everything else a pause cuts is cut, and Go resumes it with the continuity like any pause.
+   */
+  private async pauseHeldReconnect(o: { readonly quiet?: boolean }): Promise<void> {
+    const t0 = this.now();
+    const held = this.heldReconnect;
+    this.dropHeldReconnect();
+    this.wantAwake = false;
+    this.endVoiceReconnect();
+    const { dropped, cancel } = this.cutEverything("paused", "pause");
+    if (!held) {
+      // Nothing left to carry on (the conversation was trashed, or decayed): the reconnect is simply off.
+      this.setPhase("asleep");
+      this.toast("asleep already", "info");
+      await this.bounded(cancel);
+      log.info("pause during a reconnect with no conversation held: the reconnect is off; asleep");
+      return;
+    }
+    this.pauseInfo = { ...held, sleepsAt: t0 + this.pauseHoldMs() };
+    this.ledger.append({ at: t0, type: "pause", sessionId: held.sessionId, usageSeconds: held.usageSeconds });
+    this.setPhase("paused");
+    if (!o.quiet) this.toast("paused · meter stopped", "info");
+    await this.bounded(cancel);
+    log.info(`paused during the reconnect: the conversation the server cut (${held.sessionId}) is held, no session opened; ${dropped} hands request(s) dropped`);
+  }
+
+  /**
    * Resume: a NEW session whose instructions carry the continuity — what was said
    * before the pause and the last task — so the voice picks up where it left off.
    * The started row says `resumedFrom`; a `resume` row follows. Not paused: a word.
@@ -3177,7 +5027,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   async resume(): Promise<void> {
     const pause = this.pauseInfo;
     if (!pause) {
-      this.toast(this.live ? "not paused" : "asleep — wake it instead", "info");
+      this.toast(this.live ? "not paused" : "asleep · press Go", "info");
       return;
     }
     if (this.connecting) return; // the resume is already opening its session
@@ -3185,17 +5035,20 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   /**
-   * Kevin pressed Switch now after picking a voice or accent: the session is paused
-   * (closed, the conversation held) and reopened at once with the new voice and the
-   * "reconnected" continuity — strictly the two existing verbs, so one session at a
-   * time and both rows on the ledger. Refused while a task or a worker runs (a pause
-   * would cancel them: "busy — heard at the next wake"), and while paused, asleep or
-   * connecting (nothing to reopen: the pick is heard at the next wake anyway). Only
-   * ever on Kevin's press — browsing 22 voices must never churn paid starts.
+   * Kevin pressed Switch now after picking a voice or accent, or asked aloud ("switch
+   * voice to marin", the `set_voice` reflex): the session is paused (closed, the
+   * conversation held) and reopened at once with the new voice — strictly the two
+   * existing verbs, so one session at a time and both rows on the ledger. `how`: "voice
+   * change" (the default) has the new voice say one line, "<Name> here.", so the switch
+   * is audible; "reconnected" carries on silently. Refused while a task or a thread runs
+   * (a pause would cancel them: "busy — heard at the next wake"), and while paused,
+   * asleep or connecting (nothing to reopen: the pick is heard at the next wake anyway).
+   * Only ever on Kevin's press or his words — browsing 22 voices must never churn paid
+   * starts, and nothing here opens a session from asleep.
    */
-  async reopenVoice(): Promise<void> {
+  async reopenVoice(opts: { readonly how?: "reconnected" | "voice change"; readonly why?: string } = {}): Promise<void> {
     if (this.delegator?.active !== undefined || this.threads.running() > 0) {
-      this.toast("busy — heard at the next wake", "info");
+      this.toast("busy · heard at the next wake", "info");
       return;
     }
     if (!this.live?.session || this.connecting || this.pauseInfo || this.sleeping) {
@@ -3206,8 +5059,33 @@ export class Engine extends EventEmitter<EngineEvents> {
     await this.pause({ quiet: true });
     const pause = this.pauseInfo;
     if (!pause) return; // a sleep raced the pause: nothing is held, nothing to reopen
-    log.info(`voice change: reopening the session (${was} → ${this.settings.voice} / ${this.settings.accent})`);
-    await this.connect("voice change", { pause, continuity: this.continuityFor(pause, "reconnected"), how: "reconnected" });
+    const how = opts.how ?? "voice change";
+    const why = opts.why ?? "voice change";
+    log.info(`${why}: reopening the session (${was} → ${this.settings.voice} / ${this.settings.accent}; ${how})`);
+    await this.connect(why, { pause, continuity: this.continuityFor(pause, how), how });
+  }
+
+  /** The word the Console shows when a resumed session is up: "resumed", "back" (a reconnect), or the voice it now speaks with. */
+  private resumeToast(how: ResumeHow | undefined): string {
+    if (how === "reconnected") return "back";
+    if (how === "voice change") return `${Engine.voiceLine(this.settings.voice, this.settings.accent)} · one restart`;
+    return "resumed";
+  }
+
+  /** "Marin" — a `VOICES` id as the Console spells it. */
+  static voiceName(voice: string): string {
+    return voice ? voice.charAt(0).toUpperCase() + voice.slice(1) : "";
+  }
+
+  /** The accent's flag: it is a prompt clause, not a voice, so the flag rides beside the name. */
+  static accentFlag(accent: Accent | undefined): string {
+    return accent === "british" ? "🇬🇧" : accent === "american" ? "🇺🇸" : "";
+  }
+
+  /** "Marin 🇬🇧" / "Marin" (no accent). */
+  static voiceLine(voice: string, accent: Accent | undefined): string {
+    const flag = Engine.accentFlag(accent);
+    return flag ? `${Engine.voiceName(voice)} ${flag}` : Engine.voiceName(voice);
   }
 
   /**
@@ -3216,11 +5094,12 @@ export class Engine extends EventEmitter<EngineEvents> {
    * (the default: carry on silently); a restart of the engine that cut the
    * conversation — then the lines come from the LEDGER (this process never heard them)
    * and the voice says one word, "back", so Kevin knows it is the same conversation; or
-   * a reconnect after the server dropped the session (expired, connection lost, a voice
-   * switch) — the same conversation picked up where it was cut, silently unless Kevin
-   * was mid-request.
+   * a reconnect after the server dropped the session (expired, connection lost) — the
+   * same conversation picked up where it was cut, silently unless Kevin was mid-request;
+   * or a voice change (Switch now, "switch voice to marin") — the same conversation, and
+   * the new voice says one line, "<Name> here.", so the switch is heard.
    */
-  private continuityFor(pause: PauseInfo, how: "paused" | "restarted" | "reconnected" = "paused"): string {
+  private continuityFor(pause: PauseInfo, how: ResumeHow = "paused"): string {
     const gapMs = this.now() - pause.at;
     const minutes = Math.round(gapMs / 60_000);
     const when = minutes < 1 ? "less than a minute ago" : minutes === 1 ? "a minute ago" : `${minutes} minutes ago`;
@@ -3232,8 +5111,9 @@ export class Engine extends EventEmitter<EngineEvents> {
     for (let i = whole.length - 1; i >= 0 && lines.length < Engine.CONTINUITY_LINES; i--) {
       const item = whole[i];
       const text = item?.text.trim();
-      if (!item || !text) continue;
-      const line = `${item.speaker === "kevin" ? "Kevin" : "Hormes"}: ${text}`;
+      // A line the room-talk gate kept off the speaker was never said to Kevin: not part of the conversation picked up.
+      if (!item || !text || item.unheard) continue;
+      const line = `${item.speaker === "kevin" ? this.userName : "Hormes"}: ${text}`;
       if (chars + line.length > Engine.CONTINUITY_CHARS) {
         // The most recent line always makes it, cut if it must.
         if (lines.length === 0) lines.unshift(line.slice(0, Engine.CONTINUITY_CHARS));
@@ -3242,35 +5122,50 @@ export class Engine extends EventEmitter<EngineEvents> {
       lines.unshift(line);
       chars += line.length + 1;
     }
-    const last = this.lastDelegations[this.lastDelegations.length - 1];
+    // Kevin's last task: never a refusal of room talk, the gate's or one the session's end settled (LC-7). Those were not
+    // his, and one recorded as the session went came after the task a drop cut, which V1 must still name.
+    const last = [...this.lastDelegations].reverse().find((d) => !/^not addressed/.test(d.summary ?? ""));
     const task = last?.summary ? `Last task: "${last.request.replace(/\s+/g, " ").trim().slice(0, 160)}" — ${last.status}: ${last.summary}` : recalled?.task;
+    const seconds = Math.max(1, Math.round(gapMs / 1000));
+    const gap = seconds < 90 ? `${seconds} ${seconds === 1 ? "second" : "seconds"}` : `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+    if (how === "voice change") {
+      const name = Engine.voiceName(this.settings.voice);
+      return [
+        "# Continuity",
+        `${this.userName} switched your voice ${gap} ago: you now speak as ${name}. This is the same conversation, picked up where it was cut. What was said before, most recent last:`,
+        lines.length > 0 ? lines.join("\n") : "(nothing had been said yet)",
+        ...(task ? [task] : []),
+        `Say exactly one line now — "${name} here." — and then wait for ${this.userName}. Do not recap, do not apologise, do not redo the last task unless asked.`,
+      ].join("\n");
+    }
     if (how === "reconnected") {
-      const seconds = Math.max(1, Math.round(gapMs / 1000));
-      const gap = seconds < 90 ? `${seconds} ${seconds === 1 ? "second" : "seconds"}` : `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+      // The drop cut a task that was running (V1): it is not running now, and Kevin hears that once, not silence.
+      const cut = last?.status === "cancelled" && last.summary === Engine.CONNECTION_DROPPED ? last.request.replace(/\s+/g, " ").trim().slice(0, 160) : undefined;
       return [
         "# Continuity",
         `The voice connection dropped ${gap} ago and just came back. This is the same conversation, picked up where it was cut. What was said before, most recent last:`,
         lines.length > 0 ? lines.join("\n") : "(nothing had been said yet)",
         ...(task ? [task] : []),
-        "Carry on as before; do not recap or apologise. Say nothing now unless Kevin was mid-request — then answer it.",
+        cut !== undefined
+          ? `Carry on as before; do not recap or apologise. The drop cut the task that was running ("${cut}"). Tell ${this.userName} in one short sentence that it stopped, and ask whether to start it again.`
+          : `Carry on as before; do not recap or apologise. Say nothing now unless ${this.userName} was mid-request — then answer it.`,
       ].join("\n");
     }
     if (how === "restarted") {
-      const seconds = Math.max(1, Math.round(gapMs / 1000));
       return [
         "# Continuity",
         `Hormes's engine restarted ${seconds < 90 ? `${seconds} seconds` : `${minutes} minutes`} ago in the middle of this conversation (a crash, or an update). This is the same conversation, picked up where it was cut. What was said before, most recent last:`,
         lines.length > 0 ? lines.join("\n") : "(nothing had been said yet)",
         ...(task ? [task] : []),
-        'Say exactly one word now — "back" — and then wait for Kevin. Do not recap, do not apologise, do not redo the last task unless he asks.',
+        `Say exactly one word now — "back" — and then wait for ${this.userName}. Do not recap, do not apologise, do not redo the last task unless asked.`,
       ].join("\n");
     }
     return [
       "# Continuity",
-      `Kevin paused you ${when} and just resumed. This is the same conversation. What was said before the pause, most recent last:`,
+      `${this.userName} paused you ${when} and just resumed. This is the same conversation. What was said before the pause, most recent last:`,
       lines.length > 0 ? lines.join("\n") : "(nothing had been said yet)",
       ...(task ? [task] : []),
-      "Carry on as before; do not recap unless he asks. Say nothing now: stay silent until Kevin speaks to you again.",
+      `Carry on as before; do not recap unless asked. Say nothing now: stay silent until ${this.userName} speaks to you again.`,
     ].join("\n");
   }
 
@@ -3307,15 +5202,29 @@ export class Engine extends EventEmitter<EngineEvents> {
     }
     if (!this.live) return;
     log.debug(`ear ${isFinal ? "final" : "partial"} #${segment} @${at}: ${text.slice(0, 80)}`);
+    // The ear hears the name ~0.1-0.2 s behind the words, Live's transcript ~1 s: it names the utterance Live is still
+    // transcribing, or the next one (the room-talk gate), and a reply already locked out by a moment is released.
+    const named = this.attention.ear(text, segment, isFinal);
+    if (named) {
+      const open = this.transcript.last("kevin");
+      if (open && open.id !== this.namedItemId) {
+        this.namedItemId = open.id;
+        this.named();
+      }
+      this.playReleased(named.released);
+    }
     this.earReflexes.hear(text, isFinal, segment, at);
   }
 
   /** Reflexes are on: awake, not paused, not muted (the mic button; `feedMic` drops PCM on the same flag), and Settings.reflexes true. */
-  private reflexesOn(): boolean {
+  private reflexesEnabled(): boolean {
     return this.live !== undefined && !this.paused && !this.muted && this.settings.reflexes !== false;
   }
 
-  /** Output frames at or above this RMS (`rms()`'s 0–1 scale) are Hormes audibly speaking; the silence the API streams between sentences is ~0. */
+  /**
+   * Output frames at or above this level are Hormes audibly speaking; the silence the API streams between sentences
+   * is ~0. On `rms()`'s scale, which is ×3 and clamped to 1: 0.02 here is about 0.0067 of full scale.
+   */
   static readonly AUDIBLE_OUTPUT_LEVEL = 0.02;
 
   /**
@@ -3336,8 +5245,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   private earHeld(): string | undefined {
     if (this.muted) return "muted";
     // Held while the main brain's turn runs or the screen is leased — not while only background
-    // workers drain under a parent that is merely `draining` (B3's second slot), and not while
-    // the main brain's turn is blocked in worker_wait (its hands are still for up to 240 s):
+    // threads drain under a parent that is merely `draining` (B3's second slot), and not while
+    // the main brain's turn is blocked in thread_wait (its hands are still for up to 240 s):
     // a colleague working Spotify by Apple events would still scroll for you.
     const active = this.delegator?.active;
     const draining = this.delegator?.draining;
@@ -3347,7 +5256,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     // for you. Hormes's own hold (a reflex that just ran, dictation) is the ear's own doing and holds nothing.
     if (this.threads.anyScreenBusy()) return "a task is running";
     const holder = this.lease.holder;
-    if (holder !== undefined && holder !== WorkerAwareRunner.ACTOR && holder !== "dictation") return "a task is running";
+    if (holder !== undefined && holder !== ThreadAwareRunner.ACTOR && holder !== "dictation") return "a task is running";
     const now = this.now();
     const speaking = now - this.lastOutputSpeechAt < Engine.SPEAKING_WINDOW_MS;
     const audible = now - this.lastAudibleOutputAt < Engine.SPEAKING_WINDOW_MS && now - this.lastOutputAudioAt < Engine.SPEAKING_WINDOW_MS;
@@ -3363,12 +5272,14 @@ export class Engine extends EventEmitter<EngineEvents> {
    * Hormes's that happens to be a cue ("That's all for now.") would otherwise dismiss
    * it a moment later, because its own speech opens the exchange window. The tail of
    * its last utterance is compared (≥ RECONCILE_THRESHOLD similar, as reconciliation
-   * judges the ear against Live) while its last words are under ECHO_WINDOW_MS old. A
-   * cue that names Hormes is never an echo (the ear does not ask here for one).
+   * judges the ear against Live) while its last words are under ECHO_WINDOW_MS old: their
+   * transcript or their sound, which plays on after Live's barge-in cut the transcript
+   * (LC-6). A cue that names Hormes is never an echo (the ear does not ask here for one).
    */
   private echoOfHormes(phrase: string): boolean {
-    if (this.now() - this.lastOutputSpeechAt > Engine.ECHO_WINDOW_MS) return false;
-    const said = this.transcript.last("hormes");
+    if (this.now() - Math.max(this.lastOutputSpeechAt, this.lastAudibleOutputAt) > Engine.ECHO_WINDOW_MS) return false;
+    // Only words that reached the speaker can come back through the microphone.
+    const said = this.lastSaid();
     if (!said) return false;
     const own = normalizeUtterance(said.text);
     if (!own || !phrase) return false;
@@ -3413,10 +5324,10 @@ export class Engine extends EventEmitter<EngineEvents> {
    */
   private async undoMismatch(reflex: Reflex, heard: string, said: string): Promise<boolean> {
     this.ledger.append({ at: this.now(), type: "reflex.mismatch", action: reflex.label, heard, said } as unknown as LedgerRow);
-    log.warn(`reflex mismatch: the ear heard "${heard}" and ran ${reflex.label}; Kevin said "${normalizeForLog(said)}"`);
+    log.warn(`reflex mismatch: the ear heard "${heard}" and ran ${reflex.label}; ${this.userName} said "${normalizeForLog(said)}"`);
     if (reflex.idempotent) return false;
     if (reflex.kind !== "type") {
-      this.live?.appendInstructions(null, `You ran "${reflex.label}" by reflex on words the on-device ear heard ("${heard}"), but Kevin actually said "${normalizeForLog(said).slice(0, 80)}". Tell him in one short sentence what was done, then carry on with what he asked.`);
+      this.live?.appendInstructions(null, `You ran "${reflex.label}" by reflex on words the on-device ear heard ("${heard}"), but ${this.userName} actually said "${normalizeForLog(said).slice(0, 80)}". Tell ${this.userName} in one short sentence what was done, then carry on with what was asked.`);
       return false;
     }
     const typed = String(reflex.input["text"]).slice(0, 60);
@@ -3425,14 +5336,14 @@ export class Engine extends EventEmitter<EngineEvents> {
       if (f && /AXText(Field|Area)|AXComboBox|AXWebArea/.test(f.role) && !f.secure) {
         const r = await this.toolset.run("key", { text: "cmd+z" });
         if (r.kind === "text") {
-          this.live?.appendInstructions(null, `You typed "${typed}" by reflex but Kevin said something else; it has been undone. Tell him in one short sentence.`);
+          this.live?.appendInstructions(null, `You typed "${typed}" by reflex but ${this.userName} said something else; it has been undone. Tell ${this.userName} in one short sentence.`);
           return true;
         }
       }
     } catch (e) {
       log.debug(`undo after mismatch: ${(e as Error).message}`);
     }
-    this.live?.appendInstructions(null, `You typed "${typed}" by reflex but Kevin said something else, and it could not be undone (the focus is not in a text field). Tell him in one short sentence so he can fix it; do not type it again on top.`);
+    this.live?.appendInstructions(null, `You typed "${typed}" by reflex but ${this.userName} said something else, and it could not be undone (the focus is not in a text field). Tell ${this.userName} in one short sentence so it can be fixed; do not type it again on top.`);
     return false;
   }
 
@@ -3442,9 +5353,18 @@ export class Engine extends EventEmitter<EngineEvents> {
    * policy wants a question for is dropped — the pending question it left is
    * cleared so a later "yes" cannot arm it — and the model path will ask.
    */
-  private async runEarReflex(reflex: Reflex, _phrase: string, via: "ear" | "typed" = "ear"): Promise<ReflexOutcome & { readonly dropped?: string }> {
+  private async runEarReflex(reflex: Reflex, phrase: string, via: "ear" | "typed" = "ear"): Promise<ReflexOutcome & { readonly dropped?: string }> {
+    // An addressed turn only when the words were addressed (typed, naming Hormes, or mid-exchange) and it ran. Decided
+    // before the run, since the exchange window moves while it runs. Hormes's own look (a screenshot, a circle) runs
+    // on room talk too, and room talk opens no exchange: one the room set off must not let it chain the next command.
+    const wasAddressed = via === "typed" || addressesHormes(this.earWords.get(reflex) ?? phrase) || this.inExchange();
+    const outcome = await this.earReflexOutcome(reflex, phrase, via);
+    if (outcome.ok && wasAddressed) this.addressed();
+    return outcome;
+  }
+
+  private async earReflexOutcome(reflex: Reflex, _phrase: string, via: "ear" | "typed"): Promise<ReflexOutcome & { readonly dropped?: string }> {
     const dispatchedAt = this.now();
-    this.lastAddressedAt = dispatchedAt;
     switch (reflex.kind) {
       case "dictate_start":
       case "dictate_stop":
@@ -3479,8 +5399,8 @@ export class Engine extends EventEmitter<EngineEvents> {
           } else if (this.confirmations.pending?.id === outcome.result.pendingId) {
             this.confirmations.dropQuestion();
           } else if (ConfirmationDesk.isQueuedId(outcome.result.pendingId)) {
-            // Queued behind a worker's question: nobody will relay it either; it leaves the queue so it is never promoted unspoken.
-            this.desk.drop(WorkerAwareRunner.ACTOR);
+            // Queued behind a thread's question: nobody will relay it either; it leaves the queue so it is never promoted unspoken.
+            this.desk.drop(ThreadAwareRunner.ACTOR);
           }
           if (!outcome.shared) log.info(`ear reflex ${reflex.label} dropped: the policy wants a yes (${outcome.result.question.slice(0, 80)})`);
           return { ...outcome, ok: false, dropped: "needs confirmation" };
@@ -3499,7 +5419,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     let rect: Rect | undefined;
     let label: string | undefined;
     try {
-      // Reads, on the reading helper: the acting one may be mid-click for a worker or the brain.
+      // Reads, on the reading helper: the acting one may be mid-click for a thread or the brain.
       const c = await this.pool.background.request<{ x: number; y: number }>("cursor", {}, 1000);
       const el = await this.pool.background.request<ElementInfo>("element_at", c, 1500).catch(() => undefined);
       if (el?.frame && el.frame.w >= 4 && el.frame.h >= 4 && el.frame.w * el.frame.h < 4_000_000) {
@@ -3528,21 +5448,21 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (this.dictating) return;
     this.dictating = true;
     this.kevinSpoke();
-    // Kevin's live typing is never interleaved with a worker's: dictation holds the screen with priority until it
+    // Kevin's live typing is never interleaved with a thread's: dictation holds the screen with priority until it
     // ends, and holds it as ONE op in flight — a holder that merely falls silent for LEASE_IDLE_MS lets a waiting
-    // worker take the lease, and Kevin pausing between sentences is not letting go. (A long dictation can cost a
-    // waiting worker its three waits; it then reports "could not get the screen".)
+    // thread take the lease, and Kevin pausing between sentences is not letting go. (A long dictation can cost a
+    // waiting thread its three waits; it then reports "could not get the screen".)
     void this.lease.acquire("dictation", { priority: true }).then((g) => {
       if (!g.ok) {
-        log.debug(`dictation: the lease said ${g.reason}; typing anyway (Kevin's hands win)`);
+        log.debug(`dictation: the lease said ${g.reason}; typing anyway (${this.userName}'s hands win)`);
         return;
       }
       if (this.dictating) this.lease.beginOp("dictation");
       else this.lease.release("dictation", "done");
     });
-    this.live?.appendInstructions(null, "Kevin is dictating into a field on his screen: his words are being typed as he says them. Stay completely silent until he says \"stop dictating\"; do not delegate what he says.");
+    this.live?.appendInstructions(null, `${this.userName} is dictating into a field on the screen: the words are typed as they are spoken. Stay completely silent until ${this.userName} says "stop dictating"; do not delegate the dictated words.`, { ask: false });
     this.ledger.append({ at: this.now(), type: "dictation", state: "started" } as unknown as LedgerRow);
-    this.toast("dictating — say \"stop dictating\" to end", "info");
+    this.toast("dictating · say \"stop dictating\" to end", "info");
     this.recomputePhase();
   }
 
@@ -3553,7 +5473,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.lease.release("dictation", "done");
     this.ledger.append({ at: this.now(), type: "dictation", state: "stopped", reason } as unknown as LedgerRow);
     if (reason !== "asleep") {
-      this.live?.appendInstructions(null, reason === "refused" ? "Dictation stopped: the focused field is a password field or a hands-off app, so nothing was typed. Tell Kevin in one sentence." : "Kevin stopped dictating. Say \"done\" and carry on.");
+      this.live?.appendInstructions(null, reason === "refused" ? `Dictation stopped: the focused field is a password field or a hands-off app, so nothing was typed. Tell ${this.userName} in one sentence.` : `${this.userName} stopped dictating. Say "done" and carry on.`);
       this.toast(reason === "refused" ? "dictation stopped: that field is off limits" : "dictation ended", reason === "refused" ? "warn" : "info");
     }
     this.recomputePhase();
@@ -3565,14 +5485,14 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (HANDS_OFF_APPS.test(app)) return false;
     // The focused field decides: a password field is never typed into.
     const focused = await this.hands.request<FocusedText>("focused_text", {}, 1500).catch(() => undefined);
-    const decision = classifyAction({ kind: "dictate", app, secureField: focused?.secure === true, text });
+    const decision = classifyAction({ kind: "dictate", app, secureField: focused?.secure === true, text, userName: this.userName });
     if (decision.verdict !== "run") return false;
     // `ownDriver`: Kevin is the one typing, so the helper's "Kevin used the keyboard" check does not apply (B2's type op reads it).
     const r = await this.toolset.run("type", { text, ownDriver: true });
     this.lease.touch("dictation");
     if (r.kind === "needs-confirmation") {
       if (this.confirmations.pending?.id === r.pendingId) this.confirmations.dropQuestion();
-      else if (ConfirmationDesk.isQueuedId(r.pendingId)) this.desk.drop(WorkerAwareRunner.ACTOR);
+      else if (ConfirmationDesk.isQueuedId(r.pendingId)) this.desk.drop(ThreadAwareRunner.ACTOR);
       return false;
     }
     if (r.kind === "error") {
@@ -3581,6 +5501,32 @@ export class Engine extends EventEmitter<EngineEvents> {
     }
     this.kevinSpoke();
     return true;
+  }
+
+  /**
+   * "new line" / "new paragraph" while dictating (RAIL-1, dictation's half). Return sends in Messages, Slack, Mail and
+   * the other presence-gated apps, and in a web app's compose box (the page in a browser may be one; its host is not
+   * known here), so there the newline that never sends is posted: Option-Return in Messages, Shift-Return elsewhere.
+   * Shift-Return too when the front app is unknown: a newline almost everywhere, a send almost nowhere. Return only in
+   * an app known not to send on it. If the gate wants a yes or refuses the key, nothing is typed, the question goes (a
+   * later "yes" must not press it) and the toast says so: in an app where Return sends, with how to send.
+   */
+  private async dictateNewline(count: number): Promise<void> {
+    const app = (await this.frontmostAppName()) || this.frontApp;
+    const sends = app !== "" && (presenceGated(app, undefined) || BROWSER_APPS.test(app));
+    const combo = app !== "" && !sends ? "Return" : /\bmessages\b/i.test(app) ? "alt+Return" : "shift+Return";
+    const r = await this.toolset.run("key", { text: combo, repeat: count });
+    this.lease.touch("dictation");
+    if (r.kind === "needs-confirmation") {
+      if (this.confirmations.pending?.id === r.pendingId) this.confirmations.dropQuestion();
+      else if (ConfirmationDesk.isQueuedId(r.pendingId)) this.desk.drop(ThreadAwareRunner.ACTOR);
+    } else if (r.kind !== "error" || !/^refused/.test(r.message)) {
+      if (r.kind === "error") log.warn(`dictation newline failed: ${r.message}`);
+      return;
+    }
+    log.info(`dictation: ${combo} in ${app || "the front app"} not posted (${r.kind === "error" ? r.message.slice(0, 80) : "the gate wants a yes"})`);
+    const messaging = r.kind === "needs-confirmation" && sends && !HANDS_OFF_APPS.test(app);
+    this.toast(messaging ? "new line not typed · say send if you mean send" : "new line not typed here", "warn");
   }
 
   get isDictating(): boolean {
@@ -3599,13 +5545,13 @@ export class Engine extends EventEmitter<EngineEvents> {
       void brain.warmUp().then((r) => log.info(`brain warm at wake: ${r.warm ? "yes" : "not yet"} (${r.detail})`)).catch((e: Error) => log.debug(`brain warm-up: ${e.message}`));
     }
     // The warm thread brains (Settings.warmThreads processes), so the first splits land at once (no model request: primeThreads off).
-    if (this.settings.workers !== false) this.threads.warm();
+    if (this.settings.threads) this.threads.warm();
     if (!this.hands.available && !this.hands.ready) return;
     if (!(this.brain instanceof ResponsesBrain)) {
-      // The wake shot goes to the reading helper (ScreenCaptureKit's first capture is the slow one) and
-      // still sets the main lane's Screen mapping, so a spoken click maps through it at once.
+      // The wake shot warms ScreenCaptureKit (its first capture is the slow one) in the one process that captures, the acting
+      // helper (CAPTURE_OPS), so the eyes' shot after it is warm. It sets the main lane's Screen mapping, so a spoken click maps at once.
       const t0 = this.now();
-      void this.pool.background
+      void this.pool.focus
         .request<ScreenshotResult>("screenshot", { display: "cursor", maxLongEdge: QUICK_SHOT_BUDGET.maxLongEdge, maxPixels: QUICK_SHOT_BUDGET.maxPixels, excludePids: [...this.excludePids, process.pid], showCursor: true }, 6000)
         .then((shot) => {
           this.toolset.screen.remember(shot);
@@ -3744,18 +5690,9 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   async command(cmd: EngineCommand): Promise<void> {
     switch (cmd.type) {
-      case "wake":
-        return this.wake("wake command");
       case "sleep":
-        // The app's dock drop sends cause "dock"; a bare sleep is the legacy command. Only a spoken cue gets the farewell.
+        // The app's dock drop sends cause "dock"; the CLI's bare sleep sends none ("command"). Only a spoken cue gets the farewell.
         return this.fallAsleep(cmd.cause ?? "command", { ...(cmd.phrase ? { phrase: cmd.phrase } : {}), farewell: cmd.cause === "said" });
-      case "worker.stop": {
-        const w = this.threads.get(cmd.workerId);
-        const cut = await this.threads.stop(cmd.workerId, "kevin");
-        // A row still lingering for the Console after its thread finished: nothing was stopped, and the word says so.
-        this.toast(!w ? "no such worker" : cut ? `${w.name} stopped` : `${w.name} had already finished`, w ? "info" : "warn");
-        return;
-      }
       case "thread.stop":
         return this.stopThread(cmd.threadId);
       case "thread.pause":
@@ -3784,8 +5721,12 @@ export class Engine extends EventEmitter<EngineEvents> {
         return this.interrupt("interrupt command", cmd.how ?? "pressed");
       case "say-text":
         return this.sayText(cmd.text);
-      case "set-settings":
-        return this.updateSettings(cmd.patch);
+      case "set-settings": {
+        // The recipes' Trash is the engine's fact: a client's whole automations block (re-encoded without `trashedAt`) never
+        // un-trashes a recipe or drops the list — `recipe.restore` is the one way back. The engine's own writes skip this.
+        const auto = cmd.patch.automations;
+        return this.updateSettings(auto && typeof auto === "object" ? { ...cmd.patch, automations: keepRecipeTrash(this.settings.automations, auto) } : cmd.patch);
+      }
       case "clear-problems":
         this.problems = [];
         return this.scheduleSnapshot();
@@ -3823,7 +5764,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       case "agent.history":
         return this.agentHistory(cmd.agentId, cmd.before);
       case "voice.reopen":
-        return this.reopenVoice();
+        return this.reopenVoice({ how: "voice change" });
       case "memory.forget":
       case "memory.restore":
       case "memory.edit":
@@ -3835,6 +5776,11 @@ export class Engine extends EventEmitter<EngineEvents> {
       }
       case "mark.add":
         return this.addMark(cmd.rect, cmd.path);
+      case "mark.remove":
+        return this.removeMark(String((cmd as { id?: unknown }).id ?? ""));
+      case "mark.window":
+        void this.markFrontWindow();
+        return;
       case "mark.clear":
         return this.clearMarks();
       case "daemon.restart":
@@ -3873,6 +5819,21 @@ export class Engine extends EventEmitter<EngineEvents> {
         return this.hideAgent(String(cmd.agentId), cmd.hidden === true);
       case "problem.retry":
         return this.retryProblem(cmd.kind);
+      // ---- automations (design11): the Console's rail, the island's Snooze · Done, a banner's buttons, the CLI. Never a deletion.
+      case "automation.set":
+      case "automation.snooze":
+      case "automation.done":
+      case "automation.skip":
+      case "automation.pause":
+      case "automation.resume":
+      case "automation.rename":
+      case "automation.trash":
+      case "automation.restore":
+      case "automation.run":
+      case "recipe.set":
+      case "recipe.trash":
+      case "recipe.restore":
+        return this.automations.command(cmd, (text, tone) => this.toast(text, tone ?? "info"));
       case "open-console":
       case "open-ledger":
         return; // the shell handles window commands
@@ -3880,8 +5841,11 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.failureLine?.now();
     if (this.tickTimer) clearInterval(this.tickTimer);
     if (this.snapshotTimer) clearTimeout(this.snapshotTimer);
+    this.localHealAt = 0;
     if (this.dockAuditTimer) clearTimeout(this.dockAuditTimer);
     this.dockAuditTimer = undefined;
     this.stopAxWarm();
@@ -3891,56 +5855,269 @@ export class Engine extends EventEmitter<EngineEvents> {
     for (const t of this.closeTimers) clearTimeout(t);
     this.closeTimers.clear();
     this.lease.cancelAll("shutdown");
+    this.automations.dispose();
+    // A start the walk left running stops as it lands; one queued to take over stops now.
+    this.selectionSeq++;
+    this.dropPendingSwap();
     await this.brain?.stop();
     this.pool.stop();
   }
 
+  /**
+   * A signal the app observed on Kevin's behalf (`system.signal` on the wire): an app
+   * quit or launched, the Mac slept or woke, the screen locked or unlocked, a display
+   * came or went, the clock changed. Data for the watchers and the resync — never a
+   * command, never a wake.
+   */
+  systemSignal(signal: SystemSignal, at: number): void {
+    if (typeof signal !== "object" || signal === null || typeof (signal as { readonly kind?: unknown }).kind !== "string") return;
+    this.automations.signal(signal, Number.isFinite(at) ? at : this.now());
+  }
+
+  /** How many clients look at the island / Console right now (the app's `hello { audio: true }`): running timers tick only while > 0. */
+  setViewers(n: number): void {
+    this.automations.setViewers(n);
+  }
+
+  /**
+   * Kevin is here, for `automation.run`: a session is open (he hears it), he spoke within
+   * the presence window, or his hands moved on the machine (the reading helper's `user_idle`).
+   */
+  private async kevinPresent(): Promise<boolean> {
+    if (this.live && !this.connecting) return true;
+    if (this.now() - this.lastKevinAt < PRESENCE_WINDOW_MS) return true;
+    try {
+      const idle = await this.pool.background.request<UserIdle>("user_idle", {}, 800);
+      return idle.foreignMs < PRESENCE_WINDOW_MS;
+    } catch {
+      return false;
+    }
+  }
+
   // ----------------------------------------------------------------- state
 
-  /** Kevin's own input landed: presence, attention, and any announced sleep is off. */
-  private kevinSpoke(): void {
+  /** Kevin's own input landed (heard, typed, dictated, a wake he pressed): presence, which the policy's presence gate reads. Not attention by itself. */
+  private markKevin(): void {
     this.lastKevinAt = this.now();
-    this.lastAddressedAt = this.lastKevinAt;
+  }
+
+  /**
+   * An addressed turn (`lastAddressedAt` lists them): the idle clock and the ceiling's restart, and an announced sleep is
+   * off. `engaged: false` — words merely inside the exchange window, and the voice's answers to them — moves the idle
+   * clock only, as a name does (`named`): a room that keeps the window open by being answered never holds the session
+   * past the ceiling (D1), whatever the exchange's own cap misses.
+   */
+  private addressed(o: { readonly engaged?: boolean } = {}): void {
+    const now = this.now();
+    this.lastAddressedAt = now;
+    if (o.engaged === false) {
+      const ceilingMs = this.ceilingMs();
+      if (ceilingMs > 0 && now - this.lastEngagedAt > ceilingMs - 5000) return;
+    } else this.lastEngagedAt = now;
     this.sleepDeadlineAt = undefined;
+  }
+
+  /**
+   * Words that name Hormes: the idle clock restarts, the exchange window opens and its cap counts from here, but the
+   * ceiling's clock does not move (D1: the room can say the name). An announced sleep is off, unless the ceiling is
+   * what is due.
+   */
+  private named(): void {
+    this.attention.anchor();
+    this.addressed({ engaged: false });
+  }
+
+  /** Kevin spoke TO Hormes himself — a typed line, dictation, a Go, a wake: presence, attention, and the exchange's anchor. */
+  private kevinSpoke(): void {
+    this.markKevin();
+    this.addressed();
+    this.attention.anchor();
+  }
+
+  /**
+   * Mid-exchange: an addressed turn within EXCHANGE_WINDOW_MS — Hormes's own granted words among them (`voiceSpoke`),
+   * and no more than EXCHANGE_MAX_MS after the exchange's anchor. Never because the microphone heard someone (RF-2), and
+   * never on the pre-sleep clause or an answer nobody asked for: either would open the window to the room that follows.
+   */
+  private inExchange(): boolean {
+    return this.now() - this.lastAddressedAt < Engine.EXCHANGE_WINDOW_MS && this.attention.capOpen();
+  }
+
+  /**
+   * Hormes's own words the room-talk gate granted: speech for the phase, and an addressed turn — except the pre-sleep
+   * clause's turn, which counts for nothing (counted, it would re-arm the idle clock every idle stretch; after "going to
+   * sleep" only the name, a typed line or Go keeps the session awake). A turn granted only because it was inside the
+   * exchange moves the idle clock, not the ceiling's.
+   */
+  private voiceSpoke(grant: VoiceGrant, clause: boolean): void {
+    this.lastOutputSpeechAt = this.now();
+    if (!clause) this.addressed({ engaged: grant !== "window" && grant !== "exchange" });
+    this.recomputePhase();
+  }
+
+  /**
+   * A settled line of Hormes's on the record: `heard`, a `said` row, the Console's stream and the main thread's pane;
+   * not heard (the room-talk gate kept its turn off the speaker), a `said` row marked `unheard` and nothing more — the
+   * record keeps what the voice said to the room, Kevin's views show what he heard (ADV review, finding 7).
+   */
+  private saidSettled(item: TranscriptItem, heard: boolean): void {
+    const { unheard: _u, ...plain } = item;
+    if (!heard) {
+      this.ledger.append({ at: item.at, type: "said", item: { ...plain, unheard: true } });
+      this.saidUnheard.add(item.id);
+      if (this.saidUnheard.size > 64) this.saidUnheard.delete(this.saidUnheard.values().next().value as string);
+      return;
+    }
+    this.ledger.append({ at: item.at, type: "said", item: plain });
+    this.emit("utterance", plain);
+    this.mainLog.append({ kind: "utterance", item: plain });
+  }
+
+  /**
+   * The gate decided the turn behind these lines of Hormes's: each is marked on the Transcript (`unheard` when no turn
+   * that said it was heard), and one that settled while undecided is written now. A late name that released a line
+   * already written as unheard writes it again, heard.
+   */
+  private saidDecided(ids: readonly string[]): void {
+    for (const id of ids) {
+      const state = this.attention.saidState(id);
+      if (state === undefined || state === "pending") continue;
+      const heard = state === "heard";
+      this.transcript.mark(id, { unheard: !heard });
+      const held = this.saidPending.get(id);
+      if (held) {
+        this.saidPending.delete(id);
+        this.saidSettled(this.transcript.get(id) ?? held, heard);
+      } else if (heard && this.saidUnheard.delete(id)) {
+        const item = this.transcript.get(id);
+        if (item?.final) this.saidSettled(item, true);
+      }
+    }
+  }
+
+  /**
+   * The room-talk gate refused a delegation that may have been Kevin's unnamed answer to a question of Hormes's — a yes
+   * to a send past the exchange, a second answer, a late one: he hears once, as an aside (it opens no exchange the
+   * room could use), that the answer needs the name. A refusal with no question waiting stays silent.
+   */
+  private cueTheName(): void {
+    const live = this.live;
+    const kind = live ? this.attention.cue() : undefined;
+    if (!live || !kind) return;
+    const line = kind === "confirm" ? "say hormes with the yes, or answer in the console." : "say hormes with your answer.";
+    log.info(`an unnamed answer to Hormes's ${kind === "confirm" ? "confirmation" : "question"} was refused: the cue "${line}"`);
+    this.cueing = true;
+    try {
+      live.appendInstructions(null, `Say exactly this to ${this.userName} and nothing else: "${line}" Then wait.`);
+    } finally {
+      this.cueing = false;
+    }
+  }
+
+  /** Hormes's last line Kevin heard (one the room-talk gate kept off the speaker never was): the echo's and the farewell's. */
+  private lastSaid(): TranscriptItem | undefined {
+    const all = this.transcript.all();
+    for (let i = all.length - 1; i >= 0; i--) {
+      const item = all[i]!;
+      if (item.speaker === "hormes" && !item.unheard) return item;
+    }
+    return undefined;
+  }
+
+  /** Frames of a reply a late name released (the gate had locked it out a moment before), to the speaker in order. */
+  private playReleased(frames: readonly Buffer[]): void {
+    if (frames.length === 0 || this.now() < this.outputGateUntil) return;
+    for (const pcm of frames) {
+      this.outputLevel = rms(pcm);
+      this.lastOutputAudioAt = this.now();
+      this.emit("audio", pcm);
+    }
+  }
+
+  /** The idle setting in ms: 0 when it is off, negative or not a number (tick's ceiling holds for the last two). */
+  private idleMs(): number {
+    const minutes = this.settings.idleSleepMinutes;
+    return Number.isFinite(minutes) && minutes > 0 ? minutes * 60_000 : 0;
+  }
+
+  /** D1's ceiling in ms: IDLE_CEILING_MS, or a longer idle setting; 0 only when idle sleep is explicitly off (0). */
+  private ceilingMs(): number {
+    return this.settings.idleSleepMinutes === 0 ? 0 : Math.max(Engine.IDLE_CEILING_MS, this.idleMs());
+  }
+
+  /** How long a pause (or a conversation the server cut) is held before it decays to sleep: the idle setting, at least a minute. */
+  private pauseHoldMs(): number {
+    return Math.max(Engine.PAUSE_MIN_MS, this.idleMs());
   }
 
   private onAction(a: ActionEvent): void {
     if (a.member === "mouse_move" && a.points) this.emit("overlay", { cmd: "point", x: a.points.x, y: a.points.y, ttlMs: 3000 });
-    this.lastAddressedAt = this.now();
   }
 
   private tick(): void {
     const now = this.now();
     // Speaking decays when the transcript stops arriving; levels alone lie (silence frames).
     this.recomputePhase();
+    // The room-talk gate: a voice turn that ended without a sound is decided as it was left; a delegation waiting on a
+    // late name past its deadline is the room's.
+    this.attention.tick();
     this.pruneMarks();
     if (Ledger.fileNameFor(now) !== this.usageDay) this.loadUsageToday();
+    this.noteUsage("tick");
     if (this.sweepPending) this.runPendingSweep();
     this.watchdog();
+    this.watchLiveFrames(now);
+    // A slow brain start that proved itself takes over once nothing runs (F-AUTO-PROBE).
+    this.trySwap();
+    // Reopen was pressed while work ran (V11): the session reopens once nothing runs that a pause would cancel.
+    if (this.capReopenPending && this.delegator?.active === undefined && this.threads.running() === 0) void this.retryProblem("voice.limit");
     if (now - this.memoryLoggedAt >= Engine.MEMORY_LOG_MS) {
       this.memoryLoggedAt = now;
       this.logMemory();
     }
     this.problemsTick(now);
+    // The local heal: Kevin picked `local`, no local brain is ready, a minute passed — look again (and restart onto the server when it can run the pick).
+    if (this.localHealAt !== 0 && now >= this.localHealAt) {
+      this.localHealAt = now + Engine.LOCAL_HEAL_MS;
+      void this.healLocal();
+    }
     // A question queued behind one Kevin moved on from comes up now (the desk cannot see the root's drop).
     this.desk.promote();
-    const idleMs = this.settings.idleSleepMinutes * 60_000;
+    const idleMs = this.idleMs();
     // Not idle while a task runs — or while a thread still works (Live stays open for its question and
     // for the spoken stop; its caps bound the worst case at about five minutes).
     const busy = this.delegator?.active !== undefined || this.threads.running() > 0;
     // The table's clock: acting→thinking after 4 s without a step, the spares topped up, the idle threads ended.
     this.threads.tick(now);
-    // Five seconds before the idle sleep, one clause ("going to sleep") — and the sleep then
-    // falls due on a fixed deadline, so the announcement (Hormes's own speech moves
-    // lastAddressedAt) cannot postpone it; only Kevin's input does (kevinSpoke).
-    if (this.live && !this.connecting && this.live.currentState === "started" && !busy && idleMs > 5000 && this.sleepDeadlineAt === undefined && now - this.lastAddressedAt > idleMs - 5000 && now - this.lastKevinAt > idleMs - 5000) {
+    // The schedule's clock: a tick gap means the Mac slept (resync), due rows fire, rings linger, the watchers poll.
+    this.automations.tick(now);
+    // The limit on the addressed clock: Kevin's idle setting while nothing runs; while something runs, or when the
+    // setting is not a number at all, the ceiling (D1). Whatever the setting, the ceiling also holds on lastEngagedAt,
+    // the clock that words naming Hormes do not move. No turn that never ends, no typo and no room that says the name
+    // keeps a paid session up longer with nobody addressing it. Room talk moves neither clock (W1-1). 0 is off.
+    const ceilingMs = this.ceilingMs();
+    const limitMs = ceilingMs === 0 ? 0 : !busy && idleMs > 0 ? idleMs : ceilingMs;
+    const byCeiling = this.lastEngagedAt + ceilingMs < this.lastAddressedAt + limitMs;
+    const dueAt = byCeiling ? this.lastEngagedAt + ceilingMs : this.lastAddressedAt + limitMs;
+    const open = this.live !== undefined && !this.connecting && this.live.currentState === "started";
+    // Five seconds before the sleep, one clause ("going to sleep"), and the sleep then falls due on a fixed deadline:
+    // the clause is not an addressed turn and the room cannot push it; only an addressed turn does (`addressed()`).
+    if (open && limitMs > 5000 && this.sleepDeadlineAt === undefined && now > dueAt - 5000) {
       this.sleepDeadlineAt = now + 5000;
-      this.delegator?.announceSleep(5);
+      // The clause's append asks for the voice turn that says it: heard, and counted for nothing (`announcing`).
+      this.announcing = true;
+      try {
+        this.delegator?.announceSleep(5);
+      } finally {
+        this.announcing = false;
+      }
     }
-    if (this.live && !this.connecting && this.live.currentState === "started" && !busy && idleMs > 0 && (now - this.lastAddressedAt > idleMs || (this.sleepDeadlineAt !== undefined && now >= this.sleepDeadlineAt))) {
+    if (open && limitMs > 0 && (now > dueAt || (this.sleepDeadlineAt !== undefined && now >= this.sleepDeadlineAt))) {
       this.sleepDeadlineAt = undefined;
-      log.info(`idle for ${this.settings.idleSleepMinutes} min; sleeping`);
-      this.toast("asleep — tap the orb to wake", "info");
+      const heard = this.lastHeardAt > this.lastAddressedAt ? `; the room was heard ${Math.round((now - this.lastHeardAt) / 1000)} s ago` : "";
+      const span = byCeiling ? `${Math.round(ceilingMs / 60_000)} min (the ceiling; words that name Hormes do not count)` : `${Math.round(limitMs / 60_000)} min${limitMs === idleMs ? "" : " (the ceiling)"}`;
+      log.info(`no addressed turn for ${span}${heard}; sleeping`);
+      this.toast("asleep · tap the orb to wake", "info");
       void this.fallAsleep("idle");
     }
     // A pause nobody resumed decays to sleep: the held conversation is let go.
@@ -3961,6 +6138,55 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.memory.drain(this.quiet);
     void this.pollPermissions();
     this.emit("event", { type: "levels", levels: this.levels() });
+  }
+
+  /**
+   * V3: a started, unmuted session whose server has sent nothing for this long is a dead socket. GPT-Live-1 streams
+   * output audio continuously, silence included (REDESIGN §2), but only while the mic is open: about 3.4 s after
+   * `session.input_audio.mute` (3.37 s in LC-2, 2026-10-06) it stops and sends only the 15 s usage beat. So the watch
+   * is off while muted. LC-1 measures the real gaps; until then 5 s.
+   */
+  static readonly LIVE_SILENCE_MS = 5000;
+
+  /** tick() runs every second; one this long after the last ran late (V3's frame watch starts over). */
+  static readonly TICK_LATE_MS = 2000;
+
+  /**
+   * From tick(): the open session's frame count (`LiveSession.serverFrames`) on the engine's own clock. A count that
+   * has not moved for LIVE_SILENCE_MS drops the socket as `connection_lost`, so the drop takes the path a real one
+   * takes: the turn is cut, the row counts the reconnect, one new session carries the conversation on. A session
+   * with no count (a test's stand-in) is not watched.
+   *
+   * A tick that runs late (TICK_LATE_MS on the process's own clock since the last) follows a stalled event loop: a
+   * long synchronous read, or the Mac asleep. Its timer runs before the socket messages queued meanwhile are read, so
+   * an unmoved count then proves nothing: the watch starts over from this tick.
+   *
+   * Muted, the watch is off (LC-2, 2026-10-06). GPT-Live-1 streams output continuously only while the mic is open.
+   * About 3.4 s after `session.input_audio.mute` (3.37 s in LC-2) it stops and sends only the 15 s usage beat, so a
+   * muted session is quiet, not dead: watched, it was dropped about 12 s into a mute. The watch starts over at the
+   * first tick after the unmute.
+   */
+  private watchLiveFrames(now: number): void {
+    const real = performance.now();
+    const gap = this.framesWatchedAt === undefined ? 0 : real - this.framesWatchedAt;
+    const late = gap > Engine.TICK_LATE_MS;
+    this.framesWatchedAt = real;
+    const live = this.live;
+    const frames = live?.serverFrames;
+    if (!live || this.connecting || this.muted || live.currentState !== "started" || typeof frames !== "number") {
+      this.framesSeen = undefined;
+      return;
+    }
+    const seen = this.framesSeen;
+    if (!seen || seen.live !== live || seen.frames !== frames || late) {
+      if (late && seen?.live === live && seen.frames === frames) log.info(`session ${live.session?.id ?? "?"}: the tick ran ${Math.round(gap)} ms after the last; the frame watch starts over`);
+      this.framesSeen = { live, frames, at: now };
+      return;
+    }
+    if (now - seen.at < Engine.LIVE_SILENCE_MS) return;
+    this.framesSeen = undefined;
+    log.warn(`session ${live.session?.id ?? "?"}: no frame from the server for ${Math.round((now - seen.at) / 1000)} s; dropping the socket to reconnect`);
+    live.terminate("connection_lost");
   }
 
   /** How often tick() writes the memory line. */
@@ -4019,7 +6245,9 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.closeWithDeadline(live, "watchdog (paused)");
       return;
     }
-    if (live && !handshaking && !this.wantAwake && !this.connecting) {
+    // A farewell being waited for is the stop in progress, bounded by its own caps (FAREWELL_START_MS +
+    // FAREWELL_CAP_MS): cut at WATCHDOG_OUTLIVED_MS, the word went unheard and its sleep was left waiting (LC-4).
+    if (live && !handshaking && !this.wantAwake && !this.connecting && !this.farewellEnd) {
       if (!this.outlivedSince) this.outlivedSince = now;
       else if (now - this.outlivedSince > Engine.WATCHDOG_OUTLIVED_MS) {
         const id = live.session?.id ?? "?";
@@ -4082,9 +6310,9 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   // ------------------------------------------------------- problems, typed
   // A problem is one line Kevin can read, its kind, and the ONE thing to press for it
-  // (REDESIGN §16, "Problems, typed"). `problems` (the snapshot's plain list) stays the
-  // order and the cap; `problemMeta` carries kind, remedy and first-seen per line, so
-  // `typedProblems()` is the same list with its remedies. Deduped by kind + text; a line
+  // (REDESIGN §16, "Problems, typed"). `problems` (the lines) is the order and the cap;
+  // `problemMeta` carries kind, remedy and first-seen per line, so `typedProblems()` —
+  // the snapshot's `problems` — is the same list with its remedies. Deduped by kind + text; a line
   // raised again while present keeps its `since`; a fixed problem clears itself at the
   // site that knows (a grant appears, the helper greets, the key answers, the voice
   // reconnects) or on `problem.retry`, which re-runs that kind's check.
@@ -4164,7 +6392,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     for (const text of this.problemMeta.keys()) if (!this.problems.includes(text)) this.problemMeta.delete(text);
   }
 
-  /** The problems with their kind, remedy and first-seen: the snapshot's `problemsTyped`, the same list as `problems`. */
+  /** The problems with their kind, remedy and first-seen: the snapshot's `problems`. */
   typedProblems(): Problem[] {
     this.pruneProblemMeta();
     return this.problems.map((text) => {
@@ -4175,9 +6403,21 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   /** The remedies that are one command away. */
   private static readonly PROBE_REMEDY: ProblemRemedy = { label: "Retry", command: { type: "config.probe" } };
+  /** A brain row's Retry restarts the brain (`config.probe` only re-checks the key and never re-selects). */
+  private static readonly BRAIN_REMEDY: ProblemRemedy = { label: "Retry", command: { type: "problem.retry", kind: "brain.unavailable" } };
+  private static readonly LOCAL_REMEDY: ProblemRemedy = { label: "Retry", command: { type: "problem.retry", kind: "brain.local" } };
   private static readonly SETUP_REMEDY: ProblemRemedy = { label: "Open Setup", open: "hormes://setup" };
+
   private static readonly GO_REMEDY: ProblemRemedy = { label: "Retry", command: { type: "go" } };
   private static readonly LIMIT_REMEDY: ProblemRemedy = { label: "Retry in 30 s", command: { type: "problem.retry", kind: "voice.limit" } };
+  /** A cap the session itself has hit (V11): only a new session clears it, so the one press reopens it with the conversation. */
+  private static readonly REOPEN_REMEDY: ProblemRemedy = { label: "Reopen", command: { type: "problem.retry", kind: "voice.limit" } };
+  /**
+   * A cap the session itself holds: `response_input_buffer_full: … limited to 128 items and 32768 UTF-8 bytes per
+   * session`. Waiting never clears it. Read from the stable error code first, so a truncated or reworded line is
+   * still this cap, and from the server's scope words for any other cap it says is per session.
+   */
+  private static readonly SESSION_CAP = /\bresponse_input_buffer_full\b|\bper[- ]session\b/i;
 
   /**
    * A GPT-Live-1 error as a typed problem: a cap (`voice.limit`, clears itself after
@@ -4187,7 +6427,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   private voiceProblem(text: string, connectionRemedy: ProblemRemedy = Engine.GO_REMEDY): void {
     switch (classifyLiveError(text)) {
       case "limit":
-        return this.problemOf("voice.limit", text, Engine.LIMIT_REMEDY);
+        return this.problemOf("voice.limit", text, Engine.SESSION_CAP.test(text) ? Engine.REOPEN_REMEDY : Engine.LIMIT_REMEDY);
       case "key":
         return this.problemOf("voice.key", text, Engine.SETUP_REMEDY);
       case "connection":
@@ -4225,13 +6465,32 @@ export class Engine extends EventEmitter<EngineEvents> {
         return;
       case "brain.unavailable":
       case "brain.probe":
+      case "brain.local":
         this.clearProblems(kind);
         await this.restartBrain("problem.retry");
         await this.probeSetup();
         return;
-      case "voice.limit":
+      case "voice.limit": {
+        // A per-request or per-minute cap is over by the time anyone presses it. A per-session one is not (V11):
+        // the session is paused and reopened, the conversation carried on as a reconnect carries it.
+        const sessionCap = this.problems.some((t) => this.problemMeta.get(t)?.kind === kind && Engine.SESSION_CAP.test(t));
+        this.capReopenPending = false;
+        if (!sessionCap || !this.live?.session || this.connecting || this.pauseInfo || this.sleeping) {
+          // A passing cap, or no open session holds the cap any more: the next session starts empty.
+          this.clearProblems(kind);
+          return;
+        }
+        if (this.delegator?.active !== undefined || this.threads.running() > 0) {
+          // A pause cancels a running task and every thread, as reopenVoice refuses to: the row stays, and the
+          // session reopens from tick() once nothing runs.
+          this.capReopenPending = true;
+          this.toast("busy · reopens when the task is done", "info");
+          return;
+        }
         this.clearProblems(kind);
+        await this.reopenVoice({ how: "reconnected", why: "the session's input cap" });
         return;
+      }
       case "voice.connection":
         this.clearProblems(kind);
         this.voiceReconnectSince = 0;
@@ -4310,23 +6569,56 @@ export class Engine extends EventEmitter<EngineEvents> {
    * The row an audit earns, or none: two or more Hormes tiles with a pin among them
    * ("Two Hormes tiles in the Dock"; the count past two), else a pin whose URL is not
    * the installed bundle's. A recent tile with no pin is one tile — nothing to fix.
+   * An audit that carries `helperTiles` (the one-Hormes pass and `checkDock` / `fixDock`
+   * read `lsappinfo list` beside the plist) is drawn a tile per Foreground helper whether or
+   * not `recent-apps` has caught up, and the text names that cause: Fix the Dock clears only
+   * the leftover once the helper is rebuilt.
    */
   static dockProblemText(a: DockAudit): string | undefined {
-    const tiles = a.pinned + a.recent;
-    if (a.pinned >= 1 && tiles >= 2) return tiles === 2 ? "Two Hormes tiles in the Dock" : `${tiles} Hormes tiles in the Dock`;
+    const helpers = a.helperTiles ?? [];
+    const tiles = a.pinned + Math.max(a.recent, helpers.length);
+    const cause = helpers.length ? `: ${describeHelperTiles(helpers, "Fix the Dock")}` : "";
+    if (a.pinned >= 1 && tiles >= 2) return `${tiles === 2 ? "Two Hormes tiles in the Dock" : `${tiles} Hormes tiles in the Dock`}${cause}`;
     const rebuild = a.changes.find((c) => c.kind === "rebuild-pin");
     if (rebuild && rebuild.urlWas !== INSTALLED_URL) return `The Dock's Hormes pin points at ${rebuild.urlWas ?? "nothing"}`;
     return undefined;
   }
 
-  /** Read the Dock (one `defaults export`, no write) and set or clear the `dock` row from what it says. */
+  /**
+   * The Foreground Hormes processes besides the app (one `lsappinfo list`, ~50 ms, no lsd
+   * wait, no write): each is a Dock tile the plist repair cannot remove. Read beside every
+   * Dock read so the row and the fix's verdict see the helper's tile before `recent-apps`
+   * has parked it — the plist alone reads clean for the ~10 s until it does. A failed or
+   * absent `lsappinfo` (headless, a scripted exec) is nobody's tile.
+   */
+  private helperTiles(reason: string): readonly RunningApp[] {
+    const ran = readRunning(this.exec, { bundleId: HORMES_BUNDLE_ID, timeoutMs: Engine.DOCK_EXEC_TIMEOUT_MS });
+    if ("skipped" in ran) {
+      log.debug(`dock audit (${reason}): running apps not read — ${ran.skipped}`);
+      return [];
+    }
+    return ran.helperTiles;
+  }
+
+  /** The audit with the helper tiles on it — the very same object when there are none. */
+  private static withHelpers(a: DockAudit, helpers: readonly RunningApp[]): DockAudit {
+    return helpers.length ? { ...a, helperTiles: helpers } : a;
+  }
+
+  /** What Fix the Dock says while a helper's tile stands: the plist half is done (or was clean); the tile is the helper's to lose. */
+  private static dockHelperToast(written: boolean): string {
+    return `${written ? "Dock written" : "Dock unchanged"} · the helper's tile returns while it lives; rebuild (pnpm build:mac) and relaunch`;
+  }
+
+  /** Read the Dock (one `defaults export`, no write) and the running helpers (one `lsappinfo list`), and set or clear the `dock` row from what they say. */
   checkDock(reason: string): DockAudit | undefined {
-    const read = readDock(this.exec, Engine.DOCK_OPTS);
-    if ("skipped" in read) {
+    const dock = readDock(this.exec, Engine.DOCK_OPTS);
+    if ("skipped" in dock) {
       // No Dock to read (headless, or cfprefsd said no): not a problem of Kevin's to fix.
-      log.debug(`dock audit (${reason}) skipped: ${read.skipped}`);
+      log.debug(`dock audit (${reason}) skipped: ${dock.skipped}`);
       return undefined;
     }
+    const read = Engine.withHelpers(dock, this.helperTiles(reason));
     const text = Engine.dockProblemText(read);
     if (text) this.replaceProblem("dock", text, Engine.DOCK_REMEDY);
     // A clean read while a restart is owed is cfprefsd's import, not what the Dock draws: the row stays.
@@ -4343,16 +6635,21 @@ export class Engine extends EventEmitter<EngineEvents> {
    * An import whose `killall Dock` failed keeps the row too ("— Dock not restarted"): the
    * re-read is only cfprefsd's copy until the Dock relaunches, so no recheck is armed and
    * the next press runs just the restart. A read that fails toasts why and leaves the row.
+   * A Foreground helper alive (`helperTiles`, read once per press) is the one tile no import
+   * removes: the leftover still goes, the row stays with the cause, and the toast says the
+   * Dock was written — never "fixed" — and where the fix is (rebuild, relaunch).
    */
   private fixDock(): void {
     const opts = { ...Engine.DOCK_OPTS, log: (line: string) => log.info(line) };
-    const before = readDock(this.exec, opts);
-    if ("skipped" in before) {
+    const dock = readDock(this.exec, opts);
+    if ("skipped" in dock) {
       // The row stands — the read that raised it worked — and a press has to be seen to do something.
-      log.warn(`fix the Dock: ${before.skipped}`);
-      this.toast(`Could not read the Dock: ${before.skipped}`, "warn");
+      log.warn(`fix the Dock: ${dock.skipped}`);
+      this.toast(`Could not read the Dock: ${dock.skipped}`, "warn");
       return;
     }
+    const helpers = this.helperTiles("fix");
+    const before = Engine.withHelpers(dock, helpers);
     let did: string;
     let written: boolean;
     let restarted: boolean;
@@ -4363,7 +6660,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       did = describeDockChanges(before.changes);
       written = r.imported;
       restarted = r.restarted;
-      after = r.after ?? before;
+      after = r.after ? Engine.withHelpers(r.after, helpers) : before;
       skipped = r.skipped;
     } else if (this.dockRestartOwed) {
       // The last press imported the clean document; only the relaunch is owed.
@@ -4371,17 +6668,22 @@ export class Engine extends EventEmitter<EngineEvents> {
       written = true;
       restarted = restartDock(this.exec, opts);
     } else {
-      log.info(`fix the Dock: nothing to repair (${describeDock(before)})`);
-      this.clearProblems("dock");
+      // A clean plist. With a helper alive the tile is still drawn: the row keeps its cause, nothing is written.
+      const standing = Engine.dockProblemText(before);
+      log.info(`fix the Dock: nothing to repair (${describeDock(before)})${standing ? ` — ${standing}` : ""}`);
+      if (standing) {
+        this.replaceProblem("dock", standing, Engine.DOCK_REMEDY);
+        this.toast(Engine.dockHelperToast(false), "warn");
+      } else this.clearProblems("dock");
       this.scheduleSnapshot();
       return;
     }
     log.info(`fix the Dock: ${describeDock(after)} (${did}${restarted ? ", Dock restarted" : written ? ", Dock NOT restarted" : ", nothing written"})${skipped ? ` — ${skipped}` : ""}`);
     this.dockRestartOwed = written && !restarted;
     if (this.dockRestartOwed) {
-      const stood = Engine.dockProblemText(before) ?? this.typedProblems().find((p) => p.kind === "dock")?.text.replace(/ — .*$/, "") ?? "Two Hormes tiles in the Dock";
-      this.replaceProblem("dock", `${stood} — Dock not restarted`, Engine.DOCK_REMEDY);
-      this.toast("Dock written, not restarted — press Fix the Dock again", "warn");
+      const stood = Engine.dockProblemText(before) ?? this.typedProblems().find((p) => p.kind === "dock")?.text.replace(/(?:: | \().*$/, "") ?? "Two Hormes tiles in the Dock";
+      this.replaceProblem("dock", `${stood} (Dock not restarted)`, Engine.DOCK_REMEDY);
+      this.toast("Dock written, not restarted · press Fix the Dock again", "warn");
       this.scheduleSnapshot();
       return;
     }
@@ -4390,7 +6692,10 @@ export class Engine extends EventEmitter<EngineEvents> {
       this.clearProblems("dock");
       this.toast(`Dock fixed: ${did}`, "info");
     } else {
-      this.replaceProblem("dock", skipped ? `${text} — ${skipped}` : text, Engine.DOCK_REMEDY);
+      const why = skipped ? `${text} (${skipped})` : text;
+      this.replaceProblem("dock", why, Engine.DOCK_REMEDY);
+      // The plist half is done; the tile that stands is the helper's, and only its rebuild ends it.
+      if (helpers.length) this.toast(Engine.dockHelperToast(written), "warn");
     }
     this.dockRecheckAt = this.now() + Engine.DOCK_RECHECK_MS;
     this.scheduleSnapshot();
@@ -4480,7 +6785,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   private problemsTick(now: number): void {
     for (const text of this.problems) {
       const meta = this.problemMeta.get(text);
-      if (meta?.kind === "voice.limit" && now - meta.since >= Engine.VOICE_LIMIT_CLEAR_MS) this.clearProblemText(text);
+      if (meta?.kind === "voice.limit" && !Engine.SESSION_CAP.test(text) && now - meta.since >= Engine.VOICE_LIMIT_CLEAR_MS) this.clearProblemText(text);
     }
     if (this.voiceReconnectSince) {
       if (!this.wantAwake || this.pauseInfo || (this.live && !this.connecting) || this.phase === "error") {
@@ -4537,10 +6842,12 @@ export class Engine extends EventEmitter<EngineEvents> {
    * session. A pressed `stop` inside it means Kevin ended it — nothing to pick up. A
    * `pause` row means he paused it: the pause is held again (`pauseInfo` from the row,
    * phase `paused`, the meter still stopped) unless its decay has passed, in which case
-   * it sleeps as it would have. No `session.closed` row (or one the engine would have
-   * reconnected from: `expired`, `connection_lost`) and a last row inside
-   * LOST_SESSION_MAX_AGE_MS means the process died mid-conversation: `lostSession` is set,
-   * and the first Go within AUTO_RESUME_WINDOW_MS resumes it (`resumeFromLedger`).
+   * it sleeps as it would have, or it was put to sleep since (`endedAfter`: a dismissal,
+   * the sleep command, Stop). No `session.closed` row (or one the engine would have
+   * reconnected from: `expired`, `connection_lost`; or the lost close start() just wrote)
+   * and a last row inside LOST_SESSION_MAX_AGE_MS means the process died mid-conversation: `lostSession` is set,
+   * and the first Go within AUTO_RESUME_WINDOW_MS resumes it (`resumeFromLedger`), unless
+   * it was ended after the close, inside the reconnect window (`endedAfter`).
    */
   private restoreFromLedger(): void {
     let latest;
@@ -4561,13 +6868,22 @@ export class Engine extends EventEmitter<EngineEvents> {
     const startedAt = rows.findIndex((r) => r.type === "session.started" && r.sessionId === latest.id);
     const inside = startedAt >= 0 ? rows.slice(startedAt) : rows;
     if (inside.some((r) => r.type === "stop" && r.how === "pressed")) {
-      log.debug(`last session ${latest.id} was stopped by Kevin; nothing to resume`);
+      log.debug(`last session ${latest.id} was stopped by ${this.userName}; nothing to resume`);
       return;
     }
-    const lastAt = inside.reduce((m, r) => Math.max(m, r.at), latest.startedAt);
+    // A lost close (this start's own sweep, V8 / LM-2) is dated at the dead daemon's last write: when the session was
+    // last alive is its own rows' word.
+    const lostClose = (r: LedgerRow): boolean => r.type === "session.closed" && r.reason === SESSION_LOST_REASON;
+    const lastAt = inside.reduce((m, r) => (lostClose(r) ? m : Math.max(m, r.at)), latest.startedAt);
     const pauseRow = [...inside].reverse().find((r): r is Extract<LedgerRow, { type: "pause" }> => r.type === "pause");
     if (pauseRow) {
-      const sleepsAt = pauseRow.at + Math.max(Engine.PAUSE_MIN_MS, this.settings.idleSleepMinutes * 60_000);
+      const sleepsAt = pauseRow.at + this.pauseHoldMs();
+      // Put to sleep while paused (typed "that's all for now", the sleep command, Stop): its rows come after the pause
+      // and name no session, since the pause closed it, so the day's own rows are asked.
+      if (this.endedAfter(pauseRow.at, now)) {
+        log.debug(`last session ${latest.id} was paused and then put to sleep; nothing to hold`);
+        return;
+      }
       if (now >= sleepsAt) {
         log.info(`last session ${latest.id} was paused ${Math.round((now - pauseRow.at) / 60_000)} min ago and would have slept by now; asleep`);
         return;
@@ -4580,11 +6896,12 @@ export class Engine extends EventEmitter<EngineEvents> {
       return;
     }
     const closed = inside.find((r): r is Extract<LedgerRow, { type: "session.closed" }> => r.type === "session.closed" && r.sessionId === latest.id);
-    if (closed && closed.reason !== "expired" && closed.reason !== "connection_lost") return; // ended on purpose: sleep, idle, the server
-    // Kevin's Stop inside the reconnect window after connection_lost is written after the
+    // Ended on purpose: sleep, idle, the server. A lost close says the process died in it, as a cut does.
+    if (closed && closed.reason !== "expired" && closed.reason !== "connection_lost" && closed.reason !== SESSION_LOST_REASON) return;
+    // Kevin's Stop or a dismissal inside the reconnect window after connection_lost is written after the
     // session's closed row — outside its span — so the day's own rows are asked.
-    if (closed && this.stoppedAfter(closed.at, now)) {
-      log.debug(`last session ${latest.id} lost its connection and Kevin pressed stop before it reconnected; nothing to resume`);
+    if (closed && this.endedAfter(closed.at, now)) {
+      log.debug(`last session ${latest.id} lost its connection and was stopped or put to sleep before it reconnected; nothing to resume`);
       return;
     }
     if (now - lastAt > Engine.LOST_SESSION_MAX_AGE_MS) {
@@ -4605,11 +6922,13 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 
   /**
-   * A pressed `stop` row at or after `at` in the day files that could hold it (the day of
-   * `at`, and today when that is another day): Kevin's word after a session's closed row,
-   * which `readSession` places outside the session.
+   * A conversation's end at or after `at` in the day files that could hold it (the day of
+   * `at`, and today when that is another day): a pressed `stop` row, or a `sleep` row of
+   * any cause but `shutdown`. Kevin's word after a session's closed row (a pause's, or the
+   * server's), which `readSession` places outside the session. A shutdown is the process
+   * ending, not a word about the conversation: a pause held across a restart stays held.
    */
-  private stoppedAfter(at: number, now: number): boolean {
+  private endedAfter(at: number, now: number): boolean {
     const days = Ledger.dayFor(at) === Ledger.dayFor(now) ? [at] : [at, now];
     for (const day of days) {
       let rows: LedgerRow[];
@@ -4618,7 +6937,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       } catch {
         continue;
       }
-      if (rows.some((r) => r.type === "stop" && r.how === "pressed" && r.at >= at)) return true;
+      if (rows.some((r) => r.at >= at && ((r.type === "stop" && r.how === "pressed") || (r.type === "sleep" && r.cause !== "shutdown")))) return true;
     }
     return false;
   }
@@ -4705,7 +7024,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     let task: string | undefined;
     const requests = new Map<string, string>();
     for (const row of this.ledger.readSession(sessionId)) {
-      if ((row.type === "heard" || row.type === "said") && row.item?.text) items.push(row.item);
+      if ((row.type === "heard" || row.type === "said") && row.item?.text && !row.item.unheard) items.push(row.item);
       else if (row.type === "delegation.created") requests.set(row.delegation.id, row.delegation.request);
       else if (row.type === "delegation.finished" && row.summary) {
         const request = requests.get(row.delegationId);
@@ -4755,34 +7074,37 @@ export class Engine extends EventEmitter<EngineEvents> {
       connectors: this.connectorHealth,
       settings: this.settings,
       permissions: this.permissions,
-      problems: this.problems,
-      problemsTyped: this.typedProblems(),
+      problems: this.typedProblems(),
       brainReady: this.brainReady,
-      setup: this.setupStatus(),
+      setup: this.setupNow(),
       marks: this.marks,
       handsReady: this.hands.ready || this.hands.available,
       // The Trash line and the hidden agents (K1); both are read when they change, not here.
       trash: this.trashInfo,
       hiddenAgents: this.hiddenAgents,
-      // The spawned threads in the Worker shape, one release, for older surfaces.
-      workers: this.threads.list(),
       // What Hormes remembers: counts, mode, the last run, what the last turn used — never a vector.
       memory: this.memory.summary(),
       // Every live thread (main first) and those finished within THREAD_LINGER_MS, ≤ THREADS_MAX summaries.
       threads: this.threads.threads(),
+      // Automations (design11): the non-trashed rows, the ring the island shows, the foot's next fire.
+      ...this.automations.snapshot(),
+      // The app's audio graph as it last read itself back (design12); absent when no app is connected.
+      ...(this.audioState ? { audioState: this.audioState } : {}),
+      // Live's audio as this session received it (voice PLAN W1.5); absent while no session is open.
+      ...this.audioTelemetry.snapshotField(),
     };
   }
 
-  /** The snapshot's utterances: today's 200; Phase B's SNAPSHOT_TRANSCRIPT. */
+  /** The snapshot's utterances: the last SNAPSHOT_UTTERANCES the Now stream has not cleared. */
   private snapshotTranscript(): readonly TranscriptItem[] {
-    return this.nowVisible(this.wholeTranscript(), (i) => i.at).slice(-(Engine.SNAPSHOT_FULL_NOW ? 200 : Engine.SNAPSHOT_TRANSCRIPT));
+    // Lines of Hormes's the room-talk gate kept off the speaker stay on the ledger, not on the Console's stream.
+    return this.nowVisible(this.wholeTranscript().filter((i) => !i.unheard), (i) => i.at).slice(-Engine.SNAPSHOT_UTTERANCES);
   }
 
-  /** The snapshot's main-thread delegations: today's MAX_DELEGATIONS with every step; Phase B's SNAPSHOT_DELEGATIONS × SNAPSHOT_STEPS with `stepCount`. */
+  /** The snapshot's main-thread delegations: the last MAX_DELEGATIONS, every step of each. */
   private snapshotDelegations(): readonly Delegation[] {
     const all = this.nowVisible([...this.pastDelegations(), ...(this.delegator?.all() ?? [])], (d) => d.createdAt);
-    if (Engine.SNAPSHOT_FULL_NOW) return all.slice(-Engine.MAX_DELEGATIONS);
-    return all.slice(-Engine.SNAPSHOT_DELEGATIONS).map((d) => (d.steps.length > Engine.SNAPSHOT_STEPS ? { ...d, steps: d.steps.slice(-Engine.SNAPSHOT_STEPS), stepCount: d.stepCount ?? d.steps.length } : d.stepCount === undefined ? { ...d, stepCount: d.steps.length } : d));
+    return all.slice(-Engine.MAX_DELEGATIONS);
   }
 
   /**
@@ -4999,8 +7321,46 @@ export class Engine extends EventEmitter<EngineEvents> {
   }
 }
 
+/** Two audio-state frames say the same thing (design12): the app sends one every 5 s with the counters; only a change earns a snapshot. */
+function sameAudioState(a: AudioState, b: AudioState): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** The hostname of a server root, "" when the URL does not parse. */
+function hostOf(baseUrl: string): string {
+  try {
+    return new URL(baseUrl).hostname;
+  } catch {
+    return "";
+  }
+}
+
 function normalizeForLog(s: string): string {
   return s.replace(/\s+/g, " ").trim().slice(0, 80);
+}
+
+/**
+ * An utterance that begins with a stop, after the wake word, fillers and politeness are stripped (`normalizeUtterance`):
+ * the Delegator's own head rule plus the ear's other stop words (quiet, shush, shut up), for `stopOverVoice` and the gate.
+ */
+const STOP_HEAD = /^(stop|cancel|never ?mind|forget it|abort|that'?s enough|hold on|quiet|shush|shut up)\b/i;
+
+/** What a spoken stop holds the gate for (`Engine.stopHeard`). `endMs`: where its utterance ends on the session timeline. */
+interface StopHeard {
+  readonly at: number;
+  itemId: string | undefined;
+  endMs: number | undefined;
+}
+
+/**
+ * What an utterance says, for the output gate: its words with the wake word, fillers and politeness stripped
+ * (`normalizeUtterance`), punctuation dropped. "" while it is only the name, the start of it ("Jar") or a filler.
+ */
+function saidWords(text: string): string {
+  const said = normalizeUtterance(text)
+    .replace(/[^\p{L}\p{N}']+/gu, " ")
+    .trim();
+  return /^(?:(?:hey|ok|okay|yo|um+|uh+|erm|hmm+|oh|so|and|please|just|jar|head|hormes|jared|jarred)(?:\s+|$))*$/.test(said) ? "" : said;
 }
 
 /**

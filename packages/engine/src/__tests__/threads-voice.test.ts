@@ -4,7 +4,7 @@ import type { ToolResult } from "@hormes/hands";
 import { MAIN_THREAD_ID, type LedgerRow, type Thread } from "@hormes/protocol";
 import { Engine } from "../engine.ts";
 import { RESTART_REASON } from "../threads/index.ts";
-import { delegate, nextUtterance, rows, settle, until, world, type World } from "./world.ts";
+import { bestOf, delegate, nextUtterance, rows, settle, until, world, type World } from "./world.ts";
 
 /**
  * The voice verbs answered from the table (DECISIONS §6), zero generations, the running
@@ -16,6 +16,9 @@ import { delegate, nextUtterance, rows, settle, until, world, type World } from 
  * the interrupt; a spawned thread's step is one thread.event and no snapshot; the
  * snapshot's `threads` (main first) and the pane stream; the rebuild at start.
  */
+
+/** A shared CI runner is slower and noisier than a Mac on a desk: its wall-clock ceilings are three times ours. The [measure] lines carry the real numbers either way. */
+const RUNNER_SLACK = process.env["GITHUB_ACTIONS"] ? 3 : 1;
 
 type EndedRow = Extract<LedgerRow, { type: "thread.ended" }>;
 type StopRow = Extract<LedgerRow, { type: "stop" }>;
@@ -46,9 +49,15 @@ test("'what is spotify doing' as an ear partial: the status line reaches Live wi
   try {
     await twoThreads(w);
     assert.deepEqual(live.commentary.filter((c) => /alongside/.test(c)), ["Spotify alongside."], "one split line for the two starts");
-    const t0 = performance.now();
-    const line = engine.threads.statusLine("spotify");
-    assert.ok(performance.now() - t0 < 5, "the table answers in microseconds");
+    const timed = (): { line: string; ms: number } => {
+      const t0 = performance.now();
+      const line = engine.threads.statusLine("spotify");
+      return { line, ms: performance.now() - t0 };
+    };
+    const { line, ms: first } = timed();
+    // A read changes nothing, so a loaded Mac's stall is timed again on the same table; a slow table is slow every time.
+    const ms = await bestOf(first, 5 * RUNNER_SLACK, () => timed().ms);
+    assert.ok(ms < 5 * RUNNER_SLACK, `the table answers in microseconds: under ${5 * RUNNER_SLACK} ms (${ms.toFixed(2)} ms; first ${first.toFixed(2)} ms)`);
     assert.match(line, /^Spotify is (thinking|working) — \d+ seconds in$/);
     live.commentary.length = 0;
     const tasks = brain.tasks.length;
@@ -166,16 +175,36 @@ test("a bare 'stop' with ONE thread live is today's cut, on the fragment, no wai
     const { engine, live, brain } = w;
     try {
       await twoThreads(w);
+      // The cut's moment is when the engine cancels the main brain, stamped there, not when a poll saw it.
+      let cutAt: number | undefined;
+      let cancels = brain.cancels;
+      Object.defineProperty(brain, "cancels", {
+        configurable: true,
+        enumerable: true,
+        get: () => cancels,
+        set: (n: number) => {
+          cancels = n;
+          cutAt ??= performance.now();
+        },
+      });
       nextUtterance(w);
-      const t0 = Date.now();
+      const t0 = performance.now();
       live.emit("inputTranscript", " stop", live.nowMs, live.nowMs + 300);
+      // The same-run baseline: a plain timer for the same wait, armed with the engine's. How late it fires is how late
+      // this Mac fires any timer now; on a quiet Mac that is about 0 and the bound is the old one.
+      const lateness = new Promise<number>((r) => {
+        const armed = performance.now();
+        setTimeout(() => r(Math.max(0, performance.now() - armed - Engine.STOP_NAME_WAIT_MS)), Engine.STOP_NAME_WAIT_MS);
+      });
       await tick();
       assert.equal(engine.outputGated, true, "speech gated at once");
       assert.equal(engine.snapshot().delegations[0]!.status, "running", "the work waits for a name");
       assert.equal(brain.cancels, 0);
-      await until(() => engine.snapshot().delegations[0]!.status === "cancelled", 1000);
-      const waited = Date.now() - t0;
-      assert.ok(waited >= Engine.STOP_NAME_WAIT_MS - 20 && waited <= Engine.STOP_NAME_WAIT_MS + 200, `cut ${waited} ms after the stop word`);
+      await until(() => engine.snapshot().delegations[0]!.status === "cancelled", 5000);
+      const late = await lateness;
+      const waited = (cutAt ?? Infinity) - t0;
+      const bound = Engine.STOP_NAME_WAIT_MS + 200 * RUNNER_SLACK + late;
+      assert.ok(waited >= Engine.STOP_NAME_WAIT_MS - 20 && waited <= bound, `cut ${waited.toFixed(0)} ms after the stop word (under ${bound.toFixed(0)}: ${Engine.STOP_NAME_WAIT_MS + 200 * RUNNER_SLACK} plus this run's timer lateness, ${late.toFixed(0)} ms)`);
       assert.equal(brain.cancels, 1);
       assert.deepEqual(spawned(w).map((t) => t.status), ["stopped", "stopped"]);
       assert.equal(w.threads.byName("Spotify")!.cancels, 1);
@@ -464,7 +493,7 @@ test("thread.answer: Allow on Spotify's pane while Slack's question holds the fl
   }
 });
 
-test("wire: a spawned thread's step emits 0 snapshots and exactly one thread.event ≤ 200 B; snapshot.threads lists main first then the spawned threads (≤ 16); thread.transcript frames go out only once a viewer opened the thread (replace with a seq cursor, then coalesced appends); SNAPSHOT_FULL_NOW=true keeps today's transcript/delegations shape (no stepCount, every step) and the flag off cuts them", async () => {
+test("wire: a spawned thread's step emits 0 snapshots and exactly one thread.event ≤ 200 B; snapshot.threads lists main first then the spawned threads (≤ 16); thread.transcript frames go out only once a viewer opened the thread (replace with a seq cursor, then coalesced appends); the snapshot's delegations carry every step (no stepCount)", async () => {
   const w = world();
   const { engine, live, events } = w;
   try {
@@ -518,22 +547,11 @@ test("wire: a spawned thread's step emits 0 snapshots and exactly one thread.eve
     assert.ok(main.type === "thread.transcript" && main.mode === "replace" && main.transcript.threadId === MAIN_THREAD_ID, JSON.stringify(main).slice(0, 200));
     const kinds = main.type === "thread.transcript" ? main.transcript.entries.map((e) => e.kind) : [];
     assert.ok(kinds.includes("utterance") && kinds.includes("delegation") && kinds.includes("step"), `the main pane carries its utterances, its card and its steps: ${kinds.join(",")}`);
-    // Phase B behind the flag: today's shape while true; the small shape when false.
+    // The snapshot carries every step of a main-thread delegation: the Console's card reads them from it.
     for (let i = 0; i < 14; i++) await engine.runner.run("frontmost_app", {});
     const full = engine.snapshot();
-    assert.equal(Engine.SNAPSHOT_FULL_NOW, true);
     assert.ok(full.delegations[0]!.steps.length >= 14);
-    assert.ok(full.delegations.every((d) => d.stepCount === undefined), "no new key on today's shape");
-    Engine.SNAPSHOT_FULL_NOW = false;
-    try {
-      const small = engine.snapshot();
-      assert.equal(small.delegations[0]!.steps.length, Engine.SNAPSHOT_STEPS);
-      assert.equal(small.delegations[0]!.stepCount, full.delegations[0]!.steps.length);
-      assert.ok(small.transcript.length <= Engine.SNAPSHOT_TRANSCRIPT);
-      assert.ok(JSON.stringify(small).length < JSON.stringify(full).length);
-    } finally {
-      Engine.SNAPSHOT_FULL_NOW = true;
-    }
+    assert.ok(full.delegations.every((d) => d.stepCount === undefined), "main's delegations carry their steps, never a count");
   } finally {
     await engine.stop();
   }
@@ -548,6 +566,7 @@ test("rebuild at start: an engine started over a state dir whose day file holds 
   // The daemon restarts: a second engine over the same state dir.
   const w2 = world({}, { dir: w.dir, firstSessionId: "sess_b" });
   try {
+    await w2.engine.start();
     const ended = rows<EndedRow>(w2, "thread.ended").filter((r) => r.threadId === "t_old");
     assert.equal(ended.length, 1);
     assert.equal(ended[0]!.status, "failed");

@@ -101,7 +101,7 @@ function hostOfRoot(root: string): string {
  * How a wake-brain fire on `brain` is paid for, as the cost line says it: `mac` for a model on this Mac, else core's BrainPaid.
  * An openai-compatible brain is judged by Settings' server root and the keys that are set, the same three inputs the Console's
  * form reads (AutomationForm.billing): a loopback root with no brain key is a model on this Mac (Ollama, LM Studio); a root
- * that is sent User's key bills tokens on it (OpenAI's host takes OPENAI_API_KEY too); any other root, or none in Settings,
+ * that is sent Kevin's key bills tokens on it (OpenAI's host takes OPENAI_API_KEY too); any other root, or none in Settings,
  * is "the server you set". Every other brain: local is `mac`, the API brains `key`, the logins (and an unresolved auto) `plan`.
  */
 export function brainPaid(brain: string | undefined, brainBaseUrl: string | undefined, keys: BrainKeys): "mac" | NonNullable<AutomationContext["paid"]> {
@@ -134,13 +134,13 @@ export type AutomationSetInput = Omit<AutomationDraft, "clauses" | "echo"> & {
 };
 
 export interface ArmContext {
-  /** User's own words for the row (the policy's `request`: a folder he named is one `file` may move into). */
+  /** Kevin's own words for the row (the policy's `request`: a folder he named is one `file` may move into). */
   readonly request?: string | undefined;
   readonly chainId?: string | undefined;
   readonly delegationId?: string | undefined;
   /** A spawned thread is arming it (depth one: free kinds only). */
   readonly fromThread?: boolean | undefined;
-  /** The words User heard when he said yes (the runner's outstanding question); absent, the gate's own reason is recorded. */
+  /** The words Kevin heard when he said yes (the runner's outstanding question); absent, the gate's own reason is recorded. */
   readonly heard?: string | undefined;
   /** The runner knows the brain is local; absent, Settings decides. */
   readonly localBrain?: boolean | undefined;
@@ -173,7 +173,7 @@ export interface AutomationsOptions {
   /** Say `instruction` through the session once it opens; emit `fallback` (the rings it would have sounded) if none does. */
   readonly holdForSession?: ((instruction: string, fallback: readonly EngineEvent[]) => void) | undefined;
   readonly brain: WakeBrainSeam;
-  /** User is here (a session is open, he spoke recently, or his hands moved): `automation.run` needs it. */
+  /** Kevin is here (a session is open, he spoke recently, or his hands moved): `automation.run` needs it. */
   readonly present: () => Promise<boolean>;
   /** The brain is a local model (the cost line says warm-up, not plan). */
   readonly localBrain: () => boolean;
@@ -189,7 +189,7 @@ export interface AutomationsOptions {
   readonly brainKeys?: (() => BrainKeys) | undefined;
   /** The snapshot goes out (the LIST or a row changed). */
   readonly onChange: () => void;
-  /** The user's name as the lines say it (the engine's effective name; "User" when none is wired). */
+  /** The user's name as the lines say it (the engine's effective name; "Kevin" when none is wired). */
   readonly userName?: (() => string) | undefined;
   readonly exec?: AutomationExec | undefined;
   readonly shell?: ShellRunner | undefined;
@@ -634,7 +634,7 @@ export class Automations implements AutomationSource {
 
   // ---------------------------------------------------------------- signals
 
-  /** A signal the app observed on User's behalf — data, never a command. `mac.sleep` is evidence; `mac.wake` / `clock.changed` resync. */
+  /** A signal the app observed on Kevin's behalf — data, never a command. `mac.sleep` is evidence; `mac.wake` / `clock.changed` resync. */
   signal(sig: SystemSignal, at = this.now()): void {
     if (sig.kind === "mac.sleep") {
       this.sleptAt = at;
@@ -733,7 +733,7 @@ export class Automations implements AutomationSource {
    * one `fired` event with its presses and `ring`: true only when the fire put a ring up
    * (SL-14), so a fire that only acted never shows as one. A fire nobody pressed that failed
    * is an `automation.failed` problem until the row's next ok fire (SL-15). `attended` is
-   * User's own Run now: its toast says how it went, so its red exit only renews a red word
+   * Kevin's own Run now: its toast says how it went, so its red exit only renews a red word
    * already standing. Returns whether the fire went green (false when one was already running).
    */
   private async fire(row: Automation, now: number, lateMs: number, o: { readonly dueAt: number; readonly quiet: boolean; readonly file?: string | undefined; readonly what?: string | undefined; readonly muted?: boolean | undefined; readonly attended?: boolean | undefined }): Promise<boolean> {
@@ -760,7 +760,7 @@ export class Automations implements AutomationSource {
     if (o.file !== undefined && !existsSync(o.file)) this.watchers.forget(o.file);
     const at = this.now();
     const current = this.table.get(row.id) ?? started;
-    // User trashed or paused it while it ran: the fire's record (the ledger row, the event) still stands; the state stays his.
+    // Kevin trashed or paused it while it ran: the fire's record (the ledger row, the event) still stands; the state stays his.
     const moved = current.state === "trashed" || current.state === "paused";
     const late = lateMs > 60_000 ? `${Math.round(lateMs / 60_000)} min late` : undefined;
     const quietNote = o.quiet && outcome.ok && outcome.ring ? "quiet hours: shown, not said" : undefined;
@@ -783,7 +783,7 @@ export class Automations implements AutomationSource {
     });
     const base: Automation = mut(current, { fires: current.fires + 1, lastFiredAt: at, ...(detail ? { lastDetail: cut(detail, DETAIL_CHARS) } : { lastDetail: undefined }), snoozedUntil: undefined, updatedAt: at });
     const oneShotDone = row.clauses.once === true || row.when.kind === "at" || row.when.kind === "in";
-    // The island's word on the fire: a red one waits there until the row goes green; a green one ends it. User's own
+    // The island's word on the fire: a red one waits there until the row goes green; a green one ends it. Kevin's own
     // Run now has its toast, so its red exit only renews a red word the row already has.
     if (outcome.ok) this.clearFailed(row.id);
     else if (current.state !== "trashed" && (!o.attended || this.failedProblems.has(row.id))) {
@@ -791,7 +791,7 @@ export class Automations implements AutomationSource {
     }
     const rang = !moved && outcome.ok && outcome.ring;
     if (moved) {
-      // The count and the detail are the fire's; the state is what User set (trashed rows leave the heap, paused rows wait).
+      // The count and the detail are the fire's; the state is what Kevin set (trashed rows leave the heap, paused rows wait).
       this.write(mut(base, { state: current.state, nextAt: undefined }), "engine", undefined, false);
     } else if (!outcome.ok) {
       if (this.repeats(row) && !oneShotDone) this.write(this.rearmed(base, next, at), "engine", detail);
@@ -812,7 +812,7 @@ export class Automations implements AutomationSource {
   }
 
   /**
-   * SL-15: a fire failed, so the island says so until User is back: "backup failed 23:00 · recipe backup exit 1 · disk
+   * SL-15: a fire failed, so the island says so until Kevin is back: "backup failed 23:00 · recipe backup exit 1 · disk
    * full". One problem per row. Every red fire is raised fresh, with its own since and ledger row: the engine's list may
    * have lost the last one (Clear all, the cap), and a nightly failure reads the same word for word. Run now retries it;
    * when a retry would fail the same way (retryFailsTheSame), the button opens the Console instead. `said` is the
@@ -942,20 +942,20 @@ export class Automations implements AutomationSource {
    * The brain tool's `automation_set` and the Console's / CLI's `automation.set`: the
    * name, the count and the echo checked; `classifyAutomation` judged here, once; `run`
    * arms; `confirm` is the one set-up question (given back to be asked; the re-call with
-   * `confirmed` arms and records the words User heard); `refuse` is the reason. A folder
-   * watcher reads its folder now, so the TCC prompt shows while User is here.
+   * `confirmed` arms and records the words Kevin heard); `refuse` is the reason. A folder
+   * watcher reads its folder now, so the TCC prompt shows while Kevin is here.
    */
   arm(draft: AutomationSetInput, by: ArmOrigin, confirmed = false, ctx: ArmContext = {}): AutomationSetOutcome {
     const now = this.now();
     const name = String(draft.name ?? "").replace(/\s+/g, " ").trim();
-    if (!name) return { kind: "refused", reason: `an automation needs a name ${this.opts.userName?.() || "User"} will hear` };
+    if (!name) return { kind: "refused", reason: `an automation needs a name ${this.opts.userName?.() || "Kevin"} will hear` };
     if (name.length > AUTOMATION_NAME_CHARS) return { kind: "refused", reason: `the name "${cut(name, 30)}" is too long (${AUTOMATION_NAME_CHARS} characters at most)` };
     // Only a live row keeps its name: a done or failed one wearing it is renamed with its day when this one arms.
     const holder = this.nameHolder(name, draft.id);
     if (holder?.live) return { kind: "refused", reason: `an automation named "${name}" is already set; pick another name, or change that one` };
     const then = Array.isArray(draft.then) ? draft.then : [];
     if (then.length === 0 || then.length > AUTOMATION_ACTIONS_MAX) return { kind: "refused", reason: `an automation runs 1 to ${AUTOMATION_ACTIONS_MAX} actions` };
-    // When it fires: a normalised `when`, or User's phrase through core's parseWhen — the ONE grammar (the Console's form and the
+    // When it fires: a normalised `when`, or Kevin's phrase through core's parseWhen — the ONE grammar (the Console's form and the
     // CLI send the phrase; the brain's tool parsed it already). A phrase the grammar does not catch is refused in its own words.
     let when: AutomationWhen | undefined = draft.when && typeof draft.when === "object" ? draft.when : undefined;
     if (!when && typeof draft.whenPhrase === "string" && draft.whenPhrase.trim()) {
@@ -1015,11 +1015,11 @@ export class Automations implements AutomationSource {
       createdBy: { by, ...(ctx.chainId ? { chainId: ctx.chainId } : {}), ...(ctx.delegationId ? { delegationId: ctx.delegationId } : {}), request: cut(this.opts.redact(ctx.request ?? echo), 200) },
       ...(judged.verdict === "confirm" ? { confirmed: { at: now, heard: ctx.heard ?? judged.reason } } : {}),
     };
-    // A recipe the brain handed in with the row is User's once he said yes: the ENGINE writes it to settings (a tool never does).
+    // A recipe the brain handed in with the row is Kevin's once he said yes: the ENGINE writes it to settings (a tool never does).
     // It belongs to the run-recipe action, or to a recipe.red trigger naming a recipe not yet approved (the gate asked for both).
     const recipeAction = then.find((x) => x.kind === "run-recipe");
     const recipeName = recipeAction?.kind === "run-recipe" ? recipeAction.recipe : when.kind === "on" && when.on.kind === "recipe.red" ? when.on.recipe : undefined;
-    if (draft.recipeCommand && recipeName) this.saveRecipe(recipeName, draft.recipeCommand, by === "brain" ? "brain" : "user", now);
+    if (draft.recipeCommand && recipeName) this.saveRecipe(recipeName, draft.recipeCommand, by === "brain" ? "brain" : "kevin", now);
     let watchNote = "";
     if (a.when.kind === "on") {
       const err = this.watchers.watch(a);
@@ -1040,7 +1040,7 @@ export class Automations implements AutomationSource {
     return { kind: "armed", automation: a, text, ...(notes.length ? { note: notes.join(" · ") } : {}) };
   }
 
-  private saveRecipe(name: string, command: string, by: "user" | "brain", now: number): void {
+  private saveRecipe(name: string, command: string, by: "kevin" | "brain", now: number): void {
     const recipes = this.opts.settings().automations.recipes;
     // A name in use — live or in the Trash — is never overwritten; the gate refused a trashed name before this ran.
     if (!name || recipeNamed(recipes, name, "any")) return;
@@ -1130,13 +1130,13 @@ export class Automations implements AutomationSource {
       case "snooze": {
         if (a.state === "trashed" || a.state === "done") return { ok: false, text: `${a.name} is ${a.state}; nothing to snooze` };
         const m = Math.min(720, Math.max(1, Math.round(Number(minutes) || snoozeDefault(automationKind(a), this.opts.settings().automations.snoozeMinutes))));
-        this.snooze(a, m, "user", now);
+        this.snooze(a, m, "kevin", now);
         return { ok: true, text: `${a.name} snoozed ${m} min · ${describeInstant(now + m * 60_000)}` };
       }
       case "done": {
         if (a.state === "trashed") return { ok: false, text: `${a.name} is in the Trash` };
         this.releaseHold(a.id);
-        this.done(a, now, "user");
+        this.done(a, now, "kevin");
         const after = this.table.get(a.id);
         return { ok: true, text: after?.state === "armed" && after.nextAt !== undefined ? `${a.name} done · next ${describeInstant(after.nextAt)}` : `${a.name} done` };
       }
@@ -1148,13 +1148,13 @@ export class Automations implements AutomationSource {
           const from = a.state === "fired" || a.nextAt === undefined ? now : a.nextAt;
           const next = nextFire(a.when, Math.max(from, now), a.createdAt);
           const detail = `skipped ${describeInstant(from)}`;
-          if (next === undefined) this.write(mut(a, { state: "done", nextAt: undefined, snoozedUntil: undefined, lastDetail: detail, updatedAt: now }), "user", detail);
-          else this.write(mut(a, { state: "armed", nextAt: next, snoozedUntil: undefined, lastDetail: detail, updatedAt: now }), "user", detail);
+          if (next === undefined) this.write(mut(a, { state: "done", nextAt: undefined, snoozedUntil: undefined, lastDetail: detail, updatedAt: now }), "kevin", detail);
+          else this.write(mut(a, { state: "armed", nextAt: next, snoozedUntil: undefined, lastDetail: detail, updatedAt: now }), "kevin", detail);
           const after = this.table.get(a.id);
           return { ok: true, text: after?.nextAt !== undefined ? `${a.name}: skipped · next ${describeInstant(after.nextAt)}` : `${a.name}: skipped; nothing after` };
         }
         if (a.when.kind === "on") return { ok: false, text: `${a.name} waits for a signal; pause it instead` };
-        this.write(mut(a, { state: "done", nextAt: undefined, snoozedUntil: undefined, lastDetail: "skipped", updatedAt: now }), "user", "skipped");
+        this.write(mut(a, { state: "done", nextAt: undefined, snoozedUntil: undefined, lastDetail: "skipped", updatedAt: now }), "kevin", "skipped");
         return { ok: true, text: `${a.name} skipped` };
       }
       case "pause": {
@@ -1164,12 +1164,12 @@ export class Automations implements AutomationSource {
         this.rings.delete(a.id);
         this.watchers.unwatch(a.id);
         this.fileQueue.delete(a.id);
-        this.write(mut(a, { state: "paused", snoozedUntil: undefined, updatedAt: now }), "user");
+        this.write(mut(a, { state: "paused", snoozedUntil: undefined, updatedAt: now }), "kevin");
         return { ok: true, text: `${a.name} paused` };
       }
       case "resume": {
         if (a.state !== "paused") return { ok: false, text: `${a.name} is not paused (${a.state})` };
-        return this.rearm(a, now, "user", "resumed");
+        return this.rearm(a, now, "kevin", "resumed");
       }
       case "trash": {
         if (a.state === "trashed") return { ok: true, text: `${a.name} is already in the Trash` };
@@ -1178,7 +1178,7 @@ export class Automations implements AutomationSource {
         this.watchers.unwatch(a.id);
         this.fileQueue.delete(a.id);
         this.clearFailed(a.id);
-        this.write(mut(a, { state: "trashed", nextAt: undefined, snoozedUntil: undefined, updatedAt: now }), "user");
+        this.write(mut(a, { state: "trashed", nextAt: undefined, snoozedUntil: undefined, updatedAt: now }), "kevin");
         return { ok: true, text: `${a.name} moved to the Trash · Restore brings it back` };
       }
       case "restore": {
@@ -1186,7 +1186,7 @@ export class Automations implements AutomationSource {
         const holder = this.nameHolder(a.name, a.id);
         if (holder?.live) return { ok: false, text: `another automation is named "${a.name}" now; rename that one first` };
         if (holder) this.retire(holder.row, by, now);
-        return this.rearm(a, now, "user", "restored");
+        return this.rearm(a, now, "kevin", "restored");
       }
       default:
         return { ok: false, text: `unknown verb "${String(verb)}"` };
@@ -1194,7 +1194,7 @@ export class Automations implements AutomationSource {
   }
 
   /** `resume` / `restore`: armed again with a fresh `nextAt` (a one-shot whose time passed is done). */
-  private rearm(a: Automation, now: number, by: "user" | "brain" | "engine", detail: string): { readonly ok: boolean; readonly text: string } {
+  private rearm(a: Automation, now: number, by: "kevin" | "brain" | "engine", detail: string): { readonly ok: boolean; readonly text: string } {
     if (a.when.kind === "on") {
       const err = this.watchers.watch(a);
       if (err) this.watchProblem(a, err);
@@ -1211,18 +1211,18 @@ export class Automations implements AutomationSource {
     return { ok: true, text: `${a.name} ${detail} · next ${describeInstant(next)}` };
   }
 
-  private snooze(a: Automation, minutes: number, by: "user" | "brain" | "engine", now: number, detail?: string): void {
+  private snooze(a: Automation, minutes: number, by: "kevin" | "brain" | "engine", now: number, detail?: string): void {
     this.releaseHold(a.id);
     this.rings.delete(a.id);
     this.lastChimeAt.delete(a.id);
-    // User's own Snooze answers the ring: the engine's one self-snooze is available again for this occurrence's re-ring.
+    // Kevin's own Snooze answers the ring: the engine's one self-snooze is available again for this occurrence's re-ring.
     if (by !== "engine") this.selfSnoozed.delete(a.id);
     const until = now + minutes * 60_000;
     const row = this.write(mut(a, { state: "snoozed", snoozedUntil: until, nextAt: until, ...(detail ? { lastDetail: detail } : {}), updatedAt: now }), by, detail, true, until);
     if (row.when.kind === "in") this.caffeinate(mut(row, { nextAt: until }), now);
   }
 
-  private done(a: Automation, now: number, by: "user" | "brain" | "engine"): void {
+  private done(a: Automation, now: number, by: "kevin" | "brain" | "engine"): void {
     if (a.state === "fired" || a.state === "snoozed" || a.state === "failed" || a.state === "deferred") {
       this.finishRing(a, now, undefined);
       return;
@@ -1236,11 +1236,11 @@ export class Automations implements AutomationSource {
   }
 
   /**
-   * Fire a row now — User's press on `Run now` or the brain's `run` verb. Refused unless
-   * User is here (a session is open, or he spoke or moved recently): a fire is a thing
+   * Fire a row now — Kevin's press on `Run now` or the brain's `run` verb. Refused unless
+   * Kevin is here (a session is open, or he spoke or moved recently): a fire is a thing
    * he hears. Never a question either way.
    */
-  async runNow(nameOrId: string, by: "user" | "brain"): Promise<{ readonly ok: boolean; readonly text: string }> {
+  async runNow(nameOrId: string, by: "kevin" | "brain"): Promise<{ readonly ok: boolean; readonly text: string }> {
     const a = this.table.find(nameOrId);
     if (!a) return { ok: false, text: `no automation named "${nameOrId}"` };
     if (a.state === "trashed") return { ok: false, text: `${a.name} is in the Trash; restore it first` };
@@ -1280,7 +1280,7 @@ export class Automations implements AutomationSource {
   async command(cmd: EngineCommand, toast: (text: string, tone?: "info" | "warn") => void): Promise<void> {
     switch (cmd.type) {
       case "automation.set": {
-        // The Console's form: the press on Add is User's own hand on a control that says what it does — the two-press
+        // The Console's form: the press on Add is Kevin's own hand on a control that says what it does — the two-press
         // idiom's second press — so a confirm-tier row arms with the question as what he heard. The CLI (or any process on
         // the socket saying `by: "cli"`) is never a yes: its free kinds arm at once and a confirm-tier row is refused, not asked.
         const by: ArmOrigin = cmd.by === "cli" ? "cli" : "console";
@@ -1306,7 +1306,7 @@ export class Automations implements AutomationSource {
       case "automation.restore":
         return toast(...this.said(this.changeNow(cmd.id, "restore")));
       case "automation.run":
-        return toast(...this.said(await this.runNow(cmd.id, "user")));
+        return toast(...this.said(await this.runNow(cmd.id, "kevin")));
       case "recipe.set": {
         const recipe = cmd.recipe;
         const name = String(recipe?.name ?? "").trim();
@@ -1318,7 +1318,7 @@ export class Automations implements AutomationSource {
         if (trashed?.trashedAt !== undefined) return toast(`recipe ${trashed.name} is in the Trash; restore it, or pick another name`, "warn");
         const rest = all.filter((r) => r.name.toLowerCase() !== clean.name.toLowerCase());
         this.opts.updateSettings({ automations: { ...this.opts.settings().automations, recipes: [...rest, clean] } });
-        this.opts.ledger.append({ at: now, type: "recipe.set", recipe: clean, by: "user" });
+        this.opts.ledger.append({ at: now, type: "recipe.set", recipe: clean, by: "kevin" });
         return toast(`recipe ${clean.name} saved`);
       }
       case "recipe.trash": {
@@ -1357,7 +1357,7 @@ export class Automations implements AutomationSource {
 
   /**
    * The brain's `automation_set` (packages/brain's `AutomationSource`): the runner's context
-   * becomes the arm's origin, its confirmation and the words User heard; the engine's outcome
+   * becomes the arm's origin, its confirmation and the words Kevin heard; the engine's outcome
    * comes back in the shape the runner renders (`armed` with its note, `confirm` with the one
    * question as the reason, `refused`).
    */
@@ -1432,7 +1432,7 @@ export class Automations implements AutomationSource {
    * the state moved (`by`, `until`, `detail`), one `state` event (coalesced), and the
    * snapshot. `event: false` skips the state event (a fire writes its own `fired`).
    */
-  private write(a: Automation, by: "user" | "brain" | "engine", detail?: string, event = true, until?: number): Automation {
+  private write(a: Automation, by: "kevin" | "brain" | "engine", detail?: string, event = true, until?: number): Automation {
     const before = this.table.get(a.id);
     const row = this.table.put(a);
     if (before?.state !== row.state) {
@@ -1475,7 +1475,7 @@ function isFolderRow(a: Automation): boolean {
 }
 
 /**
- * The action a red fire stopped at: the last of the kinds the executor ran, matched in User's order. The chain stops at
+ * The action a red fire stopped at: the last of the kinds the executor ran, matched in Kevin's order. The chain stops at
  * its first failure, and a muted fire skips every line kind, so the kinds it ran are a subsequence of `then`.
  */
 function stoppedAt(then: readonly AutomationAction[], ran: readonly AutomationActionKind[]): AutomationAction | undefined {

@@ -1,22 +1,27 @@
-import { logger } from "@hormes/core";
+import { appleScriptShellLines, logger, shellFocus } from "@hormes/core";
 import { ACTING_MEMBERS, USER_IDLE_POLL_MS, WAIT_MAX_MS, isBusyResult, type AcquireOptions, type ConfirmationDesk, type FocusLease, type LeaseOutcome, type ToolResult } from "@hormes/hands";
 import { ToolRunner, type BrainSink, type BrainTask, type RunOutcome, type RunnerOptions } from "@hormes/brain";
-import { ACTING_TOOLS } from "@hormes/brain";
+import { ACTING_TOOLS, FOCUS_APPLESCRIPT } from "@hormes/brain";
 
 /**
  * The runners a thread's tools go through. `runner.ts` in @hormes/brain is a rail:
- * `LaneRunner` (a spawned thread's) and `WorkerAwareRunner` (the main lane's — the
+ * `LaneRunner` (a spawned thread's) and `ThreadAwareRunner` (the main lane's — the
  * engine's `runner`) subclass ToolRunner through `LeasedRunner`, what the two share,
  * and re-record the step the base records; they never edit it.
  *
- * `background` never touches the pointer, keyboard or front app — Apple events,
- * browser_*, files, shell, web — and is refused the rest HERE, not in policy.ts
- * (a rail). `screen` waits its turn for the one FocusLease, ranked by admission
+ * `background` never touches the pointer, the keyboard, the front app or the front
+ * browser tab. It has Apple events, the browser reads (browser_read, browser_find,
+ * browser_tabs), web_fetch and web_search, the file tools and a shell line that fronts
+ * nothing, and is refused the rest HERE, not in policy.ts (a rail): FOCUS_TOOLS (the
+ * pointer and keys, open_url, browser_navigate/click/type, the clipboard), a focusing
+ * applescript and a shell line that fronts an app or types (`needsFocus`). `screen`
+ * waits its turn for the one FocusLease, ranked by admission
  * (Kevin's hands > the main lane > threads by age; the lease's `rank` is the lease's
  * business — taken here as an option and handed through). Two hooks for the speed
  * pass ride as options: an `observer` that annotates every ACTING tool's result with
- * what is now in front (after `super.run`, never inside the rail) and a `serializer`
- * that orders acting calls under the lease.
+ * what is now in front (after the base ran and recorded the call, never inside the
+ * rail; the line follows the step as a note, PERF-5) and a `serializer` that orders
+ * acting calls under the lease.
  */
 
 const log = logger("engine.threads.runner");
@@ -26,40 +31,30 @@ const log = logger("engine.threads.runner");
 /** A spawned thread's lane: never `voice` (that is the main thread's). */
 export type SpawnLane = "screen" | "background";
 
-/** The thread tools, and the worker_* names kept one release as aliases. */
-export const THREAD_TOOLS: ReadonlySet<string> = new Set(["thread_start", "thread_wait", "thread_read", "thread_stop", "worker_start", "worker_wait", "worker_read", "worker_stop"]);
-/** @deprecated the same set, under the workers pass's name. */
-export const WORKER_TOOLS = THREAD_TOOLS;
-
-/** `worker_x` → `thread_x`; a thread name is itself. */
-export function canonicalThreadTool(name: string): string {
-  return name.startsWith("worker_") ? `thread_${name.slice("worker_".length)}` : name;
-}
-
-/** Tools that need the pointer, keyboard, front app or the system clipboard: the lease's business. */
-export const FOCUS_TOOLS: ReadonlySet<string> = new Set([...ACTING_MEMBERS, "open_url", "browser_click", "browser_type", "clipboard_read", "clipboard_write"]);
-
-/** An AppleScript that drives the screen rather than an app's dictionary. */
-export const FOCUS_APPLESCRIPT = /\b(keystroke|key code|click|set value|set the value|perform action|activate|open location|reopen|set frontmost)\b/i;
+/** The thread tools: the main brain's four verbs over its spawned threads. */
+export const THREAD_TOOLS: ReadonlySet<string> = new Set(["thread_start", "thread_wait", "thread_read", "thread_stop"]);
 
 /**
- * A shell head that brings something to the front: `open` (unless a flag cluster
- * carries g or j, or `--background` / `--hide`) or `osascript`. Judged on EVERY
- * command of a compound line (`ls && open -a Slack`, `cd x; open .`, `echo | osascript`),
- * past `sudo` / `env VAR=x` / `nohup` and past the head's directory (`/usr/bin/open`).
+ * Tools that need the pointer, keyboard, front app, the front browser tab or the system clipboard: the
+ * lease's business. `browser_navigate` sets the URL of the active tab of the front window — what Kevin is
+ * looking at — so it is screen work too (a background thread reads a page with web_fetch instead).
  */
-export const BACKGROUND_SHELL_REFUSE = /^(?:open|osascript)$/;
-/** `open` flags that keep the opened thing in the background: -g (do not bring forward), -j (hidden), in any cluster (`-ga`, `-gj`). */
-const OPEN_BACKGROUND_FLAG = /^-[A-Za-z]*[gj][A-Za-z]*$|^--(?:background|hide)$/;
-/** Words that run another command rather than being one; their own flags are skipped with them. */
-const SHELL_PREFIXES: ReadonlySet<string> = new Set(["sudo", "env", "nohup", "exec", "command", "time", "nice", "caffeinate", "builtin", "doas"]);
+export const FOCUS_TOOLS: ReadonlySet<string> = new Set([...ACTING_MEMBERS, "open_url", "browser_click", "browser_type", "browser_navigate", "clipboard_read", "clipboard_write"]);
+
+/**
+ * A shell head that brings something to the front (`open` without a background flag,
+ * `osascript`) is judged by core's `shellSteals` — the ONE copy, shared with the
+ * automations' set-up gate (a recipe that fronts an app is told to use the open action).
+ * Re-exported here so the lane's rail keeps its name.
+ */
+export { BACKGROUND_SHELL_REFUSE, OPEN_BACKGROUND_FLAG, shellSteals } from "@hormes/core";
 
 /** Depth one: a spawned thread never spawns a thread and never edits Hormes. */
 export const DENIED_FOR_THREADS: ReadonlySet<string> = new Set([...THREAD_TOOLS, "self_edit", "self_check", "self_review", "self_apply", "self_discard", "self_status"]);
-/** @deprecated the same set, under the workers pass's name. */
-export const DENIED_FOR_WORKERS = DENIED_FOR_THREADS;
 
-export const LANE_REFUSAL = "refused: this hand runs in the background lane — the pointer and keyboard are not its; use applescript (Apple events), browser_*, files, shell or web, or report that the screen is needed";
+/** What the background lane answers a screen tool: what it may use instead, by name. */
+export const LANE_REFUSAL =
+  "refused: this thread runs in the background lane. It never touches the pointer, the keyboard, the front app or the front browser tab. Use applescript (Apple events), browser_read, browser_find or browser_tabs to read the browser, web_fetch or web_search to load a page, the file tools or run_shell. Or report that the screen is needed.";
 
 /**
  * Hormes's own hands wait this long for a thread's op in flight (never mid-op; a long
@@ -67,96 +62,21 @@ export const LANE_REFUSAL = "refused: this hand runs in the background lane — 
  */
 export const MAIN_LEASE_WAIT_MS = 30_000;
 
-/** Whether a tool call, with these arguments, acts on the screen (and so needs the lease, or the background refusal). */
+/**
+ * Whether a tool call, with these arguments, acts on the screen (and so needs the lease, or the background refusal).
+ * A shell line by core's `shellFocus` (an `open` or osascript in any segment, inner shell, group or substitution, in
+ * any case; an osascript keystroke however it is wrapped; a shell fed on stdin; a line past SHELL_SCAN_CHARS, unread).
+ * An AppleScript that drives the front surface (FOCUS_APPLESCRIPT), or whose `do shell script` line would be screen
+ * work as run_shell. The tool runner's hold for Kevin's hands reads the same judgment (brain/runner.ts).
+ */
 export function needsFocus(name: string, args: Record<string, unknown>): boolean {
   if (FOCUS_TOOLS.has(name)) return true;
-  if (name === "applescript") return FOCUS_APPLESCRIPT.test(String(args["script"] ?? ""));
-  if (name === "run_shell") return shellSteals(String(args["command"] ?? ""));
+  if (name === "applescript") {
+    const script = String(args["script"] ?? "");
+    return FOCUS_APPLESCRIPT.test(script) || appleScriptShellLines(script).some((line) => shellFocus(line) !== undefined);
+  }
+  if (name === "run_shell") return shellFocus(String(args["command"] ?? "")) !== undefined;
   return false;
-}
-
-/**
- * Does any command in this line front an app? Every segment of `a; b && c | d` is
- * judged: its wrappers (`sudo`, `env VAR=x`, `nohup`) and `VAR=value` heads skipped,
- * the head's directory dropped, `open` allowed only with a background flag.
- */
-export function shellSteals(command: string): boolean {
-  return shellSegments(command).some((segment) => {
-    const words = shellWords(segment);
-    const head = words[0];
-    if (!head || !BACKGROUND_SHELL_REFUSE.test(head)) return false;
-    if (head === "osascript") return true;
-    return !words.slice(1).some((w) => OPEN_BACKGROUND_FLAG.test(w));
-  });
-}
-
-/** The line split at `;`, `&`, `&&`, `|`, `||` and newlines outside quotes (good enough for the head test: a quoted separator is an argument). */
-function shellSegments(command: string): string[] {
-  const out: string[] = [];
-  let cur = "";
-  let quote: string | undefined;
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]!;
-    if (quote) {
-      cur += ch;
-      if (ch === quote) quote = undefined;
-      else if (ch === "\\" && quote === '"') {
-        cur += command[i + 1] ?? "";
-        i++;
-      }
-      continue;
-    }
-    if (ch === "'" || ch === '"') {
-      quote = ch;
-      cur += ch;
-      continue;
-    }
-    if (ch === "\\") {
-      cur += ch + (command[i + 1] ?? "");
-      i++;
-      continue;
-    }
-    if (ch === ";" || ch === "|" || ch === "&" || ch === "\n") {
-      out.push(cur);
-      cur = "";
-      continue;
-    }
-    cur += ch;
-  }
-  out.push(cur);
-  return out.map((s) => s.trim()).filter(Boolean);
-}
-
-/** A segment's words with the command's wrappers and leading assignments gone, the head reduced to its lower-cased basename. */
-function shellWords(segment: string): string[] {
-  const words = segment.split(/\s+/).filter(Boolean);
-  let i = 0;
-  let afterPrefix = false;
-  while (i < words.length) {
-    const w = words[i]!;
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(w)) {
-      i++;
-      continue;
-    }
-    if (SHELL_PREFIXES.has(basename(w))) {
-      afterPrefix = true;
-      i++;
-      continue;
-    }
-    if (afterPrefix && w.startsWith("-")) {
-      i++;
-      continue;
-    }
-    break;
-  }
-  const rest = words.slice(i);
-  if (rest[0] !== undefined) rest[0] = basename(rest[0]).toLowerCase();
-  return rest;
-}
-
-function basename(word: string): string {
-  const bare = word.replace(/^["']|["']$/g, "");
-  return bare.slice(bare.lastIndexOf("/") + 1);
 }
 
 // ------------------------------------------------------- step recording
@@ -166,6 +86,14 @@ function basename(word: string): string {
 
 export function argsOf(input: unknown): Record<string, unknown> {
   return (typeof input === "object" && input !== null ? input : {}) as Record<string, unknown>;
+}
+
+/** The line an observer added after a text result's own text (`now: …`), or "" when it added none. */
+function observationLine(out: RunOutcome, seen: RunOutcome): string {
+  if (seen === out || seen.result.kind !== "text" || out.result.kind !== "text") return "";
+  const own = out.result.text;
+  const text = seen.result.text;
+  return text.startsWith(own) ? text.slice(own.length).replace(/^\n/, "") : "";
 }
 
 function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
@@ -289,18 +217,27 @@ export abstract class LeasedRunner extends ToolRunner {
   /**
    * The base runner's run, with the two hooks around it: the serializer orders an
    * acting call; the observer annotates its result once it landed. Never inside the
-   * rail — after `super.run`, before the step is finished for the sink's reader.
+   * rail. The base records the step as the call returns, inside the serializer, so
+   * acting steps reach the ledger in the order they ran and a stop during the
+   * observation cannot drop one that landed. The observer's `now:` line follows as a
+   * note (PERF-5: the ledger holds what the model read, and `ledger --speed` pairs the
+   * two), written only while the turn that made the call is still attached.
    */
   protected async runBase(name: string, input: unknown): Promise<RunOutcome> {
     const acting = this.actingTools.has(name);
+    const sink = this.sinkRef;
     const out = acting && this.serializer ? await this.serializer.run(name, () => super.run(name, input)) : await super.run(name, input);
     if (!acting || !this.observer || out.result.kind !== "text") return out;
+    let seen: RunOutcome;
     try {
-      return await this.observer.annotate(name, argsOf(input), out);
+      seen = await this.observer.annotate(name, argsOf(input), out);
     } catch (e) {
       log.debug(`observer for ${name}: ${(e as Error).message}`);
       return out;
     }
+    const line = observationLine(out, seen);
+    if (line && sink && this.sinkRef === sink) sink.step({ kind: "note", text: line });
+    return seen;
   }
 
   /** The screen tool itself, under the lease: in flight for its duration, `busy` retried silently. */
@@ -326,8 +263,14 @@ export abstract class LeasedRunner extends ToolRunner {
     }
     if (busy === 0) return out;
     if (isBusyResult(out.result)) recordStep(this.sinkRef, name, args, out.result, out.ms);
-    else this.sinkRef?.step({ kind: "note", text: `waited ${this.clock() - t0} ms for Kevin's hands` });
+    else this.sinkRef?.step({ kind: "note", text: `waited ${this.clock() - t0} ms for ${this.userName}'s hands` });
     return out;
+  }
+
+  /** What the lease did before the tool runs, as notes: how long its re-front waited for Kevin's hands, and the app it brought back. */
+  protected noteSettle(got: { readonly refocused?: string; readonly waitedMs?: number }): void {
+    if (got.waitedMs) this.sinkRef?.step({ kind: "note", text: `waited ${got.waitedMs} ms for ${this.userName}'s hands` });
+    if (got.refocused) this.sinkRef?.step({ kind: "note", text: `brought ${got.refocused} back to the front` });
   }
 }
 
@@ -351,17 +294,23 @@ export interface LaneRunnerOptions extends LeasedRunnerOptions {
 type RankedAcquire = AcquireOptions & { readonly rank?: number | undefined };
 
 /**
- * A spawned thread's runner. Refuses what is not a thread's (thread_*, worker_*,
+ * A spawned thread's runner. Refuses what is not a thread's (thread_*,
  * self_*), refuses screen work in the background lane with one line, and in the
  * screen lane takes the lease around every screen tool (waiting at most WAIT_MAX_MS,
  * then answering "waiting for the screen"). A queued confirmation's text says whose
  * question it waits behind. `attach(undefined)` — the thread's turn ended — releases
- * the lease.
+ * the lease. A turn's step budget is counted here, before dispatch: call N+1 of a
+ * budget of N is refused and never reaches the hands (the scheduler's sink then ends
+ * the thread with its line).
  */
 export class LaneRunner extends LeasedRunner {
   private lane: SpawnLane;
   private rank: number | undefined;
   private readonly laneOpts: LaneRunnerOptions;
+  /** Tool calls allowed per turn (the thread's step budget); undefined = no cap (a spare, the automations' cold lane). */
+  private stepBudget: number | undefined;
+  /** Tool calls this turn so far. */
+  private calls = 0;
 
   constructor(opts: LaneRunnerOptions) {
     super(opts, opts.lease, opts.laneId);
@@ -388,16 +337,31 @@ export class LaneRunner extends LeasedRunner {
     this.rank = rank;
   }
 
+  /** The thread's step budget (tool calls per turn), set at admission. */
+  setStepBudget(steps: number | undefined): void {
+    this.stepBudget = steps;
+  }
+
+  /** A new turn of the thread's brain: its tool calls count from zero (the eyes' pre-warm shot before it is not one of them). */
+  beginTurn(): void {
+    this.calls = 0;
+  }
+
   override async run(name: string, input: unknown): Promise<RunOutcome> {
     const started = this.clock();
     const args = argsOf(input);
+    // Counted on entry, before any await: calls a brain issues together are judged in the order they arrived.
+    if (this.stepBudget !== undefined && this.calls >= this.stepBudget) return this.answer(name, args, { kind: "error", message: `refused: this turn's ${this.stepBudget} tool calls are spent; end your turn with one sentence of what you did` }, started);
+    this.calls++;
     if (DENIED_FOR_THREADS.has(name)) return this.answer(name, args, { kind: "error", message: `refused: ${name} is not a spawned thread's (depth one: a thread never spawns or edits Hormes)` }, started);
+    // design11: a headless `wake-brain` turn runs on this lane; a briefing never arms more automations or edits the recipes.
+    if (this.lane === "background" && /^(automation|recipe)_/.test(name)) return this.answer(name, args, { kind: "error", message: `refused: ${name} is not a background lane's (an automation is set in the conversation, never by a headless turn)` }, started);
     const focus = needsFocus(name, args);
     if (focus && this.lane === "background") return this.answer(name, args, { kind: "error", message: LANE_REFUSAL }, started);
     if (!focus) return this.finish(name, await this.runBase(name, input));
     const got = await this.acquireOrWait();
     if (!got.ok) return this.answer(name, args, { kind: "error", message: `waiting for the screen: ${got.reason}; do the rest first, or call it again` }, started);
-    if (got.refocused) this.sinkRef?.step({ kind: "note", text: `brought ${got.refocused} back to the front` });
+    this.noteSettle(got);
     const out = await this.actUnderLease(name, args, () => this.runBase(name, input));
     // The app this lane works in, for the re-front on a later hand-over.
     if ((name === "open_app" || name === "focus_app") && out.result.kind === "text") this.lease.rememberFront(this.actor, String(args["name"] ?? args["app"] ?? ""));
@@ -417,7 +381,7 @@ export class LaneRunner extends LeasedRunner {
       told = true;
       this.laneOpts.onWaiting?.(true, reason);
     };
-    if (holder !== undefined && holder !== this.actor) tell(`${holder === WorkerAwareRunner.ACTOR ? "Hormes's hands have" : holder === "dictation" ? "dictation has" : `thread ${holder} has`} the screen`);
+    if (holder !== undefined && holder !== this.actor) tell(`${holder === ThreadAwareRunner.ACTOR ? "Hormes's hands have" : holder === "dictation" ? "dictation has" : `thread ${holder} has`} the screen`);
     const slow = setTimeout(() => {
       if (!told) tell("the screen is not free yet");
     }, USER_IDLE_POLL_MS);
@@ -447,20 +411,20 @@ export class LaneRunner extends LeasedRunner {
    */
   private finish(name: string, out: RunOutcome): RunOutcome {
     let result = this.laneOpts.desk.render(out.result);
-    if (result.kind === "needs-confirmation" && /\((?:worker|thread)_wait\)/.test(result.question)) result = { ...result, question: result.question.replace(/\((?:worker|thread)_wait\)/, "(end your turn; Hormes resumes you when Kevin answers)") };
+    if (result.kind === "needs-confirmation" && result.question.includes("(thread_wait)")) result = { ...result, question: result.question.replace("(thread_wait)", `(end your turn; Hormes resumes you when ${this.userName} answers)`) };
     this.laneOpts.onOutcome?.(name, result);
     return result === out.result ? out : { ...out, result };
   }
 }
 
-// ---------------------------------------------------- WorkerAwareRunner
+// ---------------------------------------------------- ThreadAwareRunner
 
 /** As much of the scheduler as the main lane's runner needs: the thread tools. */
 export interface ThreadToolSource {
   tool(name: string, args: Record<string, unknown>, ctx: { readonly task: BrainTask | undefined }): Promise<ToolResult>;
 }
 
-export interface WorkerAwareRunnerOptions extends LeasedRunnerOptions {
+export interface ThreadAwareRunnerOptions extends LeasedRunnerOptions {
   readonly pool: ThreadToolSource;
   readonly lease: FocusLease;
   /** The desk, for the queued-question text when the main lane's question waits behind a thread's. */
@@ -469,19 +433,19 @@ export interface WorkerAwareRunnerOptions extends LeasedRunnerOptions {
 
 /**
  * The main lane's runner (the engine's `runner`): every brain call, reflex and the
- * eyes' shot go through it. It answers `thread_*` (and the `worker_*` aliases) from
+ * eyes' shot go through it. It answers `thread_*` from
  * the scheduler and records the step as the base would; for screen tools it takes
  * the lease with priority (Hormes's own hands never wait on a thread's idle — only
  * on its op in flight and MIN_HOLD, and on Kevin's own hands through the helper's
  * busy answer) and releases it when the turn ends or a question is asked.
  */
-export class WorkerAwareRunner extends LeasedRunner {
-  private readonly mainOpts: WorkerAwareRunnerOptions;
+export class ThreadAwareRunner extends LeasedRunner {
+  private readonly mainOpts: ThreadAwareRunnerOptions;
   /** `thread_wait` calls in flight: the main brain is blocked on its threads and its hands touch nothing. */
   private waitingOn = 0;
 
-  constructor(opts: WorkerAwareRunnerOptions) {
-    super(opts, opts.lease, WorkerAwareRunner.ACTOR);
+  constructor(opts: ThreadAwareRunnerOptions) {
+    super(opts, opts.lease, ThreadAwareRunner.ACTOR);
     this.mainOpts = opts;
   }
 
@@ -497,17 +461,12 @@ export class WorkerAwareRunner extends LeasedRunner {
     return this.waitingOn > 0;
   }
 
-  /** @deprecated read `waitingOnThreads`. */
-  get waitingOnWorkers(): boolean {
-    return this.waitingOnThreads;
-  }
-
   override async run(name: string, input: unknown): Promise<RunOutcome> {
     const started = this.clock();
     const args = argsOf(input);
     if (THREAD_TOOLS.has(name)) {
       let result: ToolResult;
-      const waits = canonicalThreadTool(name) === "thread_wait";
+      const waits = name === "thread_wait";
       if (waits) this.waitingOn++;
       try {
         result = await this.mainOpts.pool.tool(name, args, { task: this.taskRef });
@@ -525,16 +484,32 @@ export class WorkerAwareRunner extends LeasedRunner {
     }
     if (!needsFocus(name, args)) return this.rendered(await this.runBase(name, input));
     const got = await this.takeScreen();
-    if (got.ok && got.refocused) this.sinkRef?.step({ kind: "note", text: `brought ${got.refocused} back to the front` });
+    if (!got.ok && got.reason === "cancelled") {
+      // The task was stopped while its brain still had this call in flight: nothing acts.
+      const result: ToolResult = { kind: "error", message: `cancelled: the task was stopped before ${name} ran; nothing was done` };
+      const ms = this.clock() - started;
+      recordStep(this.sinkRef, name, args, result, ms);
+      log.info(`main lane ${name}: the task was stopped; not run`);
+      return { result, ms };
+    }
+    if (!got.ok && got.busy) {
+      // Kevin kept typing through the re-front's whole wait: his app is still in front, so nothing acts in it.
+      const result: ToolResult = { kind: "error", message: `waiting for the screen: ${got.reason}; do the rest first, or call it again` };
+      const ms = this.clock() - started;
+      recordStep(this.sinkRef, name, args, result, ms);
+      log.info(`main lane ${name}: ${got.reason}; not run`);
+      return { result, ms };
+    }
+    if (got.ok) this.noteSettle(got);
     const out = await this.actUnderLease(name, args, () => this.runBase(name, input));
-    if ((name === "open_app" || name === "focus_app") && out.result.kind === "text") this.lease.rememberFront(WorkerAwareRunner.ACTOR, String(args["name"] ?? args["app"] ?? ""));
-    if (out.result.kind === "needs-confirmation") this.lease.release(WorkerAwareRunner.ACTOR, "question");
+    if ((name === "open_app" || name === "focus_app") && out.result.kind === "text") this.lease.rememberFront(ThreadAwareRunner.ACTOR, String(args["name"] ?? args["app"] ?? ""));
+    if (out.result.kind === "needs-confirmation") this.lease.release(ThreadAwareRunner.ACTOR, "question");
     return this.rendered(out);
   }
 
   /**
    * The main lane's question, queued behind a thread's, reads as "Queued behind <Name>'s
-   * question … stop and wait (worker_wait)" — not as a question to relay: Kevin hears one
+   * question … stop and wait (thread_wait)" — not as a question to relay: Kevin hears one
    * question at a time, and this one is asked (by Hormes itself) when the floor clears.
    */
   private rendered(out: RunOutcome): RunOutcome {
@@ -546,20 +521,25 @@ export class WorkerAwareRunner extends LeasedRunner {
    * Hormes's hands win — but never mid-op: a thread's op in flight (a long `type`)
    * finishes first, bounded by the helper's own timeout, then Hormes's lands next.
    * Past MAIN_LEASE_WAIT_MS the lease is cut and taken, so the thread's next tool
-   * waits on Hormes instead of landing between its keystrokes. A stop or a cut
-   * meanwhile is left to the base (the toolset refuses after a stop).
+   * waits on Hormes instead of landing between its keystrokes. A stop meanwhile (the
+   * task's signal) answers `cancelled`, and `run` acts on nothing. A cut of the lease is
+   * a stop only when that signal says so: otherwise another of Hormes's own calls took
+   * the screen by force, and the screen is asked for once more, as the force-take does.
    */
   private async takeScreen(): Promise<LeaseOutcome> {
     const signal = this.taskRef?.signal;
-    const got = await this.lease.acquire(WorkerAwareRunner.ACTOR, { priority: true, signal, timeoutMs: MAIN_LEASE_WAIT_MS });
-    if (got.ok || got.reason === "cancelled" || got.reason === "cut") return got;
+    const take = async (timeoutMs: number): Promise<LeaseOutcome> => {
+      const got = await this.lease.acquire(ThreadAwareRunner.ACTOR, { priority: true, signal, timeoutMs });
+      return !got.ok && got.reason === "cut" && signal?.aborted ? { ok: false, reason: "cancelled" } : got;
+    };
+    const got = await take(MAIN_LEASE_WAIT_MS);
+    // Kevin's hands are not a holder to take the screen from: the lease is not held, and `run` acts on nothing.
+    if (got.ok || got.reason === "cancelled" || got.busy) return got;
+    if (got.reason === "cut") return take(WAIT_MAX_MS);
     const holder = this.lease.holder;
     log.warn(`main lane: ${got.reason} for ${MAIN_LEASE_WAIT_MS} ms; taking the screen`);
     this.lease.cancelAll("Hormes's hands took the screen");
     this.sinkRef?.step({ kind: "note", text: `took the screen${holder ? ` from ${holder}` : ""} (${got.reason})` });
-    return this.lease.acquire(WorkerAwareRunner.ACTOR, { priority: true, signal, timeoutMs: WAIT_MAX_MS });
+    return take(WAIT_MAX_MS);
   }
 }
-
-/** The main lane's runner, under the threads pass's name. */
-export { WorkerAwareRunner as ThreadAwareRunner };

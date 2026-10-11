@@ -3,20 +3,20 @@ import assert from "node:assert/strict";
 import { addLogSink } from "@hormes/core";
 import type { Brain } from "@hormes/brain";
 import type { LedgerRow } from "@hormes/protocol";
-import { delegate, rows, settle, until, world, type World } from "./world.ts";
+import { delegate, rows, until, world, type World } from "./world.ts";
 
 /**
  * The two latency stamps that make "speech end → first visible action" measurable
  * on every delegation (docs/LATENCY.md §5): `speechEndAt` — the end of Kevin's
- * triggering utterance, placed on the wall clock through the session's start —
- * and `firstActionAt` — the first acting tool that returned ok (a look-only tool
- * and a failed acting tool do not count). Both ride on the ledger's
- * `delegation.finished` row and in the delegator's done line.
+ * triggering utterance, on the wall clock: when its last input delta arrived (PERF-6;
+ * Live's session timeline drifts from the wall clock) — and `firstActionAt` — the first
+ * acting tool that returned ok (a look-only tool and a failed acting tool do not count).
+ * Both ride on the ledger's `delegation.finished` row and in the delegator's done line.
  */
 
 type Finished = Extract<LedgerRow, { type: "delegation.finished" }>;
 
-test("timings: speechEndAt is the triggering utterance's end on the session's start clock; firstActionAt is the first acting tool that returned ok; both land on the ledger and in the done line", async () => {
+test("timings: speechEndAt is the wall clock of the triggering utterance's last input delta; firstActionAt is the first acting tool that returned ok; both land on the ledger and in the done line", async () => {
   let w!: World;
   const brain: Brain = {
     kind: "fake",
@@ -53,28 +53,33 @@ test("timings: speechEndAt is the triggering utterance's end on the session's st
     await engine.ready();
     engine.updateSettings({ idleSleepMinutes: 0 });
     await engine.wake("test");
-    const sessionStartedAt = clock.t;
-    // Kevin speaks; Live delegates 600 ms of wall clock after the utterance ended (its transcription and decision).
-    clock.t += 2500;
-    const wallAtDelegation = clock.t;
+    // Kevin speaks; Live delegates 600 ms of wall clock after the utterance's last delta arrived (its decision). The
+    // session timeline (1000 → 1900) says nothing about the wall clock: it lags it here by 600 ms.
+    clock.t += 1900;
     const live = w.live;
     const s = live.nowMs; // 1000 on the session timeline
-    delegate(w, "hormes find the save button and press it", "item_1"); // one fragment [s, s+900], then the delegation at s+900
-    await settle(60);
+    live.nowMs += 900;
+    live.emit("inputTranscript", " hormes find the save button and press it", s, live.nowMs);
+    const speechEndAt = clock.t;
+    clock.t += 600;
+    const wallAtDelegation = clock.t;
+    live.emit("delegation", "item_1", "client", live.nowMs);
+    // Until it closes, never a fixed sleep: a busy Mac takes longer than 60 ms to run four tools (BL-11).
+    await until(() => engine.snapshot().delegations.find((x) => x.liveId === "item_1")?.status === "done");
 
     const d = engine.snapshot().delegations.find((x) => x.liveId === "item_1");
     assert.ok(d, "the delegation exists");
     assert.equal(d.status, "done", d.summary);
     const t = d.timings;
     assert.equal(t.delegatedAt, wallAtDelegation);
-    assert.equal(t.speechEndAt, sessionStartedAt + s + 900, "the utterance's endMs on the session timeline, placed on the wall clock at session.started");
+    assert.equal(t.speechEndAt, speechEndAt, "the wall clock its last input delta arrived at");
     assert.equal(t.firstActionAt, wallAtDelegation + 300, "the key press, not the focused-text read and not the open_app that failed");
     assert.equal(hands.named("key").length, 1, "the key went out through the gated hands");
     assert.equal((t as { firstToolAt?: number }).firstToolAt, wallAtDelegation + 100, "the first tool is still the first look (the eyes' shot excluded)");
 
     const finished = rows<Finished>(w, "delegation.finished").find((r) => r.delegationId === d.id);
     assert.ok(finished, "the finished row is on the ledger");
-    assert.equal(finished.timings.speechEndAt, sessionStartedAt + s + 900);
+    assert.equal(finished.timings.speechEndAt, speechEndAt);
     assert.equal(finished.timings.firstActionAt, wallAtDelegation + 300);
 
     const done = logLines.find((l) => /^delegation dlg_\S+ done in/.test(l));
@@ -113,7 +118,7 @@ test("timings: with no acting tool nothing is stamped as an action, and speechEn
     await engine.wake("test");
     // Live delegates with nothing heard yet (a hand-off before the transcript caught up).
     live.emit("delegation", "item_bare", "client", live.nowMs);
-    await settle(60);
+    await until(() => engine.snapshot().delegations.find((x) => x.liveId === "item_bare")?.status === "done");
     const d = engine.snapshot().delegations.find((x) => x.liveId === "item_bare");
     assert.ok(d);
     assert.equal(d.status, "done");
@@ -131,7 +136,7 @@ test("timings: a thread's steps land on ITS OWN delegation (threadId) with their
   try {
     let acted!: () => void;
     const actedP = new Promise<void>((r) => (acted = r));
-    w.workers.script = async (job) => {
+    w.threads.script = async (job) => {
       for (let i = 0; i < 6; i++) {
         clock.t += 10_000;
         await job.runner.run("frontmost_app", {});
@@ -145,21 +150,21 @@ test("timings: a thread's steps land on ITS OWN delegation (threadId) with their
     engine.updateSettings({ idleSleepMinutes: 0 });
     await engine.wake("test");
     delegate(w, "hormes tell ben on slack and play focus on spotify", "item_1");
-    await settle();
+    assert.ok(await until(() => brain.tasks.length === 1), "the main brain has the task (the runner is attached)");
     const kevinBefore = lastKevinAt();
     const started = await engine.runner.run("thread_start", { name: "Spotify", task: "play Focus" });
     assert.equal(started.result.kind, "text");
     await actedP;
     assert.equal(lastKevinAt(), kevinBefore, "61 s of a thread's actions are not Kevin's presence");
     const d = engine.snapshot().delegations[0]!;
-    assert.equal(d.steps.filter((s) => s.worker === "Spotify" && s.kind === "tool").length, 0, "a thread's steps never land on the parent");
+    assert.equal(d.steps.filter((s) => s.thread === "Spotify" && s.kind === "tool").length, 0, "a thread's steps never land on the parent");
     // thread_start is the main brain's own tool step; the thread's reads are on its own record, not the main brain's first tool or action.
     const t = d.timings as { firstToolAt?: number; firstActionAt?: number };
     const threadStart = d.steps.find((s) => s.kind === "tool" && s.tool?.name === "thread_start")!;
     assert.equal(t.firstToolAt, threadStart.at, "the first tool is the brain's own thread_start");
     assert.equal(t.firstActionAt, undefined, "a thread's read is nobody's action; thread_start changes nothing on screen");
-    const threadId = engine.workers.threads().find((x) => x.name === "Spotify")!.id;
-    const own = engine.workers.turnsOf(threadId)[0]!;
+    const threadId = engine.threads.threads().find((x) => x.name === "Spotify")!.id;
+    const own = engine.threads.turnsOf(threadId)[0]!;
     assert.equal(own.threadId, threadId);
     assert.equal(own.steps.filter((s) => s.kind === "tool" && s.tool?.name === "frontmost_app").length, 6, "on its own delegation");
     const tt = own.timings as { firstToolAt?: number; firstActionAt?: number; toolRoundTripMs?: number[] };
