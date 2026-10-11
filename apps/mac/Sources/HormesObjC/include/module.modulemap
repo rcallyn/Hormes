@@ -1,0 +1,4 @@
+module HormesObjC {
+    header "ObjCTry.h"
+    export *
+}
