@@ -26,6 +26,15 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
         setVisible(true)
     }
 
+    public func showWork() { show(); session.viewingAgentWork = false; session.showsWork = true; state.send(.work(HormesWorkCommand(action: "refresh"))) }
+
+    public func showSettings() { show(); session.showsSystem = true }
+
+    public func showPermissions() {
+        show()
+        session.showsSystem = true
+    }
+
     public func close() {
         setVisible(false)
         window?.orderOut(nil)
@@ -38,54 +47,17 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
 
     private func setVisible(_ on: Bool) {
         if session.windowVisible != on { session.windowVisible = on }
+        if !on { state.permissionSweepPark() }
     }
 
     /// Window number for scripted screenshots (`screencapture -l`). nil until shown.
     var windowNumber: Int? { window.map(\.windowNumber) }
 
-    /// Preview/test hooks (module-internal): drive the UI without a mouse.
-    func selectTab(_ tab: ConsoleSession.Tab) { session.select(tab) }
-    func pickLedgerDay(_ day: String) {
-        session.select(.ledger)
-        Task { await session.loadDays(from: state); await session.pick(day: day, from: state) }
-    }
-    func openAgent(_ id: String?) { session.openAgentId = id }
-    /// Back to Now (no conversation, no ledger day), for the preview harness's scripted actions.
-    func showNow() { session.showNow() }
-    /// The conversation on screen, for the preview harness's scripted actions.
-    var openAgentIdForPreview: String? { session.openAgentId }
-    /// The Hormes conversation on screen, for the preview harness's scripted actions.
-    var openHormesIdForPreview: String? { session.openHormesSessionId }
-    /// The thread on screen, for the preview harness's scripted actions.
-    var openThreadIdForPreview: String? { session.openThreadId }
-
     /// Show the Console on a thread's pane — a satellite blob's click (AppDelegate installs
     /// `state.openThreadHandler = { [weak self] id in self?.console.openThread(id) }`), the CLI.
     public func openThread(_ id: String) {
         show()
-        withAnimation(Motion.wipeAnimation) { session.openThread(id) }
-    }
-
-    /// ⌘⇧] / ⌘⇧[: the next / previous thread in the rail's order (AppState.railOrder, less main
-    /// while Now is the stream — ConsoleRootView.walkOrder); Now at either end.
-    func stepThread(by delta: Int) {
-        withAnimation(Motion.wipeAnimation) { session.stepThread(by: delta, order: ConsoleRootView.walkOrder(state.orderedThreads.map(\.id))) }
-    }
-
-    /// ⌥⌘.: stop THIS thread — the open pane's, or "main" on Now (the engine parks the main
-    /// turn; the spawned threads carry on; the session stays open). Never the transport's Stop;
-    /// nothing while an agent or a past conversation holds the centre (no thread is "this" one).
-    @discardableResult
-    func stopOpenThread() -> Bool {
-        guard let id = ConsoleWindowController.stopTarget(openThreadId: session.openThreadId, showsNow: session.showsNow) else { return false }
-        state.threadStop(id)
-        return true
-    }
-
-    /// Which thread ⌥⌘. stops, pure for the harness: the pane's; "main" on Now; nil elsewhere.
-    static func stopTarget(openThreadId: String?, showsNow: Bool) -> String? {
-        if let openThreadId { return openThreadId }
-        return showsNow ? "main" : nil
+        withAnimation(Motion.fade) { session.openThread(id) }
     }
 
     // MARK: - window
@@ -100,6 +72,7 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
         window.titleVisibility = .hidden
         window.isMovableByWindowBackground = true
         // No forced appearance: the tokens are dynamic, so the window follows the system.
+        window.appearance = NSAppearance(named: .darkAqua)
         window.backgroundColor = ConsoleTheme.groundNS
         // The columns' exact sum (ConsoleLayout), so no rail is ever clipped.
         let minSize = NSSize(width: ConsoleLayout.minWidth, height: ConsoleLayout.minHeight)
@@ -119,12 +92,9 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
 
         let session = self.session
         let actions = ConsoleActions(
-            send: { [state] command in ConsolePress.report?("press: \(ConsolePress.word(command))"); state.send(command) },
-            stop: { [weak self] in ConsolePress.report?("press: stop"); _ = self?.handle(.stop) },
+            send: { [state] command in state.send(command) },
+            stop: { [weak self] in _ = self?.handle(.stop) },
             screenshotURL: { [state] path in state.screenshotURL(path) },
-            loadLedgerDays: { [state] in Task { await session.loadDays(from: state) } },
-            pickLedgerDay: { [state] day in Task { await session.pick(day: day, from: state) } },
-            openOnboarding: { [state] in state.openOnboarding() },
             setWakePassphrase: { [state] phrase in state.wakeActions.setPassphrase(phrase) },
             clearWakePassphrase: { [state] in state.wakeActions.clearPassphrase() },
             beginMarkMode: { [state] in state.beginMarkMode() },
@@ -132,7 +102,6 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
 
         // The composer's Go/Pause: the one transport (AppState's Transport region).
         let transport = ConsoleTransport(toggle: { [state] in
-            ConsolePress.report?("press: \(ConsolePress.word(AppState.transportPress(for: state.phase)))")
             state.transportToggle()
         })
 
@@ -141,8 +110,6 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
             .environmentObject(session)
             .environment(\.consoleActions, actions)
             .environment(\.consoleTransport, transport)
-            // The title band the root is laid under: no float climbs into it (ConsoleFloatLayer, ConsoleMenuField.listMax).
-            .environment(\.consoleTitleBand, Self.titleBand(of: window))
         let hosting = ConsoleHostingView(rootView: root)
         hosting.autoresizingMask = [.width, .height]
         // The window's minimum is `minSize` above (the columns' sum); the hosting view must not
@@ -185,16 +152,9 @@ public final class ConsoleWindowController: NSObject, NSWindowDelegate {
             return true
         case .showNow:
             // ⌘0: whatever is open steps out; the live stream takes the centre.
-            withAnimation(Motion.wipeAnimation) { session.showNow() }
+            withAnimation(Motion.fade) { session.showNow() }
             return true
-        case .nextThread:
-            stepThread(by: 1)
-            return true
-        case .prevThread:
-            stepThread(by: -1)
-            return true
-        case .stopThread:
-            return stopOpenThread()
+
         }
     }
 
@@ -243,19 +203,11 @@ final class ConsoleWindow: NSWindow {
             default: return nil
             }
         }
-        if flags == [.command, .shift] {
-            switch chars {
-            case "]", "}": return .nextThread
-            case "[", "{": return .prevThread
-            default: return nil
-            }
-        }
-        if flags == [.command, .option], chars == "." { return .stopThread }
         return nil
     }
 }
 
-/// The Console's and Setup's root view. A click on an inactive window acts on the first click:
+/// The Console's root view. A click on an inactive window acts on the first click:
 /// AppKit hands the mouse-down to the hit view only if it accepts first mouse, and a bare
 /// `NSHostingView` leaves that to a default nothing pins — so it is said here, once.
 final class ConsoleHostingView<Content: View>: NSHostingView<Content> {

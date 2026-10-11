@@ -58,14 +58,14 @@ struct LedgerStats: Equatable {
 
 /// How a ledger read is read. `.record`, a session or a chain (`ledger.session`, `ledger.chain`): a decision a day's
 /// move to the Trash carried (`LedgerRow.carried`) is the decision itself, already given back at `decidedAt` by the
-/// daemon, and reads as Kevin made it. `.day`, a day's rows (`ledger.read`): the copy sits where the move wrote it,
+/// daemon, and reads as User made it. `.day`, a day's rows (`ledger.read`): the copy sits where the move wrote it,
 /// stamped at the move, so its line says it was carried and when it was decided, never a fresh decision at the move.
 enum LedgerReading: Equatable {
     case record, day
 }
 
 enum StreamBuilder {
-    /// `clearedAt`: Kevin cleared the Now stream then (AppState.nowClearedAt) — items at or
+    /// `clearedAt`: User cleared the Now stream then (AppState.nowClearedAt) — items at or
     /// before it are hidden here at once, and by the engine's snapshot a round trip later.
     static func fromSnapshot(transcript: [TranscriptItem], delegations: [Delegation], clearedAt: Double? = nil) -> [StreamEntry] {
         var out: [StreamEntry] = []
@@ -133,13 +133,11 @@ enum StreamBuilder {
             case "session.closed":
                 let reason = ConsoleFormat.closeReason(row.reason, after: transport)
                 out.append(.system(SystemEntry(id: "c:\(row.at):\(index)", at: row.at, symbol: "moon.fill",
-                                               text: reason == "closed" ? "Session closed" : "Session closed · \(reason)",
-                                               trailing: "\(TransportFormat.minutes(row.usageSeconds ?? 0)) billed")))
+                                               text: reason == "closed" ? "Session closed" : "Session closed · \(reason)")))
             case "pause":
                 // A pause closes the Live session: the meter stops, the conversation is held.
                 transport = "pause"
-                out.append(.system(SystemEntry(id: "pz:\(row.at):\(index)", at: row.at, symbol: "pause.fill", text: "Paused · meter stopped",
-                                               trailing: row.usageSeconds.map { "\(TransportFormat.minutes($0)) billed" })))
+                out.append(.system(SystemEntry(id: "pz:\(row.at):\(index)", at: row.at, symbol: "pause.fill", text: "Paused")))
             case "resume":
                 out.append(.system(SystemEntry(id: "rs:\(row.at):\(index)", at: row.at, symbol: "play.fill",
                                                text: ConsoleFormat.sentence(ConsoleFormat.resumedAfter(row.pausedMs)),
@@ -316,7 +314,7 @@ extension ConsoleFormat {
         }
     }
 
-    /// A carried decision on a day's rows: `carried · decided Sep 10 14:02` (when Kevin made it; `carried` alone for a
+    /// A carried decision on a day's rows: `carried · decided Sep 10 14:02` (when User made it; `carried` alone for a
     /// row that does not say).
     static func carriedWords(_ decidedAt: Double?) -> String {
         guard let ms = decidedAt, ms.isFinite, ms > 0 else { return "carried" }
@@ -435,7 +433,7 @@ extension ConsoleFormat {
             var parts: [String] = []
             if !name.isEmpty { parts.append(name) }
             parts.append(stateWords(state, until: row.until))
-            return (symbol, word, parts.joined(separator: AutomationWords.dot), nil, row.detail)
+            return (symbol, word, parts.joined(separator: " · "), nil, row.detail)
         case "automation.missed":
             // One statement per word (CI's older Swift gives up on ternaries concatenating inside one interpolation).
             var parts: [String] = []
@@ -443,7 +441,7 @@ extension ConsoleFormat {
             parts.append(row.skipped == true ? "skipped" : "missed")
             if let dueAt = row.dueAt { parts.append("due " + clock(dueAt)) }
             if let why = row.why { parts.append(missedWhyWords(why)) }
-            return ("clock.badge.exclamationmark", word, parts.joined(separator: AutomationWords.dot), row.lateMs.map { lateWords($0) }, nil)
+            return ("clock.badge.exclamationmark", word, parts.joined(separator: " · "), row.lateMs.map { lateWords($0) }, nil)
         default:
             return nil
         }
@@ -461,7 +459,7 @@ extension ConsoleFormat {
         }
     }
 
-    /// `snoozed until 07:20` · `done` · `paused` · `moved to Trash` · `failed` — the state's word, Kevin's vocabulary.
+    /// `snoozed until 07:20` · `done` · `paused` · `moved to Trash` · `failed` — the state's word, User's vocabulary.
     static func stateWords(_ state: String, until: Double?) -> String {
         switch state {
         case "snoozed": return until.map { "snoozed until \(clock($0))" } ?? "snoozed"

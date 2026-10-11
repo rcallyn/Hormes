@@ -12,15 +12,6 @@ private let stampWidth: CGFloat = 56
 private let stampGap: CGFloat = 10
 private let iconGap: CGFloat = 8
 
-/// The stream's tip ids (`focus:` / `tipOpen:` / `hover:` in the harness; `?` pins on the composer's buttons).
-enum StreamTipWords {
-    static let goId = "stream.go"
-    static let muteId = "stream.mute"
-    static let sendId = "stream.send"
-    static let stopId = "stream.stop"
-    static let delegation = "delegation."
-    static let chip = "chip."
-}
 private let deltaWidth: CGFloat = 60
 
 struct StreamPane: View, Equatable {
@@ -28,101 +19,25 @@ struct StreamPane: View, Equatable {
     let delegations: [Delegation]
     let phase: Phase
     let hasSession: Bool
-    let ledgerDay: String?
-    let ledgerEntries: [StreamEntry]
-    let ledgerLoading: Bool
-    /// Kevin cleared Now then (AppState.nowClearedAt): older items hide, the feed says "Cleared · Undo".
-    var clearedAt: Double? = nil
-    /// The daemon client is connected (AppState.connected). While it is not, the snapshot on
-    /// screen is the last one republished and nothing in it is being typed.
     var connected = true
-    /// The spawned threads (AppState.threads): each card shows the ones it started as chips.
     var threads: [WorkThread] = []
-    /// Settings.typedWakes: a typed line while asleep opens a paid session (default off — the
-    /// engine refuses and the composer keeps the words).
     var typedWakes = false
-    /// The snapshot carries `app.version` (ComposerHold.skewed): the daemon client refuses a typed line, so the words stay.
     var skewed = false
 
-    @EnvironmentObject private var session: ConsoleSession
-    @Environment(\.consoleActions) private var actions
-
-    static func == (a: StreamPane, b: StreamPane) -> Bool {
-        a.transcript == b.transcript && a.delegations == b.delegations && a.phase == b.phase && a.hasSession == b.hasSession
-            && a.ledgerDay == b.ledgerDay && a.ledgerEntries == b.ledgerEntries && a.ledgerLoading == b.ledgerLoading
-            && a.clearedAt == b.clearedAt && a.connected == b.connected
-            && a.threads == b.threads && a.typedWakes == b.typedWakes && a.skewed == b.skewed
-    }
-
-    /// The caret may show at all: the live feed, a session open, the daemon connected. A ledger
-    /// day's rows are the record (all final); a republished snapshot during a daemon drop, or an
-    /// asleep engine's leftover non-final item, must not blink for the whole outage.
-    static func caretsOn(ledgerDay: String?, hasSession: Bool, connected: Bool) -> Bool {
-        ledgerDay == nil && hasSession && connected
-    }
-
-    private var entries: [StreamEntry] {
-        ledgerDay == nil ? StreamBuilder.fromSnapshot(transcript: transcript, delegations: delegations, clearedAt: clearedAt) : ledgerEntries
-    }
-
-    /// Stop is hot only while the snapshot holds a running or waiting delegation — and
-    /// the session is up: a delegation left "running" by a snapshot that says asleep
-    /// cannot be running, and must not keep the button red. Nothing local latches it.
-    private var delegationRunning: Bool {
-        phase != .asleep && delegations.contains { $0.status == .running || $0.status == .awaitingConfirmation }
-    }
-
     var body: some View {
-        // The feed's identity is the day on screen: a ledger day arriving or the way back
-        // to live switches one feed for the next behind the curtain (Motion.curtain) under
-        // the banner, which itself fades and rises in; the composer stays put with whatever
-        // was typed. (A masked wipe of the feed cost the main thread 0.6 s a switch — measured.)
-        let feedKey = ledgerDay ?? "live"
         VStack(spacing: 0) {
-            if let day = ledgerDay {
-                LedgerBanner(day: day) { withAnimation(Motion.gentle) { session.showLive() } }
-                    .transition(Motion.appear)
-            }
-            ZStack {
-                // A past day's threads are its `thread.*` rows (system lines); only the live feed has the list.
-                StreamFeed(entries: entries, modeKey: feedKey, emptyState: emptyState, undo: undoClear,
-                           caretsOn: Self.caretsOn(ledgerDay: ledgerDay, hasSession: hasSession, connected: connected),
-                           threads: ledgerDay == nil ? threads : [])
-                    // The live feed's confirm rows answer the main conversation's question
-                    // (`thread.answer main`: the engine arms only when it holds the floor); a ledger
-                    // day is the record and offers no buttons.
-                    .environment(\.consoleConfirm, ledgerDay == nil ? ConsoleConfirm(threadId: "main") : nil)
-                    .id(feedKey)
-                    .transition(.identity)
-                Color.clear
-                    .allowsHitTesting(false)
-                    .id(feedKey)
-                    .transition(Motion.curtain(ConsoleTheme.ground))
-            }
-            .clipped()
-            .animation(Motion.wipeAnimation, value: feedKey)
-            ComposerBar(phase: phase, stopHot: delegationRunning, typedWakes: typedWakes, lastTypedId: ComposerHold.lastTypedId(transcript), skewed: skewed)
+            StreamFeed(entries: StreamBuilder.fromSnapshot(transcript: transcript, delegations: delegations), modeKey: "live",
+                       emptyState: emptyState, caretsOn: hasSession && connected, threads: threads)
+                .environment(\.consoleConfirm, ConsoleConfirm(threadId: "main"))
+            ComposerBar(phase: phase,
+                        stopHot: phase != .asleep && delegations.contains { $0.status == .running || $0.status == .awaitingConfirmation },
+                        typedWakes: typedWakes, lastTypedId: ComposerHold.lastTypedId(transcript), skewed: skewed)
         }
-        .animation(Motion.gentle, value: ledgerDay == nil)
     }
-
     private var emptyState: StreamEmptyState {
-        if ledgerDay != nil {
-            if ledgerLoading { return StreamEmptyState(text: "Reading…", loading: true) }
-            return StreamEmptyState(text: "Nothing recorded.")
-        }
-        // The way back to a session comes first: a cleared feed must never hide Go.
         if phase == .paused { return StreamEmptyState(text: "Paused. Press Go or type to resume.", go: true) }
         if !hasSession { return StreamEmptyState(text: "Asleep. Press Go.", go: true) }
-        // Cleared: the items are hidden, not gone — the ledger has them, Undo brings them back.
-        if clearedAt != nil { return StreamEmptyState(text: "Cleared. Hormes still remembers; the ledger has it.", undo: true) }
         return StreamEmptyState(text: "Nothing heard yet.")
-    }
-
-    /// The empty state's Undo: the cleared items come back (now.restore), itself undoable.
-    private func undoClear() {
-        guard let at = clearedAt else { return }
-        actions.cleanup(.restoreNow(clearedAt: at))
     }
 }
 
@@ -131,34 +46,10 @@ struct StreamEmptyState: Equatable {
     /// Offer the transport's Go (wake, or resume with the context).
     var go = false
     var loading = false
-    /// Offer Undo (the cleared Now).
-    var undo = false
 }
 
 /// 40pt, so its rule meets the two rail heads' rules on one seam: which day is
 /// on screen, and the way back to live. Owns its bottom rule.
-private struct LedgerBanner: View {
-    let day: String
-    let back: () -> Void
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: iconGap) {
-                ConsoleIcon(name: "calendar")
-                Text(ConsoleFormat.day(day)).font(ConsoleTheme.sans(12, .medium)).foregroundStyle(ConsoleTheme.fg)
-                Text(day).font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.titanium)
-                Spacer()
-                Button(action: back) { Label("Live", systemImage: ConsoleGlyph.live) }
-                    .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
-                    .consoleHelp(HelpCopy.backStream)
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 40)
-            ConsoleHairline()
-        }
-    }
-}
-
 // MARK: - Feed with sticky auto-scroll
 
 /// Where the feed's scroll view is: the clip's top (y down; the document is
@@ -258,11 +149,11 @@ final class ConsoleScrollProbeView: NSView {
         return true
     }
 
-    /// After rows were added *above* the viewport (an older page loaded), keeps the row Kevin
+    /// After rows were added *above* the viewport (an older page loaded), keeps the row User
     /// was reading where it is: the clip follows the document's growth — not once, but on every
     /// frame change for the next moment (`holdSeconds`), because a lazy stack lays the new rows
     /// out at estimated heights first and at their real ones as they materialise (a one-shot
-    /// shift left the row ~240 pt adrift for a 40-row page). Kevin's own scroll during the hold
+    /// shift left the row ~240 pt adrift for a 40-row page). User's own scroll during the hold
     /// ends it; so does the moment passing. `previousContent` is the document height before the change.
     func keepOffset(previousContent: CGFloat) {
         guard let scroll = enclosingScrollView, let doc = scroll.documentView, doc.isFlipped else { return }
@@ -277,7 +168,7 @@ final class ConsoleScrollProbeView: NSView {
         let content: CGFloat
         let until: Date
         /// Where the last shift left the clip. A top that moved UP since (toward older rows) is
-        /// Kevin scrolling on — his move ends the hold. A move down is the scroll view's own
+        /// User scrolling on — his move ends the hold. A move down is the scroll view's own
         /// compensation for rows re-laid out above (it happens under the meters' 20 Hz churn) and
         /// is re-enforced: the anchor is the truth, whoever moved the clip.
         var lastSet: CGFloat?
@@ -288,7 +179,7 @@ final class ConsoleScrollProbeView: NSView {
     /// `lastSet` is written: that inner call must do nothing.
     private var applyingHold = false
     /// Long enough for a lazy stack's rows to take their real heights (they kept moving for
-    /// ~0.7 s under churn); short enough that the next thing Kevin does is his.
+    /// ~0.7 s under churn); short enough that the next thing User does is his.
     static let holdSeconds: TimeInterval = 0.8
 
     /// One step of the hold: the clip's top at where it was plus the growth since, when it is not there.
@@ -418,7 +309,6 @@ struct StreamFeed: View {
     /// the end, and the row's ground lights for a moment. nil follows the end as always.
     var scrollToId: String? = nil
     /// The empty state's Undo (the cleared Now).
-    var undo: () -> Void = {}
     /// The streaming caret may show (StreamPane.caretsOn): only the live feed with a session
     /// open and the daemon connected. Off for a ledger day and a past Hormes conversation.
     var caretsOn = false
@@ -476,7 +366,6 @@ struct StreamFeed: View {
                                 if let earlier { loadEarlierRow(earlier) }
                                 ForEach(entries) { entry in
                                     StreamRow(entry: entry, caret: entry.id == caretId, threads: entry.threads(from: threads))
-                                        .rowAppear(animated: settled && !loadingEarlier)
                                         // The found row's ground, on its own opacity: the layout never moves.
                                         .background(RoundedRectangle(cornerRadius: 6).fill(ConsoleTheme.active).opacity(highlightId == entry.id ? 1 : 0))
                                         .id(entry.id)
@@ -508,7 +397,7 @@ struct StreamFeed: View {
                     .buttonStyle(JumpPillStyle())
                     .padding(.bottom, 12)
                     .transition(ConsoleMotion.arriveLeave)
-                    .consoleHelp(HelpCopy.latest)
+                    .help(HelpCopy.latest)
                 }
             }
             .animation(Motion.gentle, value: tracker.showJump)
@@ -545,7 +434,7 @@ struct StreamFeed: View {
             .onChange(of: entries.first?.id) { oldId, _ in
                 let wasLoading = loadingEarlier
                 loadingEarlier = false
-                // An older page landed above the row Kevin was reading: the probe holds his place
+                // An older page landed above the row User was reading: the probe holds his place
                 // as the document grows (ConsoleScrollProbeView.keepOffset). Only for a page he asked for.
                 guard wasLoading, !tracker.stuck, oldId != nil, let geo = tracker.lastGeometry else { return }
                 DispatchQueue.main.async { tracker.probe?.keepOffset(previousContent: geo.content) }
@@ -558,11 +447,7 @@ struct StreamFeed: View {
             }
             // The preview harness pressing "Load earlier" (`load-earlier-thread`): the button's own path,
             // so the run.log carries the `thread.history` send and the keepOffset hold is the real one.
-            .onReceive(NotificationCenter.default.publisher(for: ConsoleSession.previewNotification)) { note in
-                guard note.userInfo?["loadEarlier"] as? Bool == true, let earlier, !loadingEarlier else { return }
-                loadingEarlier = true
-                earlier.load()
-            }
+            
         }
     }
 
@@ -573,7 +458,7 @@ struct StreamFeed: View {
             ZStack {
                 if loadingEarlier {
                     HStack(spacing: 8) {
-                        ConsoleGlyphs(cols: 8, rows: 1)
+                        ProgressView().controlSize(.small)
                         Text("Loading…").font(ConsoleTheme.sans(12)).foregroundStyle(ConsoleTheme.fg3)
                     }
                     .frame(height: 24)
@@ -586,7 +471,7 @@ struct StreamFeed: View {
                         Label("Load earlier", systemImage: ConsoleGlyph.earlierLine)
                     }
                     .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
-                    .consoleHelp(earlier.remaining > 0 ? "\(earlier.remaining) earlier entr\(earlier.remaining == 1 ? "y" : "ies")" : "Earlier entries")
+                    .help(earlier.remaining > 0 ? "\(earlier.remaining) earlier entr\(earlier.remaining == 1 ? "y" : "ies")" : "Earlier entries")
                     .transition(.opacity)
                 }
             }
@@ -625,19 +510,16 @@ struct StreamFeed: View {
     private var emptyView: some View {
         ConsoleEmpty(emptyState.text) {
             if emptyState.loading {
-                ConsoleGlyphs(cols: 16, rows: 2)
+                ProgressView().controlSize(.small)
             } else if emptyState.go {
                 Button(action: transport.toggle) { Label("Go", systemImage: ConsoleGlyph.play) }
                     .buttonStyle(ConsoleButtonStyle(kind: .primary, height: 28))
-                    .consoleHelp(HelpCopy.go)
-            } else if emptyState.undo {
-                Button(action: undo) { Label("Undo", systemImage: ConsoleGlyph.undoLine) }
-                    .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 28))
-                    .consoleHelp(HelpCopy.undoCleared)
+                    .help(HelpCopy.go)
+
             } else if let retry {
                 Button(action: retry) { Label("Try again", systemImage: ConsoleGlyph.reloadLine) }
                     .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
-                    .consoleHelp(HelpCopy.retryPage)
+                    .help(HelpCopy.retryPage)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -665,7 +547,6 @@ struct JumpPillStyle: ButtonStyle {
             .background(RoundedRectangle(cornerRadius: 6).fill(ConsoleTheme.raised))
             .overlay(RoundedRectangle(cornerRadius: 6).stroke(ConsoleTheme.hair, lineWidth: 1))
             .opacity(configuration.isPressed ? 0.8 : 1)
-            .animation(ConsoleMotion.hover, value: configuration.isPressed)
     }
 }
 
@@ -696,7 +577,7 @@ private struct Stamp: View {
         Text(ConsoleFormat.time(at))
             .font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.fg3)
             .frame(width: stampWidth, alignment: .trailing)
-            .consoleHelp(ConsoleFormat.fullDate(at))
+            .help(ConsoleFormat.fullDate(at))
     }
 }
 
@@ -711,22 +592,22 @@ struct UtteranceRow: View {
     /// Blinks while the item is still being written AND the gate is open.
     static func showsCaret(final: Bool, gate: Bool) -> Bool { !final && gate }
 
-    /// The icon column: Kevin spoken is `person.fill`, Kevin typed (TranscriptItem.source "typed",
+    /// The icon column: User spoken is `person.fill`, User typed (TranscriptItem.source "typed",
     /// the Console's composer) is `keyboard.fill`, Hormes is the waveform.
     static func symbol(for item: TranscriptItem) -> String {
-        guard item.speaker == .kevin else { return "waveform" }
+        guard item.speaker == .user else { return "waveform" }
         return item.source == "typed" ? "keyboard.fill" : "person.fill"
     }
 
     var body: some View {
-        let kevin = item.speaker == .kevin
-        let typed = kevin && item.source == "typed"
+        let user = item.speaker == .user
+        let typed = user && item.source == "typed"
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             Stamp(at: item.at)
-            ConsoleIcon(name: Self.symbol(for: item), tint: kevin ? ConsoleTheme.titanium : ConsoleTheme.speaking)
+            ConsoleIcon(name: Self.symbol(for: item), tint: user ? ConsoleTheme.titanium : ConsoleTheme.speaking)
                 .padding(.leading, stampGap)
-                .consoleHelp(typed ? "Typed in the Console" : (kevin ? "Said" : "Hormes"))
-                .accessibilityLabel(typed ? "You, typed" : (kevin ? "You" : "Hormes"))
+                .help(typed ? "Typed in the Console" : (user ? "Said" : "Hormes"))
+                .accessibilityLabel(typed ? "You, typed" : (user ? "You" : "Hormes"))
             HStack(alignment: .lastTextBaseline, spacing: 3) {
                 Text(item.text.isEmpty ? "…" : item.text)
                     .font(ConsoleTheme.sans(13))
@@ -815,7 +696,7 @@ struct DelegationCard: View {
             .padding(.horizontal, 10)
             .frame(height: 30)
             // One card for the head: the request whole, then `id · live · created` in mono.
-            .consoleHelp(id: StreamTipWords.delegation + d.id, card: .delegation(d), edge: .below)
+            .help(HelpText.delegation(d))
             ConsoleHairline(weight: .row)
 
             DelegationTimeline(timings: d.timings, status: d.status, tone: meta.color)
@@ -832,7 +713,6 @@ struct DelegationCard: View {
                         StepRow(step: step, delegatedAt: d.timings.delegatedAt,
                                 waiting: d.status == .awaitingConfirmation && index == d.steps.count - 1,
                                 live: d.status == .running && index == d.steps.count - 1)
-                            .rowAppear(animated: settled)
                     }
                 }
                 .padding(EdgeInsets(top: 2, leading: 10, bottom: 6, trailing: 10))
@@ -851,7 +731,6 @@ struct DelegationCard: View {
                     }
                     .padding(EdgeInsets(top: 7, leading: 10, bottom: 8, trailing: 10))
                 }
-                .rowAppear(animated: settled)
             }
         }
         .overlay(Rectangle().stroke(ConsoleTheme.hair, lineWidth: 1))
@@ -877,9 +756,8 @@ struct ThreadStrip: View {
         ConsoleFlow(hSpacing: 6, vSpacing: 6) {
             ForEach(threads) { t in
                 ThreadChip(thread: t) {
-                    withAnimation(Motion.wipeAnimation) { session.openThread(t.id) }
+                    withAnimation(Motion.fade) { session.openThread(t.id) }
                 }
-                .rowAppear(animated: animated)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -913,9 +791,7 @@ private struct ThreadChip: View {
         .buttonStyle(.plain)
         .fixedSize()
         .onHover { hovering = $0 }
-        .animation(ConsoleMotion.hover, value: hovering)
-        // The same card the rails draw for this thread (ConsoleTipCard.thread); its spoken form is the hint.
-        .consoleHelp(id: StreamTipWords.chip + thread.id, card: .thread(thread), edge: .below)
+        .help(HelpText.thread(thread))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(thread.name), \(meta.label), \(ConsoleTheme.lane(thread.lane)) lane")
     }
@@ -928,7 +804,7 @@ private struct ThreadTag: View {
     var body: some View {
         Text("[\(name)]").font(ConsoleTheme.mono(11)).foregroundStyle(ConsoleTheme.titanium)
             .lineLimit(1).fixedSize()
-            .consoleHelp("\(name)'s step")
+            .help("\(name)'s step")
             .accessibilityLabel("by \(name)")
     }
 }
@@ -1015,7 +891,7 @@ private struct StepDelta: View {
         Text(ConsoleFormat.delta(ms))
             .font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.titanium)
             .frame(width: deltaWidth, alignment: .trailing)
-            .consoleHelp(ConsoleFormat.time(at))
+            .help(ConsoleFormat.time(at))
     }
 }
 
@@ -1092,7 +968,7 @@ struct StepRow: View {
             // A ZStack, so the indicator and the symbol crossfade when the thought settles.
             ZStack {
                 if live {
-                    ConsoleGlyphs(cols: 3, rows: 1, color: tint).frame(width: 20, height: 20).transition(.opacity)
+                    ProgressView().controlSize(.small).tint(tint).frame(width: 20, height: 20).transition(.opacity)
                 } else {
                     ConsoleIcon(name: symbol, tint: tint).transition(.opacity)
                 }
@@ -1122,10 +998,10 @@ private struct ConfirmButtons: View {
         HStack(spacing: 6) {
             Button("Allow") { actions.send(.threadAnswer(threadId: threadId, yes: true)) }
                 .buttonStyle(ConsoleButtonStyle(kind: .primary, height: 22, small: true))
-                .consoleHelp(HelpCopy.allow)
+                .help(HelpCopy.allow)
             Button("Deny") { actions.send(.threadAnswer(threadId: threadId, yes: false)) }
                 .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 22, small: true))
-                .consoleHelp(HelpCopy.deny)
+                .help(HelpCopy.deny)
         }
         .fixedSize()
         .layoutPriority(1)
@@ -1156,7 +1032,7 @@ struct ToolStepRow: View {
                         Text(tool.name).font(ConsoleTheme.mono(12)).foregroundStyle(ConsoleTheme.fg)
                             .lineLimit(1).truncationMode(.tail).layoutPriority(1)
                         Circle().fill(tool.ok ? ConsoleTheme.acting : ConsoleTheme.error).frame(width: 5, height: 5)
-                            .consoleHelp(tool.ok ? "ok" : "failed")
+                            .help(tool.ok ? "ok" : "failed")
                             .accessibilityLabel(tool.ok ? "ok" : "failed")
                         Text(ConsoleFormat.ms(tool.ms)).font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.titanium)
                             .lineLimit(1).layoutPriority(1)
@@ -1227,22 +1103,20 @@ struct ScreenshotThumb: View {
         ZStack {
             if let image = image {
                 Image(image, scale: 2, label: Text("Screenshot")).resizable().aspectRatio(contentMode: .fit)
-                    .transition(Motion.wipe)
+                    .transition(.opacity)
             } else {
                 ZStack {
-                    DitheredGradient(stops: scheme == .dark ? Dither.skeletonStopsDark : Dither.skeletonStopsLight,
-                                     direction: .horizontal, bands: 2, cellPoints: 2)
+                    ConsoleTheme.raised
                     Image(systemName: failed ? "photo.badge.exclamationmark.fill" : "photo.fill")
                         .font(.system(size: 14, weight: .medium)).foregroundStyle(ConsoleTheme.fg3)
                 }
                 .aspectRatio(16 / 10, contentMode: .fit)
-                .transition(Motion.wipe)
+                .transition(.opacity)
             }
         }
         .animation(Motion.animation(Motion.easeOut, Motion.base), value: image == nil)
         .frame(width: width)
         .overlay(Rectangle().stroke(hovering && image != nil ? ConsoleTheme.fg : ConsoleTheme.hairFrame, lineWidth: 1))
-        .animation(ConsoleMotion.hover, value: hovering)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture { if image != nil { onTap() } }
@@ -1274,7 +1148,7 @@ struct LightboxView: View {
                 } else if failed {
                     ConsoleEmpty("Screenshot not found.")
                 } else {
-                    ConsoleGlyphs(cols: 16, rows: 2)
+                    ProgressView().controlSize(.small)
                 }
             }
             .frame(maxWidth: 1400, maxHeight: 820)
@@ -1304,44 +1178,6 @@ struct LightboxView: View {
 
 // MARK: - Composer
 
-/// How the composer shares its width when a pick waits (design13 review): Go · Mute · Send · Stop keep
-/// their widths; the field is held near `fieldFloor` while the voice cluster — the chip's three faces
-/// (`VoiceChipFace.Tier`) and Switch now's word or glyph — gives, by arithmetic on the composer's own
-/// width (a `ViewThatFits` measuring the faces cost the pick a 0.4 s layout stall); only when the
-/// smallest cluster no longer fits beside the floor does the field shrink — to ≈ 66 at the window's
-/// minimum (`ConsoleLayout.streamMinWidth`, 420), never under `fieldLeast`. Pure, pinned by `check-kit`;
-/// the frames on screen by `check-composer-fit`.
-enum ComposerFit {
-    /// The chip's face and whether Switch now keeps its word.
-    struct Cluster: Equatable {
-        var chip: VoiceChipFace.Tier = .full
-        var word = true
-    }
-
-    /// Go · Mute · Send (32 each) · Stop (one width, the hidden `Stopped`, 88) · seven 8-pt gaps (56) · the 12-pt
-    /// insets (24) = 264. One literal: CI's older Swift cannot type-check the sum of six integer literals as a CGFloat.
-    static let fixed: CGFloat = 264
-    /// The field the chip's words yield to before the field gives (the 1180 window's composer, 616 wide, keeps its full chip above it).
-    static let fieldFloor: CGFloat = 120
-    /// The field's least: what the minimum window leaves it, so nothing overflows.
-    static let fieldLeast: CGFloat = 48
-    /// The cluster's widths, widest first: `🇬🇧 Ballad waits ⌄` + Switch now (130 · 8 · 87) · `🇬🇧 Ballad ⌄` + the word
-    /// (94 · 8 · 87) · `🇬🇧 ⌄` + the word (50 · 8 · 87) · `🇬🇧 ⌄` + the glyph (50 · 8 · 32), each with a little room.
-    static let clusterFull: CGFloat = 226
-    static let clusterName: CGFloat = 190
-    static let clusterFlagWord: CGFloat = 146
-    static let clusterMin: CGFloat = 96
-
-    /// The widest cluster the room beside the field's floor takes, for a composer this wide.
-    static func cluster(width: CGFloat) -> Cluster {
-        let room = width - fixed - fieldFloor
-        if room >= clusterFull { return Cluster(chip: .full, word: true) }
-        if room >= clusterName { return Cluster(chip: .name, word: true) }
-        if room >= clusterFlagWord { return Cluster(chip: .flag, word: true) }
-        return Cluster(chip: .flag, word: false)
-    }
-}
-
 /// 48pt, owns its top rule: Go/Pause (the transport's one button — `play.fill` as the
 /// filled accent while asleep, a ghost while paused, `pause.fill` in session, a quiet
 /// "…" while connecting where a press stops; ⌘P here, ⌥⇧Space anywhere), Mute (enabled
@@ -1361,7 +1197,7 @@ struct ComposerBar: View {
     /// Settings.typedWakes (default off): a typed line while asleep opens a paid session. Off,
     /// the engine refuses with a toast ("asleep — press Go") and the words stay in the field.
     var typedWakes = false
-    /// The newest line Kevin typed that reached the conversation (`ComposerHold.lastTypedId`): a held line leaves the
+    /// The newest line User typed that reached the conversation (`ComposerHold.lastTypedId`): a held line leaves the
     /// field when a newer one lands.
     var lastTypedId: String? = nil
     /// The builds differ (`app.version`): a typed line is refused, and the words stay (ComposerHold.submitted).
@@ -1374,9 +1210,6 @@ struct ComposerBar: View {
     /// A line sent while the engine must resume or wake first (V6): it stays in the field until it lands.
     @State private var held: ComposerHold.Held?
     @State private var stopFlashing = false
-    /// The composer's own width (the stream column's): `ComposerFit.cluster` reads it, so the voice
-    /// cluster gives while the field is held near its floor, and the field gives only at the window's minimum.
-    @State private var width: CGFloat = ConsoleLayout.defaultSize.width
     @FocusState private var focused: Bool
 
     /// How long Stop stays red for a press: a larger change of state, Motion.slow.
@@ -1439,9 +1272,7 @@ struct ComposerBar: View {
             HStack(spacing: 8) {
                 transportButton
                 muteButton
-                // ── Builder G's slot: the voice chip (`VoiceChip`, `🇬🇧 Ballad ⌄`) sits here, between Mute and the field. ──
-                // Its face and Switch now's word follow the composer's width (ComposerFit), so the field keeps its floor.
-                VoiceChipSlot(cluster: ComposerFit.cluster(width: width))
+                VoiceChipSlot()
                 TextField(placeholder, text: $text)
                     .consoleField(height: 32, focused: focused)
                     .focused($focused)
@@ -1452,7 +1283,6 @@ struct ComposerBar: View {
             }
             .padding(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
         }
-        .onGeometryChange(for: CGFloat.self, of: { $0.size.width }) { width = $0 }
         .onChange(of: session.composerFocusRequest) { focused = true }
         .onChange(of: lastTypedId) { held = ComposerHold.landed(held, lastTypedId: lastTypedId, text: &text) }
         .onChange(of: text) { held = ComposerHold.edited(held, text: text) }
@@ -1482,7 +1312,7 @@ struct ComposerBar: View {
                 .animation(Motion.fade, value: connecting)
         }
         .buttonStyle(ConsoleButtonStyle(kind: AppState.transportFilled(for: phase) ? .primary : .ghost, iconOnly: true, height: 32))
-        .consoleHelp(look.help, key: HelpCopy.go.key, id: StreamTipWords.goId)
+        .help(look.help)
         .accessibilityLabel(transportWord)
     }
 
@@ -1494,7 +1324,7 @@ struct ComposerBar: View {
         }
         .buttonStyle(ConsoleButtonStyle(kind: .ghost, iconOnly: true, height: 32))
         .disabled(!inSession)
-        .consoleHelp(muted ? HelpCopy.unmute : HelpCopy.mute, id: StreamTipWords.muteId)
+        .help(muted ? HelpCopy.unmute : HelpCopy.mute)
         .accessibilityLabel(muted ? "Unmute" : "Mute")
     }
 
@@ -1505,7 +1335,7 @@ struct ComposerBar: View {
         }
         .buttonStyle(ConsoleButtonStyle(kind: hasText ? .primary : .ghost, iconOnly: true, height: 32))
         .disabled(!hasText)
-        .consoleHelp(HelpCopy.send, id: StreamTipWords.sendId)
+        .help(HelpCopy.send)
         .accessibilityLabel("Send")
     }
 
@@ -1522,11 +1352,10 @@ struct ComposerBar: View {
                 }
                 .animation(Motion.snappy, value: stopWord)
             }
-            // The word's width, never squeezed: the field and the voice cluster are what give (ComposerFit).
             .fixedSize(horizontal: true, vertical: false)
         }
         .buttonStyle(ConsoleButtonStyle(kind: stopKind, height: 32))
-        .consoleHelp(stopKind == .spent ? HelpCopy.stopSpent : HelpCopy.stopAll, id: StreamTipWords.stopId)
+        .help(stopKind == .spent ? HelpCopy.stopSpent : HelpCopy.stopAll)
         .accessibilityLabel(stopWord)
     }
 
@@ -1543,7 +1372,7 @@ struct ComposerBar: View {
 /// While the builds differ (`app.version`, APP-3) the daemon client refuses every typed line, in any phase, and the
 /// words stay too. Anywhere else (paused, connecting, asleep with typed wakes) the engine resumes or wakes first, and
 /// the words reach the conversation only if that works. So the field keeps them until the line lands (a newer typed
-/// line in the conversation), and "not sent · could not resume, still paused" leaves them where Kevin typed them.
+/// line in the conversation), and "not sent · could not resume, still paused" leaves them where User typed them.
 /// The session's return ends the hold too (`phaseChanged`): a voice pick typed while paused ("switch to the ballad
 /// voice") runs as a reflex and lands no typed line, so its words leave when the session resumes on the new voice.
 /// Typed asleep with typed wakes off, a voice pick still takes effect ("heard at the next Go"), and its words stay,
@@ -1556,9 +1385,9 @@ enum ComposerHold {
         let after: String?
     }
 
-    /// The newest typed line of Kevin's in a transcript (`source` "typed"): its id.
+    /// The newest typed line of User's in a transcript (`source` "typed"): its id.
     static func lastTypedId(_ items: [TranscriptItem]) -> String? {
-        items.last { $0.speaker == .kevin && $0.source == "typed" }?.id
+        items.last { $0.speaker == .user && $0.source == "typed" }?.id
     }
 
     /// Whether a line sent in `phase` waits for its landing before it leaves the field.
@@ -1580,7 +1409,7 @@ enum ComposerHold {
         return nil
     }
 
-    /// A typed line landed: a held line leaves the field (unless Kevin changed it); the hold ends either way.
+    /// A typed line landed: a held line leaves the field (unless User changed it); the hold ends either way.
     static func landed(_ held: Held?, lastTypedId: String?, text: inout String) -> Held? {
         guard let held, let lastTypedId, lastTypedId != held.after else { return held }
         if text.trimmingCharacters(in: .whitespacesAndNewlines) == held.text { text = "" }
@@ -1588,14 +1417,14 @@ enum ComposerHold {
     }
 
     /// The phase changed: back in session, a held line has gone with the resume or the wake (a typed line on its way, or
-    /// a reflex such as a voice pick that lands none), so it leaves the field (unless Kevin changed it); the hold ends.
+    /// a reflex such as a voice pick that lands none), so it leaves the field (unless User changed it); the hold ends.
     static func phaseChanged(_ held: Held?, phase: Phase, text: inout String) -> Held? {
         guard let held, AppState.inSessionPhases.contains(phase) else { return held }
         if text.trimmingCharacters(in: .whitespacesAndNewlines) == held.text { text = "" }
         return nil
     }
 
-    /// The field changed: an edit drops the hold, so a later landing never clears what Kevin is typing now.
+    /// The field changed: an edit drops the hold, so a later landing never clears what User is typing now.
     static func edited(_ held: Held?, text: String) -> Held? {
         guard let held else { return nil }
         let t = text.trimmingCharacters(in: .whitespacesAndNewlines)

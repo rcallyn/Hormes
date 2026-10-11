@@ -30,7 +30,7 @@ struct ThreadPane: View, Equatable {
     var phase: Phase = .asleep
     /// The daemon client is connected: nothing can arrive while it is not.
     var connected = true
-    /// Settings.typedWakes: a typed line while asleep opens a paid session (Kevin's word; default off).
+    /// Settings.typedWakes: a typed line while asleep opens a paid session (User's word; default off).
     var typedWakes = false
     /// The snapshot carries `app.version` (ComposerHold.skewed): main's typed line is refused, so the words stay.
     var skewed = false
@@ -49,7 +49,7 @@ struct ThreadPane: View, Equatable {
     private var isMain: Bool { thread.id == "main" }
 
     /// The streaming caret may show: the thread is live, the daemon connected, and — for main —
-    /// a session is open (its fragments arrive on this stream while Kevin speaks).
+    /// a session is open (its fragments arrive on this stream while User speaks).
     private var caretsOn: Bool {
         guard connected, thread.status.isLive else { return false }
         return isMain ? ConsoleTheme.sessionPhases.contains(phase) : true
@@ -111,7 +111,7 @@ private struct ThreadHeader: View {
         HStack(spacing: 6) {
             if live {
                 ConsoleDot(color: meta.color, live: true, size: 6)
-                    .consoleHelp(HelpCopy.liveThread)
+                    .help(HelpCopy.liveThread)
                     .accessibilityLabel("Live")
                     .transition(.opacity)
             }
@@ -127,9 +127,7 @@ private struct ThreadHeader: View {
             let url = actions.screenshotURL(path)
             ScreenshotThumb(url: url, onTap: { session.lightbox = ConsoleLightboxItem(url: url, caption: "\(thread.name) · last screenshot") }, width: 64)
                 .frame(height: 30)
-                .consoleHelp(id: ThreadPaneWords.shotTip + thread.id, spoken: ThreadPaneWords.lastShot) {
-                    ConsoleTipPreview(title: thread.name, subtitle: ThreadPaneWords.lastShot, url: url, meta: ConsoleTipPreview.fileMeta(url))
-                }
+                .help(ThreadPaneWords.lastShot)
                 .transition(.opacity)
         }
     }
@@ -144,13 +142,13 @@ private struct ThreadHeader: View {
                     Button { actions.send(.threadResume(threadId: thread.id)) } label: { Label("Resume", systemImage: ConsoleGlyph.play) }
                         .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
                         .fixedSize()
-                        .consoleHelp(HelpCopy.resumeThread(thread.name))
+                        .help(HelpCopy.resumeThread(thread.name))
                         .transition(.opacity)
                 } else {
                     Button { actions.send(.threadPause(threadId: thread.id)) } label: { Label("Pause", systemImage: ConsoleGlyph.pause) }
                         .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
                         .fixedSize()
-                        .consoleHelp(HelpCopy.pauseThread(thread.name))
+                        .help(HelpCopy.pauseThread(thread.name))
                         .transition(.opacity)
                 }
             }
@@ -158,14 +156,14 @@ private struct ThreadHeader: View {
                 Button { actions.send(.threadStop(threadId: thread.id)) } label: { Label("Stop", systemImage: ConsoleGlyph.stop) }
                     .buttonStyle(ConsoleButtonStyle(kind: thread.status.isBusy ? .danger : .ghost, height: 24, small: true))
                     .fixedSize()
-                    .consoleHelp(isMain ? HelpCopy.stop : HelpCopy.stopThread(thread.name))
+                    .help(isMain ? HelpCopy.stop : HelpCopy.stopThread(thread.name))
                     .accessibilityLabel("Stop \(thread.name)")
                     .transition(.opacity)
             }
             Button(action: close) { Label("Now", systemImage: ConsoleGlyph.chevronLeft) }
                 .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
                 .fixedSize()
-                .consoleHelp(HelpCopy.backNow)
+                .help(HelpCopy.backNow)
                 .accessibilityLabel("Back to Now")
         }
     }
@@ -236,7 +234,7 @@ private struct ThreadPaneBrief: View {
                 .font(ConsoleTheme.sans(11)).foregroundStyle(ConsoleTheme.fg2)
                 .lineLimit(1).truncationMode(.tail)
             Spacer(minLength: 8)
-            Text(ConsoleTipCard.threadMetaLine(thread))
+            Text(HelpText.threadMetaLine(thread))
                 .font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.titanium)
                 .lineLimit(1).fixedSize()
         }
@@ -296,7 +294,7 @@ private struct ThreadFeed: View {
 // MARK: - Composer
 
 /// 48pt, owns its top rule: the field addressed to the thread ("Say something to Slack…"; for
-/// main "Type to Hormes…", and while asleep "Type to Hormes… (asleep: press Go)" — the engine
+/// main quiet status placeholder — the engine
 /// refuses a typed line while asleep unless Settings.typedWakes, and the words stay in the
 /// field), Send while there is text. A question the thread waits on sits above the field with
 /// Allow / Deny (`thread.answer`): clicks only, never Return. A finished thread's field gives way
@@ -307,7 +305,7 @@ private struct ThreadComposer: View {
     let typedWakes: Bool
     /// The builds differ (`app.version`): main's typed line is refused, and the words stay (ComposerHold.submitted).
     let skewed: Bool
-    /// Main only: the newest line Kevin typed that reached the conversation (ComposerHold).
+    /// Main only: the newest line User typed that reached the conversation (ComposerHold).
     let lastTypedId: String?
     let close: () -> Void
 
@@ -331,15 +329,13 @@ private struct ThreadComposer: View {
 
     private var placeholder: String {
         if isMain {
-            if phase == .paused { return "Paused: press Go or type to resume" }
-            if asleep { return typedWakes ? "Type to wake Hormes…" : "Type to Hormes… (asleep: press Go)" }
-            return ConsoleTheme.sessionPhases.contains(phase) ? "Say something…" : "Type to Hormes…"
+            return ComposerWords.placeholder(phase: phase, paused: phase == .paused, typedWakes: typedWakes)
         }
         return "Say something to \(thread.name)…"
     }
 
     var body: some View {
-        let question = thread.status == .waitingKevin ? thread.question : nil
+        let question = thread.status == .waitingUser ? thread.question : nil
         VStack(spacing: 0) {
             ConsoleHairline()
             if let question, !question.isEmpty {
@@ -352,7 +348,7 @@ private struct ThreadComposer: View {
                         ConsoleIcon(name: "circle.slash.fill", tint: ConsoleTheme.fg3)
                         Text(off).font(ConsoleTheme.sans(12)).foregroundStyle(ConsoleTheme.fg3)
                             .lineLimit(1).truncationMode(.tail)
-                            .consoleHelp(off)
+                            .help(off)
                         Spacer(minLength: 0)
                     }
                     .transition(.opacity)
@@ -370,7 +366,7 @@ private struct ThreadComposer: View {
                         }
                         .buttonStyle(ConsoleButtonStyle(kind: hasText && question == nil ? .primary : .ghost, iconOnly: true, height: 32))
                         .disabled(!hasText)
-                        .consoleHelp(isMain && asleep && !typedWakes ? HelpCopy.sendAsleep : HelpCopy.send)
+                        .help(isMain && asleep && !typedWakes ? HelpCopy.sendAsleep : HelpCopy.send)
                         .accessibilityLabel("Send")
                     }
                     .transition(.opacity)
@@ -421,17 +417,17 @@ struct ThreadQuestionStrip: View {
                 .lineLimit(3).truncationMode(.tail)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
-                .consoleHelp(id: ThreadPaneWords.askTip + threadId, card: .question(name: name, question: question), edge: .below)
+                .help(HelpText.question(name: name, question: question))
                 .contentTransition(.opacity)
             Spacer(minLength: 8)
             Button("Allow") { actions.send(.threadAnswer(threadId: threadId, yes: true)) }
                 .buttonStyle(ConsoleButtonStyle(kind: .primary, height: 26, small: true))
                 .layoutPriority(1)
-                .consoleHelp(HelpCopy.allowThread(name))
+                .help(HelpCopy.allowThread(name))
             Button("Deny") { actions.send(.threadAnswer(threadId: threadId, yes: false)) }
                 .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 26, small: true))
                 .layoutPriority(1)
-                .consoleHelp(HelpCopy.denyThread(name))
+                .help(HelpCopy.denyThread(name))
         }
         .padding(EdgeInsets(top: 8, leading: 12, bottom: 0, trailing: 12))
         .accessibilityElement(children: .contain)

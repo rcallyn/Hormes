@@ -35,7 +35,7 @@ private struct ConversationHeaderMeta: View {
                     Text(cwd)
                         .font(ConsoleTheme.mono(11)).foregroundStyle(ConsoleTheme.titanium)
                         .lineLimit(1).truncationMode(.head)
-                        .consoleHelp(id: ConversationWords.cwdTip + agent.id, card: .path(title: ConsoleFormat.projectName(cwd) ?? agent.name, path: cwd), edge: .below)
+                        .help(HelpText.path(title: ConsoleFormat.projectName(cwd) ?? agent.name, path: cwd))
                 }
                 if let detail = agent.detail {
                     Text(detail).font(ConsoleTheme.sans(11)).foregroundStyle(ConsoleTheme.fg3).lineLimit(1).truncationMode(.tail)
@@ -56,7 +56,7 @@ struct ConversationPane: View, Equatable {
     /// The daemon client is connected (AppState.connected): nothing can arrive while it is not,
     /// so no indicator may claim it will.
     var connected = true
-    /// Rows Kevin brought back with "Load earlier" (AppState.prependedCount): the feed's ceiling
+    /// Rows User brought back with "Load earlier" (AppState.prependedCount): the feed's ceiling
     /// grows by as many. Held to a flat 400 the page he asked for would sit above the fold,
     /// unseen, and the next press would re-send the same `before` id — a no-op.
     var loaded = 0
@@ -112,7 +112,6 @@ struct ConversationPane: View, Equatable {
         // back to Now with Motion.snappy from this transaction.
         withAnimation(Motion.snappy) {
             session.openAgentId = nil
-            if session.isLedgerMode { session.showLive() }
         }
     }
 }
@@ -137,7 +136,7 @@ extension ConversationPane {
 
     /// The most rows the feed lays out: the newest 400 (AppState.maxTranscriptMessages trims the
     /// held transcript to the same; this is the view's own ceiling, so a transcript from an
-    /// older model never lays out thousands) plus what Kevin loaded (`loaded`).
+    /// older model never lays out thousands) plus what User loaded (`loaded`).
     static let maxRows = AppState.maxTranscriptMessages
 
     /// The newest `maxRows + loaded` of a transcript; the rest stay behind "Load earlier". The
@@ -148,7 +147,7 @@ extension ConversationPane {
     }
 
     /// The question a blocked session is waiting on, from its detail — the sessions
-    /// connector writes "… · needs Kevin's yes or no: Bash — pnpm test" — or nil
+    /// connector writes "… · needs User's yes or no: Bash — pnpm test" — or nil
     /// when the detail does not read like a permission question.
     static func permissionQuestion(_ agent: AgentInfo) -> String? {
         guard agent.status == .blocked, let detail = agent.detail?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty else { return nil }
@@ -252,7 +251,7 @@ private struct ConversationHeader: View {
                     // only while the agent is writing (the 30 s lease); the count rolls its digits.
                     if live {
                         ConsoleDot(color: brandColor(tool), live: typing, size: 6)
-                            .consoleHelp(typing ? HelpCopy.liveWriting : HelpCopy.liveQuiet)
+                            .help(typing ? HelpCopy.liveWriting : HelpCopy.liveQuiet)
                             .accessibilityLabel(typing ? "Live, writing" : "Live")
                             .transition(.opacity)
                     }
@@ -271,12 +270,12 @@ private struct ConversationHeader: View {
                     ViewThatFits(in: .horizontal) {
                         Button { actions.reveal(url) } label: { Label("Reveal", systemImage: ConsoleGlyph.folder) }
                             .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
-                            .consoleHelp(hint)
+                            .help(hint)
                         Button { actions.reveal(url) } label: {
                             Image(systemName: ConsoleGlyph.folder).font(.system(size: 11, weight: .medium))
                         }
                         .buttonStyle(ConsoleButtonStyle(kind: .ghost, iconOnly: true, height: 24, small: true))
-                        .consoleHelp(hint)
+                        .help(hint)
                         .accessibilityLabel("Reveal")
                     }
                     .layoutPriority(1)
@@ -286,7 +285,7 @@ private struct ConversationHeader: View {
                 Button(action: close) { Label("Stream", systemImage: ConsoleGlyph.chevronLeft) }
                     .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
                     .layoutPriority(1)
-                    .consoleHelp(HelpCopy.backStreamEsc)
+                    .help(HelpCopy.backStreamEsc)
                     .accessibilityLabel("Back to the live stream")
             }
             .padding(.horizontal, 12)
@@ -295,7 +294,7 @@ private struct ConversationHeader: View {
             ConsoleHairline()
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("\(tool.label) conversation, \(agent.name)")
+        .accessibilityLabel("Agent conversation, \(agent.name)")
     }
 }
 
@@ -308,7 +307,7 @@ private struct ConversationFeed: View {
     var typing = false
     /// The pane's viewer token, for the Reload / Try again re-open.
     var viewer = ""
-    /// Rows Kevin loaded (ConversationPane.loaded): the ceiling grows by as many.
+    /// Rows User loaded (ConversationPane.loaded): the ceiling grows by as many.
     var loaded = 0
 
     @Environment(\.consoleActions) private var actions
@@ -361,7 +360,6 @@ private struct ConversationFeed: View {
                                     // `typing` is the lease-bounded status, never the tail flag alone.
                                     ConversationRow(message: message, tool: tool,
                                                     live: typing && message.id == messages.last?.id, typing: typing)
-                                        .rowAppear(animated: settled && !loadingEarlier)
                                 }
                                 Color.clear.frame(height: 1).id(Self.bottomId)
                             }
@@ -387,7 +385,7 @@ private struct ConversationFeed: View {
                     .buttonStyle(JumpPillStyle())
                     .padding(.bottom, 12)
                     .transition(ConsoleMotion.arriveLeave)
-                    .consoleHelp(HelpCopy.latest)
+                    .help(HelpCopy.latest)
                 }
             }
             .animation(Motion.gentle, value: tracker.showJump)
@@ -413,7 +411,7 @@ private struct ConversationFeed: View {
             }
             .onChange(of: messages.first?.id) { oldId, _ in
                 loadingEarlier = false
-                // Rows arrived *above* the one Kevin was reading (an older page): hold his place.
+                // Rows arrived *above* the one User was reading (an older page): hold his place.
                 // The tracker still has the geometry from before this update; the document grows
                 // once it lays out, so act on the next turn. At the top — where "Load earlier" is
                 // pressed — anchor by the ROW: SwiftUI puts the row he was reading back under the
@@ -457,7 +455,7 @@ private struct ConversationFeed: View {
             ZStack {
                 if loadingEarlier {
                     HStack(spacing: 8) {
-                        ConsoleGlyphs(cols: 8, rows: 1)
+                        ProgressView().controlSize(.small)
                         Text("Loading…").font(ConsoleTheme.sans(12)).foregroundStyle(ConsoleTheme.fg3)
                     }
                     .frame(height: 24)
@@ -470,7 +468,7 @@ private struct ConversationFeed: View {
                         Label("Load earlier", systemImage: ConsoleGlyph.earlierLine)
                     }
                     .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
-                    .consoleHelp(remaining > 0 ? "\(remaining) earlier message\(remaining == 1 ? "" : "s")" : "Earlier messages")
+                    .help(remaining > 0 ? "\(remaining) earlier message\(remaining == 1 ? "" : "s")" : "Earlier messages")
                     .transition(.opacity)
                 }
             }
@@ -514,7 +512,7 @@ private struct ConversationFeed: View {
                     .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 24, small: true))
                 }
             } else {
-                ConsoleEmpty("Opening…") { ConsoleGlyphs(cols: 16, rows: 2) }
+                ConsoleEmpty("Opening…") { ProgressView().controlSize(.small) }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -561,7 +559,7 @@ private struct RightStamp: View {
             .font(ConsoleTheme.mono(11)).monospacedDigit().foregroundStyle(ConsoleTheme.fg3)
             .frame(width: stampWidth, alignment: .trailing)
             .padding(.leading, stampGap)
-            .consoleHelp(ConsoleFormat.fullDate(at))
+            .help(ConsoleFormat.fullDate(at))
     }
 }
 
@@ -585,11 +583,11 @@ private struct AssistantTurn: View {
         }
         .padding(.vertical, 5)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(tool.label): \(message.text)")
+        .accessibilityLabel("Agent: \(message.text)")
     }
 }
 
-/// Kevin's turn: the text on a raised surface, set against the right edge. A pending echo (a
+/// User's turn: the text on a raised surface, set against the right edge. A pending echo (a
 /// line just sent, before the tool's file confirms it) sits at 0.6 opacity under `clock.fill`;
 /// past `AppState.pendingEchoStaleMs` it says so — "Queued · not picked up yet" — since a
 /// `codex queue` that exited 0 says nothing about anyone draining it.
@@ -625,7 +623,7 @@ private struct UserTurn: View {
             ConsoleIcon(name: pending ? "clock.fill" : "person.fill", tint: ConsoleTheme.titanium)
                 .padding(.leading, iconGap)
                 .padding(.top, 4)
-                .consoleHelp(pending ? "Sent; waiting for the session to take it" : "You")
+                .help(pending ? "Sent; waiting for the session to take it" : "You")
                 .accessibilityLabel(pending ? "You, sending" : "You")
             RightStamp(at: message.at).padding(.top, 7)
         }
@@ -685,7 +683,7 @@ private struct ToolCallCard: View {
                         // Running → done / error / interrupted: the dot's colour crossfades (ConsoleDot);
                         // it pulses only while the agent is actually writing.
                         ConsoleDot(color: dotColor, live: call.status == .running && typing, size: 5)
-                            .consoleHelp(call.status.rawValue)
+                            .help(call.status.rawValue)
                             .accessibilityLabel(call.status.rawValue)
                         if let word = statusWord {
                             Text(word).font(ConsoleTheme.mono(11)).foregroundStyle(ConsoleTheme.titanium)
@@ -771,7 +769,7 @@ private struct ThinkingRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 0) {
             ZStack {
                 if live {
-                    ConsoleGlyphs(cols: 3, rows: 1, color: ConsoleTheme.titanium).frame(width: 20, height: 20).transition(.opacity)
+                    ProgressView().controlSize(.small).tint(ConsoleTheme.titanium).frame(width: 20, height: 20).transition(.opacity)
                 } else {
                     ConsoleIcon(name: "ellipsis", tint: ConsoleTheme.titanium).transition(.opacity)
                 }
@@ -881,17 +879,17 @@ private struct ConversationComposer: View {
                         .lineLimit(3).truncationMode(.tail)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
-                        .consoleHelp(id: ConversationWords.askTip + agent.id, card: .question(name: tool.label, question: question, detail: agent.detail), edge: .below)
+                        .help(HelpText.question(name: agent.name, question: question, detail: agent.detail))
                         .contentTransition(.opacity)
                     Spacer(minLength: 8)
                     Button("Allow") { answer("yes") }
                         .buttonStyle(ConsoleButtonStyle(kind: .primary, height: 26, small: true))
                         .layoutPriority(1)
-                        .consoleHelp(HelpCopy.sendYes)
+                        .help(HelpCopy.sendYes)
                     Button("Deny") { answer("no") }
                         .buttonStyle(ConsoleButtonStyle(kind: .ghost, height: 26, small: true))
                         .layoutPriority(1)
-                        .consoleHelp(HelpCopy.sendNo)
+                        .help(HelpCopy.sendNo)
                 }
                 .padding(EdgeInsets(top: 8, leading: 12, bottom: 0, trailing: 12))
                 .accessibilityElement(children: .contain)
@@ -904,18 +902,18 @@ private struct ConversationComposer: View {
                         ConsoleIcon(name: "circle.slash.fill", tint: ConsoleTheme.fg3)
                         Text(off).font(ConsoleTheme.sans(12)).foregroundStyle(ConsoleTheme.fg3)
                             .lineLimit(1).truncationMode(.tail)
-                            .consoleHelp(off)
+                            .help(off)
                         Spacer(minLength: 0)
                     }
                     .transition(.opacity)
                 } else {
                     Group {
-                        TextField("Message \(tool.label)…", text: $text)
+                        TextField("Message agent…", text: $text)
                             .consoleField(height: 32, focused: focused)
                             .focused($focused)
                             .onSubmit(submit)
                             .onExitCommand(perform: close)
-                            .accessibilityLabel("Message \(tool.label)")
+                            .accessibilityLabel("Message agent")
                         // One filled accent per strip: while a permission question is up,
                         // Allow has it and a typed answer is the secondary path.
                         Button(action: submit) {
@@ -923,7 +921,7 @@ private struct ConversationComposer: View {
                         }
                         .buttonStyle(ConsoleButtonStyle(kind: hasText && question == nil ? .primary : .ghost, iconOnly: true, height: 32))
                         .disabled(!hasText)
-                        .consoleHelp(HelpCopy.sendMode(ConversationPane.sendModeWords(agent)))
+                        .help(HelpCopy.sendMode(ConversationPane.sendModeWords(agent)))
                         .accessibilityLabel("Send")
                     }
                     .transition(.opacity)
