@@ -247,6 +247,9 @@ export interface ShellRunResult {
  * Commands run through an isolated, non-login zsh. `argv` is an internal capability
  * for fixed native operations and trusted self-edit checks, never a model parameter.
  */
+/** Windows has no process groups to signal; see the spawn in runShell. */
+const WINDOWS = process.platform === "win32";
+
 export async function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
   const started = Date.now();
   const timeoutMs = Math.min(MAX_SHELL_TIMEOUT_MS, Math.max(1000, opts.timeoutMs ?? DEFAULT_SHELL_TIMEOUT_MS));
@@ -271,7 +274,9 @@ export async function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
       const argv = sandbox ? [...sandbox.argv, opts.command] : opts.argv!;
       const [file, ...args] = argv;
       // Its own process group, so a timeout or a stop reaches the whole tree (zsh and the sleep it spawned), not just the shell.
-      child = spawn(file!, args, { cwd: opts.cwd ?? process.env["HOME"], env: sandbox?.env ?? scrubbedEnv(opts.env ?? process.env), stdio: ["pipe", "pipe", "pipe"], detached: true });
+      // Not on Windows: a detached child has no console, and the clipboard (Set-Clipboard) silently does nothing there;
+      // the tree is ended with taskkill /T instead.
+      child = spawn(file!, args, { cwd: opts.cwd ?? process.env["HOME"], env: sandbox?.env ?? scrubbedEnv(opts.env ?? process.env), stdio: ["pipe", "pipe", "pipe"], detached: !WINDOWS, windowsHide: true });
     } catch (e) {
       sandbox?.dispose();
       resolve({ code: null, signal: null, stdout: "", stderr: "", timedOut: false, cancelled: false, ms: Date.now() - started, error: (e as Error).message });
@@ -279,6 +284,10 @@ export async function runShell(opts: ShellRunOptions): Promise<ShellRunResult> {
     }
     const signalTree = (sig: NodeJS.Signals): void => {
       if (child.exitCode !== null || child.signalCode !== null) return;
+      if (WINDOWS && child.pid) {
+        spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => child.kill(sig));
+        return;
+      }
       try {
         if (child.pid) process.kill(-child.pid, sig);
         else child.kill(sig);
