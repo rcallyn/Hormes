@@ -44,6 +44,24 @@ internal static class Windows
         try { using var p = Process.GetProcessById(pid); return p.ProcessName; } catch { return ""; }
     }
 
+    /// <summary>
+    /// The process that owns a top-level window. A Store app's window (Calculator, Settings, Photos) belongs to
+    /// ApplicationFrameHost; the app itself owns a child CoreWindow, and that is the process reported.
+    /// </summary>
+    public static int OwnerPid(IntPtr h)
+    {
+        GetWindowThreadProcessId(h, out uint pid);
+        if (!ProcessName((int)pid).Equals("ApplicationFrameHost", StringComparison.OrdinalIgnoreCase)) return (int)pid;
+        uint hosted = 0;
+        EnumChildWindows(h, (child, _) =>
+        {
+            GetWindowThreadProcessId(child, out uint c);
+            if (c != pid) { hosted = c; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return hosted != 0 ? (int)hosted : (int)pid;
+    }
+
     public static bool Matches(int pid, string wanted)
     {
         string w = wanted.Trim().ToLowerInvariant();
@@ -62,8 +80,8 @@ internal static class Windows
 
     private static Win Describe(IntPtr h)
     {
-        GetWindowThreadProcessId(h, out uint pid);
-        return new Win(h.ToInt64(), (int)pid, AppName((int)pid), WindowTitle(h), FrameBounds(h));
+        int pid = OwnerPid(h);
+        return new Win(h.ToInt64(), pid, AppName(pid), WindowTitle(h), FrameBounds(h));
     }
 
     /// <summary>Visible, un-minimised, un-cloaked top-level windows, front to back; untitled tool windows are left out.</summary>
@@ -78,11 +96,11 @@ internal static class Windows
             string title = WindowTitle(h);
             if ((ex & WS_EX_TOOLWINDOW) != 0 && (ex & WS_EX_APPWINDOW) == 0) return true;
             if (title.Length == 0) return true;
-            GetWindowThreadProcessId(h, out uint pid);
+            int pid = OwnerPid(h);
             if (pid == self) return true;
             var b = FrameBounds(h);
             if (b.Width <= 0 || b.Height <= 0) return true;
-            list.Add(new Win(h.ToInt64(), (int)pid, AppName((int)pid), title, b));
+            list.Add(new Win(h.ToInt64(), pid, AppName(pid), title, b));
             return true;
         }, IntPtr.Zero);
         return list;
@@ -106,8 +124,7 @@ internal static class Windows
     {
         var h = GetForegroundWindow();
         if (h == IntPtr.Zero) return null;
-        GetWindowThreadProcessId(h, out uint pid);
-        return (h, (int)pid);
+        return (h, OwnerPid(h));
     }
 
     public static Dictionary<string, object?> OpFrontmost()

@@ -55,6 +55,7 @@ internal static class Native
     [DllImport("user32.dll")] internal static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] internal static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+    [DllImport("user32.dll")] internal static extern bool EnumChildWindows(IntPtr parent, EnumWindowsProc cb, IntPtr lParam);
     [DllImport("user32.dll")] internal static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MonitorEnumProc cb, IntPtr lParam);
     [DllImport("user32.dll")] internal static extern bool GetMonitorInfo(IntPtr hMon, ref MONITORINFO mi);
     [DllImport("user32.dll")] internal static extern IntPtr GetDC(IntPtr h);

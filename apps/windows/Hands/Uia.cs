@@ -259,8 +259,8 @@ internal static class Uia
     private static Snapshot Build(IntPtr hwnd, int maxNodes, int maxDepth, double maxMs)
     {
         var sw = Stopwatch.StartNew();
-        GetWindowThreadProcessId(hwnd, out uint pid);
-        var snap = new Snapshot { Hwnd = hwnd, Pid = (int)pid, App = Windows.AppName((int)pid), Window = WindowTitle(hwnd), BuiltAt = DateTime.UtcNow };
+        int pid = Windows.OwnerPid(hwnd);
+        var snap = new Snapshot { Hwnd = hwnd, Pid = pid, App = Windows.AppName(pid), Window = WindowTitle(hwnd), BuiltAt = DateTime.UtcNow };
         var cr = MakeCache();
         var walker = TreeWalker.ControlViewWalker;
         using (cr.Activate())

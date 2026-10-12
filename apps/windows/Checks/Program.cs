@@ -24,6 +24,9 @@ if (renderAt >= 0 && renderAt + 1 < args.Length)
 
 // --hands: drive the native helper (build/hands) through Notepad; needs the desktop, so it is not part of the default run.
 if (Array.IndexOf(args, "--hands") >= 0) return Hormes.Windows.Checks.HandsCheck.Run(FindRepo());
+// --hands-click: click and focus through the helper, on Calculator. --console-pass [dir]: click through the live Console and capture each page.
+if (Array.IndexOf(args, "--hands-click") >= 0) return Hormes.Windows.Checks.ClickCheck.RunClick(FindRepo());
+if (Array.IndexOf(args, "--console-pass") is var cp and >= 0) return Hormes.Windows.Checks.ClickCheck.RunConsolePass(FindRepo(), cp + 1 < args.Length ? args[cp + 1] : Path.Combine(FindRepo(), "build", "console-pass"));
 
 var failures = 0;
 void Check(bool ok, string what, string detail = "")
