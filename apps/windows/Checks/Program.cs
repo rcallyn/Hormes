@@ -191,6 +191,12 @@ Check(WhisperTranscriber.Clean(" [BLANK_AUDIO] ") == "" && WhisperTranscriber.Cl
 {
     var spoken = ElevenLabsSpeaker.Speakable("## Done\n- Opened **Spotify** and [your playlist](https://open.spotify.com/x).\n```sh\nrm -rf /tmp/x\n```\nRun `pnpm test` next.");
     Check(spoken == "Done Opened Spotify and your playlist. (code on screen) Run pnpm test next.", "answers are made speakable: no markdown, links or code read out", spoken);
+    Check(SpokenReply.Pick("Done. The dentist is on Friday at 3pm.") == "Done. The dentist is on Friday at 3pm.", "a short answer is spoken");
+    Check(SpokenReply.Pick("Here's your week:\n- Mon: Calc quiz\n- Wed: Essay due\n- Fri: Dentist") is null, "a list is for reading, not spoken");
+    Check(SpokenReply.Pick("Run this:\n```sh\npnpm test\n```") is null, "code is not spoken");
+    Check(SpokenReply.Pick("It's at https://example.com/page.") is null, "a link is not spoken");
+    Check(SpokenReply.Pick(string.Join(" ", Enumerable.Repeat("This sentence explains one more detail.", 8))) is null, "a long explanation is not spoken");
+    Check(SpokenReply.Pick("Yes. It's 72 degrees. Bring a jacket tonight. Rain after nine.") is null, "four sentences is too many to speak");
 }
 
 // The Mac's sounds play here: every .caf parses to PCM of a sensible length.
@@ -282,6 +288,7 @@ if (wavArg >= 0 && wavArg + 1 < args.Length)
     }
 }
 
+Console.WriteLine($"info Windows output muted now: {Hormes.Windows.Audio.SystemAudio.IsMuted()}");
 Console.WriteLine(failures == 0 ? "all checks passed" : $"{failures} check(s) failed");
 return failures == 0 ? 0 : 1;
 

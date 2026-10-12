@@ -118,6 +118,10 @@
           <DockPanel Grid.Row="3" Margin="0,8,0,0">
             <Button x:Name="ConsoleButton" Content="Console" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Console_Click"/>
             <Button x:Name="StopButton" Content="Stop" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Stop_Click"/>
+            <Button x:Name="SpeakButton" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Speak_Click" Padding="10,5"
+                    ToolTip="Speak replies: short answers out loud (not while Windows is muted)">
+              <TextBlock x:Name="SpeakGlyph" Text="&#xE767;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"/>
+            </Button>
             <Button x:Name="MicButton" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Mic_Click" Padding="10,5"
                     ToolTip="Talk to Hormes (or clap twice). It stops when you finish speaking.">
               <TextBlock x:Name="MicGlyph" Text="&#xE720;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14"/>

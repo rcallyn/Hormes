@@ -61,6 +61,8 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
     public void Say(string text)
     {
         if (!Enabled) return;
+        // Windows muted: nothing would be heard, so nothing goes to ElevenLabs.
+        if (Audio.SystemAudio.IsMuted()) return;
         if (!Available)
         {
             ApiKey = ReadKey(); // added since start?

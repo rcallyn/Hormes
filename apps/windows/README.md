@@ -65,7 +65,10 @@ streamed so the first words play while the rest is generated. Put `ELEVENLABS_AP
 `~/.hormes/env`; `ELEVENLABS_VOICE_ID` pins a voice, otherwise the app finds Alistair in your voices
 or the Voice Library. Markdown and code are not read out, and long answers stop at ~1200 characters.
 A new turn or Stop cuts the voice off, Hormes's own voice never triggers the clap detector, and
-**Speak replies** in the tray menu turns it off.
+**Speak replies** (the speaker button in the notch, the tray menu or Settings) turns it on and off. Only short,
+conversational answers are spoken (`Speech/SpokenReply.cs`: at most 3 sentences and 280 characters, no
+lists, tables, code, links or headings); anything meant for reading stays on screen and costs no credits.
+Nothing is sent to ElevenLabs while Windows output is muted or at zero volume (`Audio/SystemAudio.cs`).
 
 The clap detector is stricter than the Mac's, because the mic is open all day: a double clap must
 come out of 0.3 s of quiet, the two claps must be within 2.5x of each other in strength and 0.2–0.6 s

@@ -60,7 +60,8 @@ public partial class App : Application
         voice = new VoiceInput();
         notch.AttachVoice(voice);
         speaker = new ElevenLabsSpeaker { Enabled = settings.SpeakReplies };
-        replies = new RepliesToSpeak(speaker.Say);
+        // Only short, conversational answers are spoken; anything meant for reading stays on screen.
+        replies = new RepliesToSpeak(line => { if (SpokenReply.Pick(line) is { } spoken) speaker.Say(spoken); });
         planner = new Planner(client);
 
         // One place changes the voice switches; the tray menu and the Console show the same state.
@@ -78,7 +79,10 @@ public partial class App : Application
             speaker.Enabled = on;
             if (!on) speaker.Stop();
             tray?.SetChecks(settings.Clap, settings.SpeakReplies);
+            notch.SetSpeak(on);
         }
+        notch.SetSpeak(settings.SpeakReplies);
+        notch.SpeakToggled += on => Dispatcher.BeginInvoke(() => SetSpeak(on));
         var services = new ConsoleServices
         {
             Client = client, Daemon = daemon, Planner = planner, Voice = voice, Speaker = speaker, Settings = settings,

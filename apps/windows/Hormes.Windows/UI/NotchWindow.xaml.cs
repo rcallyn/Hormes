@@ -53,6 +53,20 @@ public partial class NotchWindow : Window
     public event Action? ConsoleRequested;
     /// <summary>Stop was pressed: whatever Hormes is saying stops too.</summary>
     public event Action? StopPressed;
+    /// <summary>The speaker button was pressed: the new value of Speak replies.</summary>
+    public event Action<bool>? SpeakToggled;
+    private bool speakOn;
+
+    /// <summary>Show Speak replies on or off (the tray and the Console change it too).</summary>
+    public void SetSpeak(bool on) => Dispatcher.BeginInvoke(() =>
+    {
+        speakOn = on;
+        SpeakGlyph.Text = on ? "" : "";
+        SpeakGlyph.Foreground = on ? System.Windows.Media.Brushes.White : (System.Windows.Media.Brush)FindResource("Dim");
+        SpeakButton.ToolTip = on ? "Speaking short replies (not while Windows is muted). Click to stop speaking." : "Replies are not spoken. Click to speak short replies.";
+    });
+
+    private void Speak_Click(object sender, RoutedEventArgs e) => SpeakToggled?.Invoke(!speakOn);
 
     public NotchWindow(EngineClient client)
     {
