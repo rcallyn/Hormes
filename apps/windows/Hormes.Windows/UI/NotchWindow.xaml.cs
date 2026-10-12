@@ -37,12 +37,15 @@ public partial class NotchWindow : Window
     private readonly DispatcherTimer openDelay = new() { Interval = TimeSpan.FromMilliseconds(90) };
     private readonly DispatcherTimer closeDelay = new() { Interval = TimeSpan.FromMilliseconds(380) };
     private readonly DispatcherTimer pillTimer = new() { Interval = TimeSpan.FromSeconds(4) };
-    /// <summary>Text inserted in one go (a dictation app's paste) sends itself once the field has been still this long.</summary>
-    private readonly DispatcherTimer dictationSend = new() { Interval = TimeSpan.FromMilliseconds(700) };
     /// <summary>How long an answer keeps the island open when the pointer is elsewhere.</summary>
     private readonly DispatcherTimer replyHold = new() { Interval = TimeSpan.FromSeconds(12) };
     private readonly DispatcherTimer replyGiveUp = new() { Interval = TimeSpan.FromMinutes(3) };
     private NotchContent content = NotchContent.Disconnected;
+    /// <summary>How long the last exchange stays on the island after it was last shown; older, it opens clean.</summary>
+    private static readonly TimeSpan StaleAfter = TimeSpan.FromMinutes(2);
+    /// <summary>The hero line already shown and set aside: until a new one arrives, the island opens without it.</summary>
+    private string? clearedHero;
+    private DateTime heroShownAt = DateTime.MinValue;
     private bool isOpen;
     private bool awaitingReply;
     private VoiceInput? voice;
@@ -81,7 +84,6 @@ public partial class NotchWindow : Window
         openDelay.Tick += (_, _) => { openDelay.Stop(); SetOpen(true); };
         closeDelay.Tick += (_, _) => { closeDelay.Stop(); if (!HoldOpen) SetOpen(false); };
         pillTimer.Tick += (_, _) => { pillTimer.Stop(); FadePill(false); };
-        dictationSend.Tick += (_, _) => { dictationSend.Stop(); Send(); };
         replyHold.Tick += (_, _) => { replyHold.Stop(); if (!IsMouseOver && !HoldOpen) SetOpen(false); };
         replyGiveUp.Tick += (_, _) => { replyGiveUp.Stop(); awaitingReply = false; if (!IsMouseOver) SetOpen(false); };
 
@@ -176,7 +178,9 @@ public partial class NotchWindow : Window
         BrainText.Text = c.Phase == "disconnected" ? "connecting to the daemon" : c.BrainReady ? "brain ready" : "brain starting";
 
         var dim = (System.Windows.Media.Brush)FindResource("Dim");
-        if (c.Phase == "disconnected" || string.IsNullOrEmpty(c.Hero))
+        if (clearedHero is not null && c.Hero != clearedHero) clearedHero = null; // a new line: show it
+        var cleared = clearedHero is not null && c.Hero == clearedHero && c.Approval is null && c.Ring is null;
+        if (c.Phase == "disconnected" || string.IsNullOrEmpty(c.Hero) || cleared)
         {
             AskedText.Visibility = Visibility.Collapsed;
             HeroText.Text = c.Phase == "disconnected" ? "Waiting for hormesd…" : "Nothing yet. Clap twice or press the mic to talk, or type.";
@@ -263,6 +267,7 @@ public partial class NotchWindow : Window
     private void ShowReply()
     {
         awaitingReply = false;
+        heroShownAt = DateTime.UtcNow; // a fresh answer is never stale
         SetOpen(true);
         closeDelay.Stop();
         replyHold.Stop();
@@ -285,6 +290,13 @@ public partial class NotchWindow : Window
     {
         if (open == isOpen) return;
         isOpen = open;
+        if (open && !awaitingReply && content.Hero is { Length: > 0 } hero && DateTime.UtcNow - heroShownAt > StaleAfter && hero != clearedHero)
+        {
+            // The last exchange is old news: open clean (it stays in the Console's history).
+            clearedHero = hero;
+            Apply(content);
+        }
+        if (!open) heroShownAt = DateTime.UtcNow;
         var duration = open ? OpenDuration : CloseDuration;
         var ease = new CubicEase { EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn };
         Island.BeginAnimation(WidthProperty, new DoubleAnimation(open ? OpenWidth : RestWidth, duration) { EasingFunction = ease });
@@ -329,7 +341,6 @@ public partial class NotchWindow : Window
         }
         else if (e.Key == Key.Escape)
         {
-            dictationSend.Stop();
             SayBox.Clear();
             SetOpen(false);
             e.Handled = true;
@@ -339,22 +350,12 @@ public partial class NotchWindow : Window
     private void SayBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
     {
         SayHint.Visibility = SayBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
-        // Dictation, not typing: several characters at once (a dictation app such as Wispr Flow pastes its
-        // transcript). It sends itself once the field is still; a keystroke after it is an edit, and then Enter sends.
-        var added = e.Changes.Sum(c => c.AddedLength);
-        if (added == 0 || SayBox.Text.Trim().Length == 0) return;
-        if (added >= 2)
-        {
-            dictationSend.Stop();
-            dictationSend.Start();
-        }
-        else dictationSend.Stop();
+        // Nothing sends but Enter: a paste or a dictation app's text waits in the field like typing does.
     }
 
     /// <summary>Send the Say field to Hormes: Claude answers it (text mode) and the island shows the answer.</summary>
     private void Send()
     {
-        dictationSend.Stop();
         var text = SayBox.Text.Trim();
         if (text.Length == 0) return;
         SayBox.Clear();

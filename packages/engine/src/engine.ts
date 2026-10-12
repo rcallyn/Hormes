@@ -3702,13 +3702,16 @@ export class Engine extends EventEmitter<EngineEvents> {
     // and never past owner authentication. Allow in the notch authenticates first (answerThread) and then says "yes"
     // here; a yes typed or dictated on its own while authentication is required approves nothing.
     let confirmation = false;
+    if (YES_PATTERN.test(text.trim())) log.info(`text turn: yes; pending ${this.confirmations.pending ? `${this.confirmations.pending.id}${this.confirmations.expired ? " (expired)" : ""}` : "none"}, owner auth ${this.confirmations.requiresOwner ? "required" : "satisfied or off"}, floor ${this.desk.floorLane() ?? "free"}`);
     if (YES_PATTERN.test(text.trim()) && this.confirmations.pending) {
       if (this.confirmations.requiresOwner) {
         this.toast("Press Allow and confirm with Windows Hello to approve this action.", "warn");
         log.info(`text turn: yes while owner authentication is required → not armed`);
         return;
       }
-      confirmation = this.confirmations.arm((g) => this.ledger.append({ at: this.now(), type: "grant", chainId: this.confirmations.conversationId, app: g.app, actionClass: g.actionClass, until: g.until })) !== undefined;
+      const armed = this.confirmations.arm((g) => this.ledger.append({ at: this.now(), type: "grant", chainId: this.confirmations.conversationId, app: g.app, actionClass: g.actionClass, until: g.until }));
+      confirmation = armed !== undefined && armed.expired !== true;
+      log.info(`text turn: yes → ${armed === undefined ? "not armed" : armed.expired ? "expired; the action asks again" : `armed ${armed.id}`}`);
     }
     // The text-mode transcript keeps wall-clock ms on its timeline: no session clock runs while asleep.
     const userItem = this.transcript.pushTyped(text, this.now(), "user");
@@ -4549,9 +4552,11 @@ export class Engine extends EventEmitter<EngineEvents> {
       try {
         const result = await this.pool.background.request<{ pendingId: string; approved: boolean }>("owner_approval", { pendingId, description: pending.description }, 50_000);
         if (result.approved !== true || result.pendingId !== pendingId || this.desk.floor?.laneId !== laneId || this.confirmations.pending !== pending || !this.confirmations.authenticatePending(pendingId!)) {
+          log.info(`thread.answer yes ${threadId}: owner approval ${result.approved === true ? "verified but the question changed" : "not given"}`);
           this.toast("Action was not approved.", "warn");
           return;
         }
+        log.info(`thread.answer yes ${threadId}: owner verified for ${pendingId}`);
       } catch {
         this.toast("Device-owner authentication unavailable; action remains blocked.", "warn");
         return;
