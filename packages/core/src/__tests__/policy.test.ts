@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AutomationAction } from "@hormes/protocol";
-import { PRESENCE_ABSENT, TRASH_REASON, classifyAction, classifyToolScope, classifyAppleScript, classifyAutomation, classifyPath, classifyUrl, costLine, grantClassOf, isLoopbackHost, isPrivateHost, namedPaths, openPathReason, presenceGated, presenceReason, pressKeyReason, secretPathReason, shellCwdReason, shellNeverReason, type AutomationContext, type Decision, type Presence, type Verdict } from "../policy.ts";
+import { PRESENCE_ABSENT, TRASH_REASON, classifyAction, classifyToolScope, classifyAppleScript, classifyAutomation, classifyPath, classifyUrl, costLine, grantClassOf, isLoopbackHost, isPrivateHost, namedPaths, openPathReason, presenceGated, presenceReason, pressKeyReason, secretPathReason, shellCwdReason, shellNeverReason, windowsShellWorkspaceReason, type AutomationContext, type Decision, type Presence, type Verdict } from "../policy.ts";
 
 const HOME = "/Users/user";
 
@@ -899,4 +899,12 @@ test("coding scope admits only its tool list and retains ordinary approval and s
   assert.equal(classifyToolScope("agent_start", {}, "suggested_agent", coding).verdict, "refuse");
   assert.equal(classifyAction({ kind: "agent_start", text: "Build EvoSim", cwd: HOME + "/Downloads/EvoSim", home: HOME }).verdict, "confirm");
   assert.equal(classifyPath({ path: HOME + "/Downloads/EvoSim/.env", access: "read", home: HOME }).verdict, "refuse");
+});
+
+test("windowsShellWorkspaceReason refuses broad and system roots, case-insensitively, and allows a project folder", () => {
+  // win32.resolve accepts forward slashes, which keeps the table free of escapes.
+  const home = "C:/Users/Ada"; const temp = "C:/Users/Ada/AppData/Local/Temp"; const sys = ["C:/Windows", "C:/Program Files", "C:/Program Files (x86)"];
+  const refused = ["C:/", "c:/", "C:/Users", "C:/USERS/", "C:/Users/Ada", "c:/users/ada/", "C:/Users/Ada/AppData/Local/Temp", "C:/Users/Ada/AppData/Local", "C:/Users/Ada/AppData", "C:/Windows", "C:/windows/System32", "C:/Program Files/nodejs", "C:/PROGRAM FILES (X86)", "//server/share"];
+  for (const p of refused) assert.ok(windowsShellWorkspaceReason(p, home, temp, sys), p);
+  for (const p of ["C:/Users/Ada/Projects/demo", "D:/work/demo", "C:/Users/Ada/Documents"]) assert.equal(windowsShellWorkspaceReason(p, home, temp, sys), undefined, p);
 });

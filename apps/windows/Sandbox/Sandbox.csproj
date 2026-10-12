@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- hormes-sandbox: runs one program inside an AppContainer (no capabilities, so no network) with
+       ACLs on only the folders it is given. packages/brain/src/sandbox.ts launches it on Windows. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <AssemblyName>hormes-sandbox</AssemblyName>
+    <RootNamespace>Hormes.Sandbox</RootNamespace>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!-- The apphost needs its dll and runtimeconfig beside it, so all four land in <repo>/build. -->
+  <Target Name="CopyToRepoBuild" AfterTargets="Build">
+    <PropertyGroup>
+      <RepoBuildDir>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\build'))</RepoBuildDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <SandboxFile Include="$(OutDir)hormes-sandbox.exe;$(OutDir)hormes-sandbox.dll;$(OutDir)hormes-sandbox.runtimeconfig.json;$(OutDir)hormes-sandbox.deps.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(SandboxFile)" DestinationFolder="$(RepoBuildDir)" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

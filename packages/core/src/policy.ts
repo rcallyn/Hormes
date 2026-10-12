@@ -1,5 +1,5 @@
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, resolve, sep, win32 } from "node:path";
 import { READ_SELECTED_GROCERY_NOTE_SCRIPT, AUTOMATION_ACTING_KINDS, AUTOMATION_ACTION_KINDS, AUTOMATION_ACTIONS_MAX, AUTOMATION_FOLDER_WATCHERS_MAX, AUTOMATION_LINE_CHARS, AUTOMATION_POLL_MIN_S, AUTOMATION_WAKE_COOLDOWN_MIN_S, recipeNamed, type AutomationAction, type AutomationActionKind, type AutomationClauses, type AutomationSettings, type AutomationWhen, type WorkScope } from "@hormes/protocol";
 import { REPO_ROOT, envFilePath } from "./env.ts";
 
@@ -39,12 +39,30 @@ export const SHELL_SANDBOX_SECRET_PATTERN = String.raw`(^|/)([.]env[^/]*|[.]ssh|
 
 /** Shell sandboxes need a concrete workspace, never a whole account or shared root. */
 export function shellWorkspaceReason(cwd: string, home = homedir()): string | undefined {
+  if (process.platform === "win32") {
+    return windowsShellWorkspaceReason(cwd, home, tmpdir(), [process.env["SystemRoot"] ?? "C:\\Windows", process.env["ProgramFiles"] ?? "C:\\Program Files", process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)", process.env["ProgramData"] ?? "C:\\ProgramData"]) ?? shellCwdReason(cwd, home);
+  }
   const path = resolve(cwd).replace(/^\/private\/var\//, "/var/").replace(/^\/private\/tmp$/, "/tmp");
   const broad = ["/", "/Users", home, dirname(home), "/tmp", "/var", "/var/tmp", "/System", "/Library", "/Applications", "/opt", "/opt/homebrew", "/usr", "/usr/local"];
   if (/^\/Users\/[^/]+$/.test(path) || /^(?:\/System|\/Library|\/Applications|\/dev|\/bin|\/sbin|\/usr|\/etc|\/private\/etc|\/opt\/homebrew|\/var\/(?:db|root|run|log))(?:\/|$)/.test(path)) return "run_shell cannot use a system, device, application or installed-runtime folder as a writable workspace";
   for (let temp = tmpdir().replace(/^\/private\/var\//, "/var/"); temp !== "/"; temp = dirname(temp)) broad.push(temp);
   if (broad.includes(path)) return "run_shell needs a specific workspace folder; a home, system or shared root is too broad for isolation";
   return shellCwdReason(cwd, home);
+}
+
+/** The Windows spelling of the same rule, pure so it is table-tested on any host:
+ * drive roots, the Users folder, the home folder and its parent, the temp folder and
+ * every ancestor are too broad; system and program folders (and everything under
+ * them) are never a writable workspace. Compared case-insensitively. */
+export function windowsShellWorkspaceReason(cwd: string, home: string, temp: string, systemRoots: readonly string[]): string | undefined {
+  const norm = (p: string): string => win32.resolve(p).replace(/[\\/]+$/, "").toLowerCase();
+  const path = norm(cwd);
+  const root = win32.parse(win32.resolve(cwd)).root.replace(/[\\/]+$/, "").toLowerCase();
+  for (const r of systemRoots) { const n = norm(r); if (path === n || path.startsWith(`${n}\\`)) return "run_shell cannot use a system, device, application or installed-runtime folder as a workspace"; }
+  const broad = new Set<string>([root, `${root}\\users`, norm(home), norm(win32.dirname(win32.resolve(home)))]);
+  for (let t = win32.resolve(temp); ; t = win32.dirname(t)) { broad.add(norm(t)); if (win32.dirname(t) === t) break; }
+  if (path === root || broad.has(path) || (path.startsWith("\\\\") && path.split("\\").length <= 4)) return "run_shell needs a specific workspace folder; a home, system or shared root is too broad for isolation";
+  return undefined;
 }
 
 export interface ActionContext {

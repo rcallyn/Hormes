@@ -124,6 +124,34 @@ over stdio, same protocol (`packages/hands/src/native.ts`). Build it with `pnpm 
   reads it back with `focused_text` and closes it without saving (it uses your keyboard for a moment).
   The protocol test is `packages/hands/src/__tests__/windows-helper.test.ts` (skips when not built).
 
+## Shell sandbox (`apps/windows/Sandbox`)
+
+`run_shell` on Windows runs PowerShell inside an AppContainer through `hormes-sandbox.exe`; the macOS
+Seatbelt counterpart is `packages/brain/src/sandbox.ts`. Without the exe the shell fails closed ("shell
+isolation is unavailable; no command was run"): there is no unrestricted fallback.
+
+```sh
+dotnet build apps/windows/Sandbox     # also copies hormes-sandbox.{exe,dll,runtimeconfig.json,deps.json} to <repo>/build/
+```
+
+`HORMES_WINDOWS_SANDBOX` overrides the exe path (default `build/hormes-sandbox.exe`; `build/` is ignored).
+
+```
+hormes-sandbox --workspace <dir> --scratch <dir> [--read-only] [--write-file <path>]... [--read <dir>]... -- <program> <args...>
+```
+
+The container (profile `Hormes.Shell`) has no capabilities: no network, loopback included. It reaches only
+what gets an ACE for its SID: scratch (full), the workspace (modify, or read+execute with `--read-only`),
+each `--write-file` (modify; created empty first if missing), each `--read` folder (read+execute). The ACEs
+are removed on exit, on Ctrl+C or console close, with a counted lease so a finishing command does not strip
+a background job sharing the folder. The child runs in a kill-on-close Job object, so ending
+`hormes-sandbox` (taskkill /T) ends the tree. Setup failures print `hormes-sandbox: <reason>` and exit 126.
+
+Caveats: a hard kill of `hormes-sandbox` itself (TerminateProcess, power loss) skips the revoke and leaves
+its ACEs on the workspace and scratch folders until the next sandbox run on them removes them; only
+processes inside the container can use them. The workspace's `.git` is writable (Seatbelt denies it).
+The TS side refuses a workspace holding secret-named entries, hard links, or a protected/secret root.
+
 ## The Console
 
 An Apple-style window (tray icon, the notch's Console button, or `Hormes.exe --console [page]`):

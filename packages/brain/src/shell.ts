@@ -438,7 +438,9 @@ export class BackgroundJobs {
     const fd = openSync(logPath, "a");
     let child: ChildProcess;
     try {
-      child = spawn(sandbox.argv[0]!, [...sandbox.argv.slice(1), command], { cwd, env: sandbox.env, detached: true, stdio: ["ignore", fd, fd] });
+      // On Windows the job is not detached (no process groups there); hormes-sandbox's kill-on-close Job object
+      // makes ending that one process end the tree, and killTree uses taskkill /T.
+      child = spawn(sandbox.argv[0]!, [...sandbox.argv.slice(1), command], { cwd, env: sandbox.env, detached: !WINDOWS, windowsHide: true, stdio: ["ignore", fd, fd] });
     } catch (error) {
       sandbox.dispose();
       throw error;
@@ -474,7 +476,7 @@ export class BackgroundJobs {
   /** Explicit capability to stop one owned job; never give a sandbox permission to signal unrelated processes. */
   stop(pid: number, signal: NodeJS.Signals = "SIGTERM"): boolean {
     if (!this.jobs.has(pid)) return false;
-    try { process.kill(-pid, signal); return true; } catch { return false; }
+    return killTree(pid, signal);
   }
 
   /** Stop the jobs started at or after `since` (User pressed stop mid-task); returns how many were signalled. */
@@ -483,33 +485,30 @@ export class BackgroundJobs {
     for (const job of this.list()) {
       if (job.startedAt < since) continue;
       n++;
-      try {
-        process.kill(-job.pid, "SIGTERM");
-      } catch {
-        try {
-          process.kill(job.pid, "SIGTERM");
-        } catch {
-          // already gone
-        }
-      }
+      killTree(job.pid, "SIGTERM");
     }
     return n;
   }
 
   /** Stop every job Hormes started (the whole process group of each). */
   stopAll(): void {
-    for (const pid of this.pids()) {
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch {
-        try {
-          process.kill(pid, "SIGTERM");
-        } catch {
-          // already gone
-        }
-      }
+    for (const pid of this.pids()) killTree(pid, "SIGTERM");
+  }
+}
+
+/** End a background job's whole tree: its process group on POSIX, taskkill /T /F on Windows (where
+ * hormes-sandbox's Job object also ends whatever outlives the kill). True when a signal was sent. */
+function killTree(pid: number, signal: NodeJS.Signals): boolean {
+  if (WINDOWS) {
+    try {
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
+      return true;
+    } catch {
+      return false;
     }
   }
+  try { process.kill(-pid, signal); return true; } catch { /* not a group leader; try the process */ }
+  try { process.kill(pid, signal); return true; } catch { return false; }
 }
 
 // ------------------------------------------------------------- applescript ---
