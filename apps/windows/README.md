@@ -37,13 +37,26 @@ where the Mac's would be, with the five voice bars. Hover it and the island open
 what Hormes is doing, the last line said, an approval (Allow / Deny) or a problem (with its
 remedy), live threads, a Say field (Enter sends `say-text`), Stop and Console. It closes when the
 pointer leaves, unless the Say field holds a draft; Esc clears and closes. The tab never takes
-focus on hover and stays out of Alt+Tab; its transparent pixels pass the mouse through.
+focus on hover and stays out of Alt+Tab; its transparent pixels pass the mouse through. It sits
+on the primary monitor, centred, scaled to that monitor (`UI/NotchPlacement.cs`).
+
+## Talking to it: Claude, typed or dictated
+
+The app starts the daemon with `HORMES_TEXT_BRAIN=1`: with no voice session open, a line from the
+Say field goes straight to the main brain (Claude Code, on your Claude login) and the answer comes
+back on the transcript (`Engine.textTurn`). No OpenAI or Gemini key, no Live session.
+
+Speech comes from [Wispr Flow](https://wisprflow.ai): with the island open, hold Wispr's
+push-to-talk (Ctrl+Win) and the caret moves into the Say field, so Wispr types there instead of into
+the app underneath. Text that lands in one go sends itself after 0.7 s of quiet; typed text waits
+for Enter. **Ctrl+Alt+Space** opens the island from anywhere with the caret in the field. An answer
+holds the island open for 12 s so it can be read.
 
 ## Not yet on Windows
 
 | Mac piece | Status here |
 |---|---|
-| Voice (AVAudioEngine, echo guard, barge-in duck) | not yet: the app says `audio: false` and the daemon starts with `HORMES_AUTO_WAKE=0`, so Go would open a session with no mic |
+| Voice (AVAudioEngine, echo guard, barge-in duck) | speech in via Wispr Flow (above); no Live voice session and no spoken answers yet. The app says `audio: false` and the daemon starts with `HORMES_AUTO_WAKE=0` |
 | The hands (`packages/hands/native`, AX) | not yet: UI Automation + SendInput |
 | Shell sandbox (`sandbox-exec`) | not yet: AppContainer / job objects |
 | Calendar (EventKit) | not yet |

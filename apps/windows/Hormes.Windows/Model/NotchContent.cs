@@ -14,11 +14,13 @@ public sealed record NotchContent(
     bool BrainReady,
     string? HeroSpeaker,
     string? Hero,
+    /// <summary>The last line User typed or dictated, shown small over the answer.</summary>
+    string? Asked,
     IReadOnlyList<NotchThread> Threads,
     NotchProblem? Problem,
     NotchApproval? Approval)
 {
-    public static readonly NotchContent Disconnected = new("disconnected", false, null, null, Array.Empty<NotchThread>(), null, null);
+    public static readonly NotchContent Disconnected = new("disconnected", false, null, null, null, Array.Empty<NotchThread>(), null, null);
 
     public bool Asleep => Phase is "asleep" or "disconnected";
     public bool Paused => Phase == "paused";
@@ -53,12 +55,20 @@ public sealed record NotchContent(
         var brainReady = snap.TryGetProperty("brainReady", out var br) && br.ValueKind == JsonValueKind.True;
 
         // The hero: the newest transcript line; else what the main thread is working on.
-        string? heroSpeaker = null, hero = null;
+        string? heroSpeaker = null, hero = null, asked = null;
         if (snap.TryGetProperty("transcript", out var transcript) && transcript.ValueKind == JsonValueKind.Array && transcript.GetArrayLength() > 0)
         {
-            var last = transcript[transcript.GetArrayLength() - 1];
+            var n = transcript.GetArrayLength();
+            var last = transcript[n - 1];
             hero = Str(last, "text")?.Trim();
             heroSpeaker = Str(last, "speaker");
+            // Hormes answering: the line it answers goes over it (the newest of User's before the answer).
+            for (var i = n - 1; i >= 0; i--)
+            {
+                if (Str(transcript[i], "speaker") != "user") continue;
+                asked = Str(transcript[i], "text")?.Trim();
+                break;
+            }
         }
 
         var threads = new List<NotchThread>();
@@ -100,7 +110,7 @@ public sealed record NotchContent(
         if (snap.TryGetProperty("approval", out var a) && a.ValueKind == JsonValueKind.Object)
             approval = new NotchApproval(Str(a, "id") ?? "", Str(a, "threadId") ?? "main", Str(a, "description") ?? "", a.TryGetProperty("requiresOwner", out var ro) && ro.ValueKind == JsonValueKind.True);
 
-        return new NotchContent(phase, brainReady, heroSpeaker, hero, threads, problem, approval);
+        return new NotchContent(phase, brainReady, heroSpeaker, hero, asked, threads, problem, approval);
     }
 
     private static string? Str(JsonElement obj, string name) =>

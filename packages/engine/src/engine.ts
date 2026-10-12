@@ -3666,6 +3666,71 @@ export class Engine extends EventEmitter<EngineEvents> {
    * opens no session. Asleep, it is a toast and nothing opens, even with typedWakes on. During a handshake it waits
    * for the session like any line, then sleeps it.
    */
+  /** Text mode's turns, one after another; and the running one's abort (`pressStop`). */
+  private textChain: Promise<void> = Promise.resolve();
+  private textAbort: AbortController | undefined;
+
+  /**
+   * Text mode (HORMES_TEXT_BRAIN=1, which apps/windows sets): with no Live session open, a typed or dictated line
+   * goes straight to the main brain and its answer comes back as a line of Hormes's on the transcript. No voice
+   * session opens, so nothing is billed but the brain itself. One turn at a time: a line sent while one runs waits.
+   */
+  private textTurn(text: string): Promise<void> {
+    const run = this.textChain.then(() => this.runTextTurn(text));
+    this.textChain = run.catch(() => undefined);
+    return run;
+  }
+
+  private async runTextTurn(text: string): Promise<void> {
+    const brain = this.brain;
+    if (!brain) {
+      this.toast("no brain is ready yet", "warn");
+      return;
+    }
+    const t0 = performance.now();
+    const windowMs = 15 * 60_000;
+    // The text-mode transcript keeps wall-clock ms on its timeline: no session clock runs while asleep.
+    const userItem = this.transcript.pushTyped(text, this.now(), "user");
+    const items = this.transcript.since(this.now() - windowMs);
+    const abort = new AbortController();
+    this.textAbort = abort;
+    this.setPhase("thinking");
+    this.scheduleSnapshot();
+    const say = (line: string): void => {
+      const clean = line.trim();
+      if (!clean || abort.signal.aborted) return;
+      this.transcript.pushTyped(clean, this.now(), "hormes");
+      this.scheduleSnapshot();
+    };
+    const task: BrainTask = {
+      delegationId: newId("text"),
+      request: text,
+      dialogue: this.transcript.render(windowMs, this.now(), this.userName),
+      userDialogue: items.filter((i) => i.speaker === "user").map((i) => i.text).join("\n"),
+      confirmation: false,
+      offsetMs: userItem?.startMs ?? this.now(),
+      signal: abort.signal,
+    };
+    const sink: BrainSink = {
+      thinking: (line) => log.debug(`text turn: ${line.slice(0, 120)}`),
+      commentary: say,
+      step: () => this.scheduleSnapshot(),
+      screenshot: () => undefined,
+    };
+    try {
+      const result = await brain.handle(task, sink);
+      if (result.summary) say(result.summary);
+      else if (result.status === "failed") say(`That failed: ${result.error ?? "unknown error"}`);
+      log.info(`text turn: ${text.length} chars → ${result.status} in ${Math.round(performance.now() - t0)} ms`);
+    } catch (e) {
+      if (!abort.signal.aborted) say(`That failed: ${(e as Error).message}`);
+    } finally {
+      if (this.textAbort === abort) this.textAbort = undefined;
+      if (!this.live && this.phase === "thinking") this.setPhase("asleep");
+      this.scheduleSnapshot();
+    }
+  }
+
   async sayText(text: string, scope: { readonly reviewAgent?: string } = {}): Promise<void> {
     const t0 = performance.now();
     const t = text.trim();
@@ -3722,6 +3787,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       log.info(`say-text: ${t.length} chars during a handshake → the session did not open in ${Math.round(performance.now() - t0)} ms; not sent`);
       return;
     }
+    if (!this.live && process.env["HORMES_TEXT_BRAIN"] === "1" && !scope.reviewAgent) return this.textTurn(t);
     if (!this.live) {
       if (this.settings.typedWakes !== true) {
         this.toast("asleep · press Go", "warn");
@@ -4038,6 +4104,12 @@ export class Engine extends EventEmitter<EngineEvents> {
    */
   async pressStop(source = "stop"): Promise<void> {
     const t0 = this.now();
+    if (this.textAbort) {
+      // Text mode's running turn: Stop cancels it like any delegation.
+      this.textAbort.abort();
+      this.textAbort = undefined;
+      void this.brain?.cancel();
+    }
     const live = this.live;
     const wasPaused = this.pauseInfo !== undefined;
     const wasConnecting = this.connecting;
@@ -6617,7 +6689,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     } else {
       this.outlivedSince = 0;
     }
-    if (!live && !this.connecting && !this.pauseInfo && this.phase !== "asleep" && this.phase !== "error") {
+    if (!live && !this.connecting && !this.pauseInfo && !this.textAbort && this.phase !== "asleep" && this.phase !== "error") {
       this.incident(`phase:${this.phase}`, `watchdog: phase ${this.phase} with no session; asleep`);
       this.setPhase("asleep");
     }
@@ -6641,6 +6713,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       if (!this.connecting) this.setPhase("paused");
       return;
     }
+    if (!this.live && !this.connecting && this.textAbort) return this.setPhase("thinking");
     if (!this.live || this.connecting) {
       if (this.phase !== "connecting" && this.phase !== "error") this.setPhase("asleep");
       return;

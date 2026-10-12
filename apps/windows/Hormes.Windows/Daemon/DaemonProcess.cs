@@ -102,6 +102,8 @@ public sealed class DaemonProcess : IDisposable
             psi.ArgumentList.Add(Ipc.SocketPath);
             // No microphone yet: a voice session would open (and bill) with nothing to hear.
             psi.Environment["HORMES_AUTO_WAKE"] = "0";
+            // Text mode: typed and dictated lines go straight to the brain (Claude Code) with no voice session.
+            psi.Environment["HORMES_TEXT_BRAIN"] = "1";
             psi.Environment["HORMES_REPO"] = repo;
             var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
             p.OutputDataReceived += (_, e) => WriteLog(e.Data);

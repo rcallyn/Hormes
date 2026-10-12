@@ -26,7 +26,7 @@ namespace Hormes.Windows.UI;
 public partial class NotchWindow : Window
 {
     private const double RestWidth = 150, RestHeight = 22;
-    private const double OpenWidth = 440, OpenHeight = 196;
+    private const double OpenWidth = 440, OpenHeight = 280;
     private static readonly Duration OpenDuration = new(TimeSpan.FromMilliseconds(220));
     private static readonly Duration CloseDuration = new(TimeSpan.FromMilliseconds(180));
 
@@ -34,8 +34,17 @@ public partial class NotchWindow : Window
     private readonly DispatcherTimer openDelay = new() { Interval = TimeSpan.FromMilliseconds(90) };
     private readonly DispatcherTimer closeDelay = new() { Interval = TimeSpan.FromMilliseconds(380) };
     private readonly DispatcherTimer pillTimer = new() { Interval = TimeSpan.FromSeconds(4) };
+    /// <summary>Text inserted in one go (Wispr Flow's paste) sends itself once the field has been still this long.</summary>
+    private readonly DispatcherTimer dictationSend = new() { Interval = TimeSpan.FromMilliseconds(700) };
+    /// <summary>While the island is open: is Wispr Flow's push-to-talk (Ctrl+Win) held?</summary>
+    private readonly DispatcherTimer wisprWatch = new() { Interval = TimeSpan.FromMilliseconds(40) };
+    /// <summary>How long an answer keeps the island open when the pointer is elsewhere.</summary>
+    private readonly DispatcherTimer replyHold = new() { Interval = TimeSpan.FromSeconds(12) };
+    private readonly DispatcherTimer replyGiveUp = new() { Interval = TimeSpan.FromMinutes(3) };
     private NotchContent content = NotchContent.Disconnected;
     private bool isOpen;
+    private bool awaitingReply;
+    private DateTime wisprHeldAt = DateTime.MinValue;
     private IntPtr hwnd;
 
     public event Action? ConsoleRequested;
@@ -47,6 +56,10 @@ public partial class NotchWindow : Window
         openDelay.Tick += (_, _) => { openDelay.Stop(); SetOpen(true); };
         closeDelay.Tick += (_, _) => { closeDelay.Stop(); if (!HoldOpen) SetOpen(false); };
         pillTimer.Tick += (_, _) => { pillTimer.Stop(); FadePill(false); };
+        dictationSend.Tick += (_, _) => { dictationSend.Stop(); Send(); };
+        wisprWatch.Tick += (_, _) => WatchWispr();
+        replyHold.Tick += (_, _) => { replyHold.Stop(); if (!IsMouseOver && !HoldOpen) SetOpen(false); };
+        replyGiveUp.Tick += (_, _) => { replyGiveUp.Stop(); awaitingReply = false; if (!IsMouseOver) SetOpen(false); };
 
         HitZone.MouseEnter += (_, _) => PointerIn();
         Island.MouseEnter += (_, _) => PointerIn();
@@ -100,15 +113,33 @@ public partial class NotchWindow : Window
         PhaseText.Text = c.PhaseWord;
         BrainText.Text = c.Phase == "disconnected" ? "connecting to the daemon" : c.BrainReady ? "brain ready" : "brain starting";
 
-        if (!string.IsNullOrEmpty(c.Hero))
+        var dim = (System.Windows.Media.Brush)FindResource("Dim");
+        if (c.Phase == "disconnected" || string.IsNullOrEmpty(c.Hero))
         {
-            HeroText.Text = c.HeroSpeaker == "user" ? $"You: {c.Hero}" : c.Hero;
-            HeroText.Foreground = System.Windows.Media.Brushes.White;
+            AskedText.Visibility = Visibility.Collapsed;
+            HeroText.Text = c.Phase == "disconnected" ? "Waiting for hormesd…" : "Nothing yet. Hold Ctrl+Win to talk (Wispr Flow), or type.";
+            HeroText.Foreground = dim;
+        }
+        else if (c.HeroSpeaker == "user")
+        {
+            // Asked, not answered yet.
+            AskedText.Text = $"You: {c.Hero}";
+            AskedText.Visibility = Visibility.Visible;
+            HeroText.Text = c.Phase == "thinking" ? "Thinking…" : "";
+            HeroText.Foreground = dim;
         }
         else
         {
-            HeroText.Text = c.Phase == "disconnected" ? "Waiting for hormesd…" : "Nothing yet. Type below to ask Hormes.";
-            HeroText.Foreground = (System.Windows.Media.Brush)FindResource("Dim");
+            AskedText.Text = c.Asked is { Length: > 0 } asked ? $"You: {asked}" : "";
+            AskedText.Visibility = AskedText.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            var fresh = HeroText.Text != c.Hero;
+            HeroText.Text = c.Hero;
+            HeroText.Foreground = System.Windows.Media.Brushes.White;
+            if (fresh)
+            {
+                HeroScroll.ScrollToTop();
+                if (awaitingReply) ShowReply();
+            }
         }
 
         if (c.Approval is { } a)
@@ -144,8 +175,21 @@ public partial class NotchWindow : Window
 
     // ------------------------------------------------------------------ hover
 
-    /// <summary>A draft in the Say field, or the field focused: the island stays open.</summary>
-    private bool HoldOpen => SayBox.IsKeyboardFocused && SayBox.Text.Length > 0;
+    /// <summary>A draft in the Say field, or a line sent and not answered yet: the island stays open.</summary>
+    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || Dictating;
+
+    /// <summary>Wispr Flow is (or was a moment ago) listening into the Say field: its text lands a second or two after the key is let go.</summary>
+    private bool Dictating => DateTime.UtcNow - wisprHeldAt < TimeSpan.FromSeconds(6);
+
+    /// <summary>The answer to a line sent from here landed: hold the island open long enough to read it.</summary>
+    private void ShowReply()
+    {
+        awaitingReply = false;
+        SetOpen(true);
+        closeDelay.Stop();
+        replyHold.Stop();
+        replyHold.Start();
+    }
 
     private void PointerIn()
     {
@@ -172,12 +216,15 @@ public partial class NotchWindow : Window
 
         if (open)
         {
+            wisprWatch.Start();
             Open.Visibility = Visibility.Visible;
             Open.BeginAnimation(OpacityProperty, new DoubleAnimation(1, duration) { BeginTime = TimeSpan.FromMilliseconds(70) });
             Peek.BeginAnimation(OpacityProperty, new DoubleAnimation(0, CloseDuration));
         }
         else
         {
+            wisprWatch.Stop();
+            replyHold.Stop();
             var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(90));
             fade.Completed += (_, _) => { if (!isOpen) Open.Visibility = Visibility.Collapsed; };
             Open.BeginAnimation(OpacityProperty, fade);
@@ -201,29 +248,83 @@ public partial class NotchWindow : Window
     {
         if (e.Key == Key.Enter)
         {
-            var text = SayBox.Text.Trim();
-            if (text.Length == 0) return;
-            SayBox.Clear();
-            _ = client.SendCommandAsync(new { type = "say-text", text });
+            Send();
             e.Handled = true;
         }
         else if (e.Key == Key.Escape)
         {
+            dictationSend.Stop();
+            wisprHeldAt = DateTime.MinValue;
             SayBox.Clear();
             SetOpen(false);
             e.Handled = true;
         }
     }
 
-    private void SayBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e) =>
+    private void SayBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
+    {
         SayHint.Visibility = SayBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        // Dictation, not typing: several characters at once (Wispr Flow pastes its transcript), or text arriving
+        // while Wispr was just listening here. It sends itself once the field is still; a keystroke after it is an
+        // edit, and then Enter sends as usual.
+        var added = e.Changes.Sum(c => c.AddedLength);
+        if (added == 0 || SayBox.Text.Trim().Length == 0) return;
+        if (added >= 2 || Dictating)
+        {
+            dictationSend.Stop();
+            dictationSend.Start();
+        }
+        else dictationSend.Stop();
+    }
+
+    /// <summary>Send the Say field to Hormes: Claude answers it (text mode) and the island shows the answer.</summary>
+    private void Send()
+    {
+        dictationSend.Stop();
+        var text = SayBox.Text.Trim();
+        if (text.Length == 0) return;
+        SayBox.Clear();
+        wisprHeldAt = DateTime.MinValue;
+        awaitingReply = true;
+        replyGiveUp.Stop();
+        replyGiveUp.Start();
+        _ = client.SendCommandAsync(new { type = "say-text", text });
+    }
+
+    /// <summary>
+    /// While the island is open, Wispr Flow's push-to-talk (Ctrl+Win held) puts the caret in the Say field, so what
+    /// Wispr hears is typed here and not into the app underneath. Polled, not hooked: nothing is intercepted, and
+    /// Wispr works as always everywhere else.
+    /// </summary>
+    private void WatchWispr()
+    {
+        var ctrl = Keyboard.IsKeyDown(Key.LeftCtrl) || Keyboard.IsKeyDown(Key.RightCtrl) || (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+        var win = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+        if (!(ctrl && win)) return;
+        wisprHeldAt = DateTime.UtcNow;
+        closeDelay.Stop();
+        if (!SayBox.IsKeyboardFocused) TakeFocus();
+    }
+
+    /// <summary>From anywhere (Ctrl+Alt+Space): open the island with the caret in the Say field, ready for Wispr or the keyboard.</summary>
+    public void Summon()
+    {
+        SetOpen(true);
+        closeDelay.Stop();
+        TakeFocus();
+        wisprHeldAt = DateTime.UtcNow;
+    }
 
     private void SayBox_FocusChanged(object sender, KeyboardFocusChangedEventArgs e)
     {
         if (!SayBox.IsKeyboardFocused && !IsMouseOver) PointerOut();
     }
 
-    private void Stop_Click(object sender, RoutedEventArgs e) => _ = client.SendCommandAsync(new { type = "stop" });
+    private void Stop_Click(object sender, RoutedEventArgs e)
+    {
+        awaitingReply = false;
+        _ = client.SendCommandAsync(new { type = "stop" });
+    }
 
     private void Console_Click(object sender, RoutedEventArgs e)
     {
@@ -250,7 +351,7 @@ public partial class NotchWindow : Window
     // ------------------------------------------------------------------ window plumbing
 
     /// <summary>The window's size in XAML (DIPs) before scaling.</summary>
-    private const double BaseWidth = 480, BaseHeight = 280;
+    private const double BaseWidth = 480, BaseHeight = 360;
 
     /// <summary>Top edge of the primary monitor, centred and scaled to it: where the notch would be (NotchPlacement).</summary>
     private void Place()
@@ -267,6 +368,11 @@ public partial class NotchWindow : Window
         hwnd = new WindowInteropHelper(this).Handle;
         var ex = GetWindowLong(hwnd, GWL_EXSTYLE);
         SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+        // Ctrl+Alt+Space from anywhere: the island opens with the caret in the Say field (Summon).
+        HwndSource.FromHwnd(hwnd)?.AddHook(WndProc);
+        if (!RegisterHotKey(hwnd, SummonHotkeyId, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, VK_SPACE))
+            ShowToast("Ctrl+Alt+Space is taken by another app; hover the notch instead", "warn");
+        Closed += (_, _) => UnregisterHotKey(hwnd, SummonHotkeyId);
     }
 
     /// <summary>The Say field was clicked: let the window take keyboard focus.</summary>
@@ -274,8 +380,17 @@ public partial class NotchWindow : Window
     {
         if (hwnd == IntPtr.Zero) return;
         SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) & ~WS_EX_NOACTIVATE);
+        // Windows lets only the foreground thread hand the foreground over: share its input queue for the moment it
+        // takes, or Wispr would go on typing into the app underneath.
+        var foreground = GetForegroundWindow();
+        var theirs = GetWindowThreadProcessId(foreground, IntPtr.Zero);
+        var mine = GetCurrentThreadId();
+        var attached = foreground != hwnd && theirs != mine && AttachThreadInput(mine, theirs, true);
+        SetForegroundWindow(hwnd);
+        if (attached) AttachThreadInput(mine, theirs, false);
         Activate();
         SayBox.Focus();
+        Keyboard.Focus(SayBox);
     }
 
     /// <summary>Closed again: back to never taking focus.</summary>
@@ -294,6 +409,44 @@ public partial class NotchWindow : Window
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
+
+    private const int VK_CONTROL = 0x11, VK_LWIN = 0x5B, VK_RWIN = 0x5C;
+    private const int WM_HOTKEY = 0x0312, SummonHotkeyId = 1;
+    private const uint MOD_ALT = 0x1, MOD_CONTROL = 0x2, MOD_NOREPEAT = 0x4000, VK_SPACE = 0x20;
+
+    private IntPtr WndProc(IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == WM_HOTKEY && wParam.ToInt32() == SummonHotkeyId)
+        {
+            Summon();
+            handled = true;
+        }
+        return IntPtr.Zero;
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+    [DllImport("user32.dll")]
+    private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
     private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
