@@ -41,6 +41,12 @@ public sealed record NotchContent(
 
     private static readonly HashSet<string> Terminal = new() { "done", "failed", "stopped" };
 
+    /// <summary>
+    /// Problems about Mac pieces this app has not ported yet: always raised on Windows, and their
+    /// remedies cannot fix them here. The Console still lists them; the notch stays quiet.
+    /// </summary>
+    private static readonly HashSet<string> NotPortedYet = new() { "hands.helper" };
+
     public static NotchContent From(JsonElement snap)
     {
         var phase = Str(snap, "phase") ?? "asleep";
@@ -73,10 +79,13 @@ public sealed record NotchContent(
         }
 
         NotchProblem? problem = null;
-        if (snap.TryGetProperty("problems", out var ps) && ps.ValueKind == JsonValueKind.Array && ps.GetArrayLength() > 0)
+        var problems = snap.TryGetProperty("problems", out var ps) && ps.ValueKind == JsonValueKind.Array
+            ? ps.EnumerateArray().Where(x => !NotPortedYet.Contains(Str(x, "kind") ?? "")).ToList()
+            : new List<JsonElement>();
+        if (problems.Count > 0)
         {
-            var count = ps.GetArrayLength();
-            var p = ps[count - 1];
+            var count = problems.Count;
+            var p = problems[count - 1];
             string? label = null, command = null;
             if (p.TryGetProperty("remedy", out var remedy) && remedy.ValueKind == JsonValueKind.Object)
             {
