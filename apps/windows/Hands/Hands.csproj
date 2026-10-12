@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- hormes-hands for Windows: the engine's native helper (packages/hands/native on the Mac), JSON lines over stdio.
+       Publish with `pnpm build:hands` (dotnet publish -> build/hands/hormes-hands.exe). -->
+  <PropertyGroup>
+    <!-- WinExe: stdio pipes still work, and no console window flashes when the daemon spawns it. -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <!-- WPF is here for UIAutomationClient (System.Windows.Automation) and the PNG encoder; no window is ever made. -->
+    <UseWPF>true</UseWPF>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>hormes-hands</AssemblyName>
+    <RootNamespace>Hormes.Hands</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>2.0.0</Version>
+    <NoWarn>$(NoWarn);WPF0001;CA1416</NoWarn>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+</Project>

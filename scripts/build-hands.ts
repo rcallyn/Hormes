@@ -15,7 +15,22 @@ function formatBytes(bytes: number): string {
   return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(2)} MiB` : `${(bytes / 1024).toFixed(0)} KiB`;
 }
 
+// Windows: the C# helper (apps/windows/Hands), published framework-dependent into build/hands/ (the whole folder is the helper).
+function buildWindows(): void {
+  const project = join(repoRoot, "apps", "windows", "Hands");
+  const out = join(buildDir, "hands");
+  const started = performance.now();
+  console.log(`[build-hands] dotnet publish ${project} -> ${out}`);
+  execFileSync("dotnet", ["publish", project, "-c", "Release", "-o", out], { stdio: "inherit" });
+  console.log(`[build-hands] output: ${join(out, "hormes-hands.exe")}`);
+  console.log(`[build-hands] build time: ${((performance.now() - started) / 1000).toFixed(1)} s`);
+}
+
 function main(): void {
+  if (process.platform === "win32") {
+    buildWindows();
+    return;
+  }
   if (process.platform !== "darwin") {
     throw new Error(`hormes-hands is macOS-only (platform is ${process.platform})`);
   }

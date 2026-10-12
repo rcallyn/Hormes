@@ -497,7 +497,8 @@ export class ComputerToolset {
             showCursor: true,
           }, 6000);
         } catch (e) {
-          if (!(e instanceof NativeRequestError) || (e.detail.code !== "permission_denied" && e.detail.code !== "capture_failed" && e.detail.code !== "unavailable")) throw e;
+          // The screencapture fallback is macOS-only: on Windows the helper's own error is the answer.
+          if (process.platform === "win32" || !(e instanceof NativeRequestError) || (e.detail.code !== "permission_denied" && e.detail.code !== "capture_failed" && e.detail.code !== "unavailable")) throw e;
           shot = await this.fallbackScreenshot(display, budget);
           log.warn(`native screenshot unavailable (${e.detail.code}); used screencapture`);
         }

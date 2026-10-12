@@ -95,6 +95,35 @@ The checks also run every Mac sound through the CAF reader. `--render <dir>` dra
 (every page, both themes, the todo and event sheets) to PNGs with sample data, for looking at the UI
 without a screen.
 
+## The hands: `hormes-hands.exe`
+
+The engine's native helper (the Mac's Swift `hormes-hands`) in C#, `apps/windows/Hands`: JSON lines
+over stdio, same protocol (`packages/hands/src/native.ts`). Build it with `pnpm build:hands` (runs
+`dotnet publish apps/windows/Hands -c Release -o build/hands`, framework-dependent: the whole
+`build/hands/` folder is the helper); `handsBin` resolves to `build/hands/hormes-hands.exe` on Windows
+(`packages/core/src/env.ts`, `HORMES_HANDS_BIN` overrides).
+
+- Coordinates are physical pixels. The process is Per-Monitor-V2 aware, so a "point" is a pixel,
+  every display's `scale` is 1 and the origin is the top-left of the primary monitor (negative to its
+  left or above). Screenshots downscale to `maxLongEdge` / `maxPixels`; their `scale` is that factor.
+- Real: `hello`, `--permissions` (all true: Windows has no per-app grants for these), `displays`,
+  `screenshot` / `zoom` (GDI BitBlt, cursor drawn in), `cursor`, `move`, `click`, `mouse_down/up`,
+  `drag`, `scroll`, `key` (`cmd` is Ctrl, `option` is Alt), `hold_key`, `type`, `wait`, `frontmost`,
+  `windows`, `open_app` (Start Menu shortcut, else ShellExecute), `focus_app`, `focused_text`,
+  `element_at`, `find_element`, `ax_tree` (UI Automation, roles mapped to `AXButton`/`AXTextField`/...),
+  `user_idle`, `owner_approval` (Windows Hello via `UserConsentVerifier`; unavailable, cancelled,
+  timed out or any error is `approved: false`).
+- `type` sets the value through UI Automation when the focused field is empty and writable (verified
+  by reading it back), otherwise sends Unicode key events. A password field is refused. A stop in flight
+  is not supported (the Mac uses SIGURG): the loop stops on the user's own input or the focus moving.
+- `user_idle` cannot tell key from click from scroll: every field is the time since the last input of any
+  kind; `foreignMs` leaves out the helper's own posts.
+- Not on Windows: `browser_*` answer `bad_request` "not supported on Windows"; `excludePids` is accepted
+  but GDI cannot leave a process's windows out of a shot; `locked` is never reported.
+- `dotnet run --project apps/windows/Checks -- --hands` opens Notepad, types "hello" through the helper,
+  reads it back with `focused_text` and closes it without saving (it uses your keyboard for a moment).
+  The protocol test is `packages/hands/src/__tests__/windows-helper.test.ts` (skips when not built).
+
 ## The Console
 
 An Apple-style window (tray icon, the notch's Console button, or `Hormes.exe --console [page]`):

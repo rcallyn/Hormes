@@ -207,7 +207,7 @@ export function readConfig(): HormesConfig {
     idleSleepMinutes: Number(env["HORMES_IDLE_SLEEP_MINUTES"] || 10),
     logLevel: level === "debug" || level === "warn" || level === "error" ? level : "info",
     claudeBin: env["HORMES_CLAUDE_BIN"] || undefined,
-    handsBin: env["HORMES_HANDS_BIN"] || join(REPO_ROOT, "build", "hormes-hands"),
+    handsBin: env["HORMES_HANDS_BIN"] || (process.platform === "win32" ? join(REPO_ROOT, "build", "hands", "hormes-hands.exe") : join(REPO_ROOT, "build", "hormes-hands")),
     memoryModel: env["HORMES_MEMORY_MODEL"] || undefined,
   };
 }

@@ -12,6 +12,7 @@ using NAudio.Wave;
 // Offline checks for the Windows app's ears:
 //   dotnet run --project apps/windows/Checks                      claps + endpointer
 //   dotnet run --project apps/windows/Checks -- --whisper a.wav   also transcribe a recording through the real path
+//   dotnet run --project apps/windows/Checks -- --hands           Notepad through build/hands/hormes-hands.exe (types on your desktop)
 // Exit code 1 when any check fails.
 
 var renderAt = Array.IndexOf(args, "--render");
@@ -20,6 +21,9 @@ if (renderAt >= 0 && renderAt + 1 < args.Length)
     Hormes.Windows.Checks.Render.Run(args[renderAt + 1]);
     return 0;
 }
+
+// --hands: drive the native helper (build/hands) through Notepad; needs the desktop, so it is not part of the default run.
+if (Array.IndexOf(args, "--hands") >= 0) return Hormes.Windows.Checks.HandsCheck.Run(FindRepo());
 
 var failures = 0;
 void Check(bool ok, string what, string detail = "")

@@ -438,6 +438,8 @@ export class NativeHandsProcess extends EventEmitter implements NativeHands {
   /** SIGURG to the resident helper: its type loop stops at the next grapheme. Harmless to a helper that does not listen. */
   private signalTypeCancel(): void {
     const pid = this.child?.pid;
+    // Windows has no SIGURG: process.kill would end the helper. Its type loop checks between graphemes for the user's own input and for the focus moving instead.
+    if (process.platform === "win32") return;
     if (typeof pid !== "number" || pid <= 0 || !this.ready) return;
     try {
       process.kill(pid, TYPE_CANCEL_SIGNAL);
