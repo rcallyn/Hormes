@@ -6,7 +6,7 @@ import { basename, dirname, join } from "node:path";
 import { ipcPath, logger } from "@hormes/core";
 import type { ToolResult } from "@hormes/hands";
 import { specByName } from "@hormes/brain";
-import { MAIN_THREAD_ID, PROTOCOL_VERSION, isAudioState, isEngineCommand, type AudioState, type AudioTelemetryShed, type EngineCommand, type EngineEvent, type Grant, type LedgerDayTotals, type OverlayCommand, type Problem } from "@hormes/protocol";
+import { MAIN_THREAD_ID, PROTOCOL_VERSION, isAudioState, isEngineCommand, isPlannerCommand, type PlannerCommand, type PlannerState, type AudioState, type AudioTelemetryShed, type EngineCommand, type EngineEvent, type Grant, type LedgerDayTotals, type OverlayCommand, type Problem } from "@hormes/protocol";
 import { FRAME_JSON, FRAME_MIC, FRAME_SPEAKER, FrameParser, encodeFrame, encodeJson, parseClientMessage, type DaemonMessage } from "./wire.ts";
 
 /**
@@ -89,6 +89,8 @@ export const LEDGER_TOTALS_WARM_MS = 10_000;
 /** What the server needs from the engine; the real Engine satisfies it, and the test fakes implement all of it. */
 export interface EngineLike {
   readonly work?: PhoneWork;
+  /** The planner (todos and calendar). Optional: a tool-only host and the older fakes have none. */
+  readonly planner?: { state(): PlannerState; run(cmd: PlannerCommand): Promise<{ readonly ok: boolean; readonly error?: string; readonly id?: string }> };
   on(event: "event", listener: (e: EngineEvent) => void): unknown;
   on(event: "audio", listener: (pcm: Buffer) => void): unknown;
   on(event: "overlay", listener: (cmd: OverlayCommand) => void): unknown;
@@ -325,6 +327,8 @@ export class DaemonServer extends EventEmitter<DaemonServerEvents> {
           if (app) this.send(app, { type: "calendar.read", request: e.request });
           return;
         }
+        case "planner.state":
+          return this.broadcast({ type: "planner.state", state: e.state });
         case "work.state":
           this.broadcast({ type: "work.state", reply: e.reply });
           void this.phone?.quizReady().catch(() => {});
@@ -639,6 +643,18 @@ export class DaemonServer extends EventEmitter<DaemonServerEvents> {
         // trip); bounded by the ledger at CHAIN_ROWS_MAX, and the answer says when it was cut.
         const r = typeof msg.rootId === "string" ? this.engine.ledger.readChain(msg.rootId) : { rows: [], truncated: false };
         this.send(client, { type: "ledger.rows", id: String(msg.id ?? ""), rows: r.rows, ...(r.truncated ? { truncated: true } : {}) });
+        return;
+      }
+      case "planner.read":
+        if (this.engine.planner) this.send(client, { type: "planner.state", state: this.engine.planner.state() });
+        return;
+      case "planner": {
+        const id = String(msg.id ?? "");
+        if (!this.engine.planner || !isPlannerCommand(msg.command)) {
+          this.send(client, { type: "planner.reply", id, ok: false, error: "not a planner command (check dates YYYY-MM-DD, times HH:MM, and the category)" });
+          return;
+        }
+        void this.engine.planner.run(msg.command).then((r: { readonly ok: boolean; readonly error?: string; readonly id?: string }) => this.send(client, { type: "planner.reply", id, ok: r.ok, ...(r.error ? { error: r.error } : {}), ...(r.id ? { itemId: r.id } : {}) }));
         return;
       }
       case "memory.list": {

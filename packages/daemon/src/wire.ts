@@ -14,7 +14,7 @@ import type { PhoneState } from "@hormes/protocol";
  */
 
 import type { ToolResult } from "@hormes/hands";
-import type { CalendarReadRequest, LedgerDayTotals, SystemSignal, WorkReply } from "@hormes/protocol";
+import type { CalendarReadRequest, LedgerDayTotals, PlannerState, SystemSignal, WorkReply } from "@hormes/protocol";
 
 export const FRAME_JSON = 1;
 export const FRAME_MIC = 2;
@@ -75,6 +75,10 @@ export type DaemonMessage =
   | { readonly type: "phone.state"; readonly state: PhoneState }
   | { readonly type: "calendar.read"; readonly request: CalendarReadRequest }
   | { readonly type: "work.state"; readonly reply: WorkReply }
+  /** The planner (todos and calendar): its whole state, broadcast on every change and sent to a `planner.read`. */
+  | { readonly type: "planner.state"; readonly state: PlannerState }
+  /** The answer to one `planner` command, to the client that sent it: ok, or why not; the id an add made. */
+  | { readonly type: "planner.reply"; readonly id: string; readonly ok: boolean; readonly error?: string; readonly itemId?: string }
   /**
    * `version` is the package's; `protocol` is PROTOCOL_VERSION (APP-3), which server.ts always sends. A surface whose
    * number differs, or that reads none (a daemon from before the field), raises `app.version` and refuses Go until it
@@ -175,6 +179,10 @@ export type ClientMessage =
   /** A whole conversation in one read: every session of the chain `rootId` names (any member id will do), oldest first; answered with `ledger.rows` (+ `truncated`). */
   | { readonly type: "ledger.chain"; readonly id: string; readonly rootId: string }
   | { readonly type: "ping"; readonly id: string }
+  /** The planner's state now (answered with planner.state). */
+  | { readonly type: "planner.read" }
+  /** A planner change (a PlannerCommand: add, update, delete, the stits switch); answered with planner.reply, then broadcast. */
+  | { readonly type: "planner"; readonly id: string; readonly command: unknown }
   /**
    * Search heard/said text and delegation requests and summaries across the live ledger (not the trash), one page per
    * request: the newest SEARCH_PAGE_BYTES of day files before `before` (YYYY-MM-DD, exclusive; absent: from today),

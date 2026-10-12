@@ -14,7 +14,7 @@
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Version>2.0.0</Version>
     <!-- WinForms is here only for the tray icon; the manifest's PerMonitorV2 is the WPF app's. -->
-    <NoWarn>$(NoWarn);WFO0003</NoWarn>
+    <NoWarn>$(NoWarn);WFO0003;WPF0001</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -24,6 +24,11 @@
     <PackageReference Include="Whisper.net" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime.Vulkan" Version="1.9.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The Mac app's sounds (chime, alarm, timer, cues), played on Windows by Audio/Earcons.cs. -->
+    <None Include="..\..\mac\Resources\Sounds\*.caf" Link="Sounds\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

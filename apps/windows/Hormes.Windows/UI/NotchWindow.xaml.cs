@@ -46,6 +46,8 @@ public partial class NotchWindow : Window
     private VoiceInput? voice;
     private VoiceInput.State voiceState = VoiceInput.State.Idle;
     private bool speaking;
+    /// <summary>The ring the island opened for, so it opens once per ring.</summary>
+    private string? shownRing;
     private IntPtr hwnd;
 
     public event Action? ConsoleRequested;
@@ -144,6 +146,24 @@ public partial class NotchWindow : Window
             }
         }
 
+        if (c.Ring is { } ring)
+        {
+            RingRow.Visibility = Visibility.Visible;
+            RingText.Text = "⏰  " + ring.Line;
+            RingCalm.Text = ring.Calm ?? "";
+            RingCalm.Visibility = ring.Calm is null ? Visibility.Collapsed : Visibility.Visible;
+            RingSnooze.Visibility = ring.SnoozeMinutes is null ? Visibility.Collapsed : Visibility.Visible;
+            RingSnooze.Content = $"Snooze {ring.SnoozeMinutes} min";
+            RingDone.Visibility = ring.OffersDone ? Visibility.Visible : Visibility.Collapsed;
+            // A new ring opens the island, as on the Mac: the ring is the one thing to deal with.
+            if (ring.Id != shownRing) { shownRing = ring.Id; SetOpen(true); closeDelay.Stop(); }
+        }
+        else
+        {
+            RingRow.Visibility = Visibility.Collapsed;
+            if (shownRing is not null) { shownRing = null; if (!IsMouseOver && !HoldOpen) closeDelay.Start(); }
+        }
+
         if (c.Approval is { } a)
         {
             ApprovalRow.Visibility = Visibility.Visible;
@@ -172,14 +192,14 @@ public partial class NotchWindow : Window
 
         StopButton.IsEnabled = c.Phase != "disconnected";
         SayBox.IsEnabled = c.Phase != "disconnected";
-        PeekDot.Visibility = c.Approval is not null || c.Problem is not null ? Visibility.Visible : Visibility.Collapsed;
+        PeekDot.Visibility = c.Approval is not null || c.Problem is not null || c.Ring is not null ? Visibility.Visible : Visibility.Collapsed;
         ShowVoice();
     }
 
     // ------------------------------------------------------------------ hover
 
     /// <summary>A draft in the Say field, or a line sent and not answered yet: the island stays open.</summary>
-    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || voiceState != VoiceInput.State.Idle || speaking;
+    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || voiceState != VoiceInput.State.Idle || speaking || content.Ring is not null;
 
     /// <summary>The answer to a line sent from here landed: hold the island open long enough to read it.</summary>
     private void ShowReply()
@@ -396,6 +416,16 @@ public partial class NotchWindow : Window
     {
         SetOpen(false);
         ConsoleRequested?.Invoke();
+    }
+
+    private void RingSnooze_Click(object sender, RoutedEventArgs e)
+    {
+        if (content.Ring is { SnoozeMinutes: { } minutes } r) _ = client.SendCommandAsync(new { type = "automation.snooze", id = r.Id, minutes });
+    }
+
+    private void RingDone_Click(object sender, RoutedEventArgs e)
+    {
+        if (content.Ring is { } r) _ = client.SendCommandAsync(new { type = "automation.done", id = r.Id });
     }
 
     private void Allow_Click(object sender, RoutedEventArgs e) => Answer(true);

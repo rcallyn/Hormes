@@ -1,7 +1,9 @@
 export * from "./work.ts";
 export * from "./phone.ts";
 export * from "./calendar.ts";
+export * from "./planner.ts";
 import { isCalendarReadResult, type CalendarReadRequest, type CalendarReadResult } from "./calendar.ts";
+import type { PlannerState } from "./planner.ts";
 import type { WorkCommand, WorkReply } from "./work.ts";
 /**
  * @hormes/protocol — the shared vocabulary.
@@ -1497,6 +1499,8 @@ export const PROTOCOL_VERSION = 4;
 export type EngineEvent =
   | { readonly type: "calendar.read"; readonly request: CalendarReadRequest }
   | { readonly type: "work.state"; readonly reply: WorkReply }
+  /** The planner changed (a write, a stits refresh, the sync switch): its whole state, for the Console. */
+  | { readonly type: "planner.state"; readonly state: PlannerState }
   | { readonly type: "snapshot"; readonly snapshot: Snapshot }
   | { readonly type: "levels"; readonly levels: AudioLevels }
   | { readonly type: "toast"; readonly text: string; readonly tone: "info" | "warn" | "error" }

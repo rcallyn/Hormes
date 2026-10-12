@@ -17,6 +17,7 @@
     "@hormes/install": "workspace:*",
     "@hormes/live": "workspace:*",
     "@hormes/memory": "workspace:*",
-    "@hormes/protocol": "workspace:*"
+    "@hormes/protocol": "workspace:*",
+    "postgres": "^3.4.9"
   }
 }

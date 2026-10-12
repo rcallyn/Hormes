@@ -14,6 +14,13 @@ using NAudio.Wave;
 //   dotnet run --project apps/windows/Checks -- --whisper a.wav   also transcribe a recording through the real path
 // Exit code 1 when any check fails.
 
+var renderAt = Array.IndexOf(args, "--render");
+if (renderAt >= 0 && renderAt + 1 < args.Length)
+{
+    Hormes.Windows.Checks.Render.Run(args[renderAt + 1]);
+    return 0;
+}
+
 var failures = 0;
 void Check(bool ok, string what, string detail = "")
 {
@@ -184,6 +191,14 @@ Check(WhisperTranscriber.Clean(" [BLANK_AUDIO] ") == "" && WhisperTranscriber.Cl
 {
     var spoken = ElevenLabsSpeaker.Speakable("## Done\n- Opened **Spotify** and [your playlist](https://open.spotify.com/x).\n```sh\nrm -rf /tmp/x\n```\nRun `pnpm test` next.");
     Check(spoken == "Done Opened Spotify and your playlist. (code on screen) Run pnpm test next.", "answers are made speakable: no markdown, links or code read out", spoken);
+}
+
+// The Mac's sounds play here: every .caf parses to PCM of a sensible length.
+foreach (var caf in Directory.GetFiles(Path.Combine(repo, "apps", "mac", "Resources", "Sounds"), "*.caf"))
+{
+    var (format, pcm) = Hormes.Windows.Audio.Earcons.ReadCaf(File.ReadAllBytes(caf));
+    var seconds = pcm.Length / (double)format.AverageBytesPerSecond;
+    Check(format.Encoding == NAudio.Wave.WaveFormatEncoding.Pcm && seconds is > 0.05 and < 10, $"sound {Path.GetFileName(caf)} reads as {format.SampleRate} Hz {format.BitsPerSample}-bit, {seconds:0.00} s");
 }
 
 // ------------------------------------------------------------------ whisper, end to end on a recording

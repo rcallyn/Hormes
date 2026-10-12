@@ -9,17 +9,29 @@ namespace Hormes.Windows.UI;
 public sealed class TrayIcon : IDisposable
 {
     private readonly NotifyIcon icon;
+    private readonly ToolStripMenuItem clapItem;
+    private readonly ToolStripMenuItem speakItem;
+    private bool syncing;
+
+    /// <summary>Show switches changed elsewhere (the Console's Settings) without acting on them again.</summary>
+    public void SetChecks(bool clap, bool speak)
+    {
+        syncing = true;
+        clapItem.Checked = clap;
+        speakItem.Checked = speak;
+        syncing = false;
+    }
 
     public TrayIcon(Action openConsole, Action restartDaemon, Action openLog, Action quit, bool clap, Action<bool> setClap, bool speak, Action<bool> setSpeak)
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Console", null, (_, _) => openConsole());
         // The microphone stays open while this is on (Windows shows its mic indicator); claps are detected on this PC.
-        var clapItem = new ToolStripMenuItem("Listen for double clap") { Checked = clap, CheckOnClick = true };
-        clapItem.CheckedChanged += (_, _) => setClap(clapItem.Checked);
+        clapItem = new ToolStripMenuItem("Listen for double clap") { Checked = clap, CheckOnClick = true };
+        clapItem.CheckedChanged += (_, _) => { if (!syncing) setClap(clapItem.Checked); };
         menu.Items.Add(clapItem);
-        var speakItem = new ToolStripMenuItem("Speak replies (ElevenLabs)") { Checked = speak, CheckOnClick = true };
-        speakItem.CheckedChanged += (_, _) => setSpeak(speakItem.Checked);
+        speakItem = new ToolStripMenuItem("Speak replies (ElevenLabs)") { Checked = speak, CheckOnClick = true };
+        speakItem.CheckedChanged += (_, _) => { if (!syncing) setSpeak(speakItem.Checked); };
         menu.Items.Add(speakItem);
         menu.Items.Add("Restart daemon", null, (_, _) => restartDaemon());
         menu.Items.Add("Open daemon log", null, (_, _) => openLog());
@@ -34,6 +46,10 @@ public sealed class TrayIcon : IDisposable
         };
         icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) openConsole(); };
     }
+
+    /// <summary>A Windows notification from the tray (an automation's banner).</summary>
+    public void Notify(string title, string? body) =>
+        icon.ShowBalloonTip(8000, title.Length > 63 ? title[..63] : title, string.IsNullOrEmpty(body) ? " " : body, ToolTipIcon.None);
 
     /// <summary>Tooltip text; Windows caps it at 127 characters.</summary>
     public string Status

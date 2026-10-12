@@ -18,7 +18,8 @@ public sealed record NotchContent(
     string? Asked,
     IReadOnlyList<NotchThread> Threads,
     NotchProblem? Problem,
-    NotchApproval? Approval)
+    NotchApproval? Approval,
+    NotchRing? Ring = null)
 {
     public static readonly NotchContent Disconnected = new("disconnected", false, null, null, null, Array.Empty<NotchThread>(), null, null);
 
@@ -110,7 +111,22 @@ public sealed record NotchContent(
         if (snap.TryGetProperty("approval", out var a) && a.ValueKind == JsonValueKind.Object)
             approval = new NotchApproval(Str(a, "id") ?? "", Str(a, "threadId") ?? "main", Str(a, "description") ?? "", a.TryGetProperty("requiresOwner", out var ro) && ro.ValueKind == JsonValueKind.True);
 
-        return new NotchContent(phase, brainReady, heroSpeaker, hero, asked, threads, problem, approval);
+        NotchRing? ring = null;
+        if (snap.TryGetProperty("ringing", out var r) && r.ValueKind == JsonValueKind.Object && Str(r, "id") is { } ringId)
+        {
+            int? snooze = null;
+            var done = false;
+            if (r.TryGetProperty("presses", out var presses) && presses.ValueKind == JsonValueKind.Array)
+                foreach (var p in presses.EnumerateArray())
+                {
+                    var kind = Str(p, "kind");
+                    if (kind == "snooze" && p.TryGetProperty("minutes", out var m) && m.TryGetInt32(out var minutes)) snooze = minutes;
+                    if (kind == "done") done = true;
+                }
+            ring = new NotchRing(ringId, Str(r, "kind") ?? "alarm", Str(r, "line") ?? Str(r, "name") ?? "", Str(r, "calm"), snooze, done || snooze is null);
+        }
+
+        return new NotchContent(phase, brainReady, heroSpeaker, hero, asked, threads, problem, approval, ring);
     }
 
     private static string? Str(JsonElement obj, string name) =>
@@ -129,5 +145,8 @@ public sealed record NotchThread(string Id, string Name, string Status, string? 
 }
 
 public sealed record NotchProblem(string Kind, string Text, string? RemedyLabel, string? RemedyCommandJson, int More);
+
+/// <summary>An automation ringing now (Snapshot.ringing): its line, and the presses it offers.</summary>
+public sealed record NotchRing(string Id, string Kind, string Line, string? Calm, int? SnoozeMinutes, bool OffersDone);
 
 public sealed record NotchApproval(string Id, string ThreadId, string Description, bool RequiresOwner);

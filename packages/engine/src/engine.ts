@@ -17,6 +17,7 @@ import { BROWSER_APPS, ClaudeBrain, Delegator, FiredReflexes, LOCAL_NUM_CTX_MIN,
 import { INSTALLED_URL, HORMES_BUNDLE_ID, defaultExec, describeDock, describeDockChanges, describeHelperTiles, readDock, readRunning, repairDock, restartDock, type DockAudit, type Exec, type RunningApp } from "@hormes/install";
 import { EarReflexes, STOP_NAME_WAIT_MS, type ReflexLedgerRow } from "./ear.ts";
 import { MemoryBridge, type LocalMemoryTarget, type MemoryBridgeSeams } from "./memory-bridge.ts";
+import { Planner } from "./planner/index.ts";
 import { AudioTelemetry } from "./audio-telemetry.ts";
 import { ProactiveSuggestions, suggestionBudget } from "./proactive.ts";
 import { EXCHANGE_MAX_MS, EXCHANGE_WINDOW_MS, VoiceAttention, type Verdict, type VoiceGrant } from "./voice-attention.ts";
@@ -535,6 +536,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   private readonly lessonTurns = new Map<string, { scope: WorkScope; surfaceId?: string; assessment: boolean }>();
   private checkedWorkContext: { sessionId: string; binding: string } | undefined;
   private readonly calendarReader = new CalendarReader(request => this.emit("event", { type: "calendar.read", request }), () => this.work.store.state().selectedCalendarIds ?? []);
+  /** User's todos and calendar (planner/planner.ts): the Console's pages and the brain's `planner` tool. */
+  readonly planner: Planner;
   /** The main toolset's hands: reads on the reading helper, acts on the acting one — a look never queues behind a `type`. */
   readonly splitHands: SplitHands;
   /** What the screen is like right now, from the reading helper: the observer's `now:` line reads it, the composite look reads it, the AX tick feeds it. */
@@ -832,6 +835,9 @@ export class Engine extends EventEmitter<EngineEvents> {
     this.exec = opts.exec ?? defaultExec;
     this.config = opts.config ?? readConfig();
     mkdirSync(this.config.stateDir, { recursive: true });
+    // User's todos and calendar: this PC's own, or stits when synced (planner/planner.ts).
+    this.planner = new Planner({ stateDir: this.config.stateDir, now: this.now });
+    this.planner.on("changed", (state) => this.emit("event", { type: "planner.state", state }));
     this.ledger = new Ledger(this.config.stateDir);
     this.loadUsageToday();
     // The Trash asks the ledger which days hold a pinned or open conversation and records every move in it (K1).
@@ -975,7 +981,9 @@ export class Engine extends EventEmitter<EngineEvents> {
     });
     const runnerBase: Omit<RunnerOptions, "toolset"> = {
       now: this.now,
-      readCalendar: (query, signal) => this.calendarReader.read(query, signal),
+      // No EventKit off the Mac: the schedule there is the planner's (this PC's calendar, or stits).
+      readCalendar: (query, signal) => (process.platform === "darwin" ? this.calendarReader.read(query, signal) : Promise.resolve(this.planner.readCalendar(query))),
+      planner: (operation, payload) => this.planner.tool(operation, payload),
       work: this.work,
       agents: this.agents,
       userName: () => this.userName,
@@ -1399,6 +1407,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** Spawn the helper, probe permissions, start the brain. Does not open a session. */
   async start(): Promise<void> {
     this.startedAt = this.now();
+    void this.planner.start();
     // What a dead daemon left open, written before anything else this process writes: its session's close
     // (V8 / LM-2, W2-5's contract), then one `thread.ended` row for each thread it left live (LM-1). Only by the
     // process that holds the state dir: an engine beside a running daemon (`hormes live`) leaves the daemon's alone.
@@ -2203,7 +2212,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       ? { bin: undefined, version: undefined, signedIn: false, authMode: undefined, desktopRunning: false, configModel: undefined, detail: "not probed (brainOf)" }
       : await probeCodex({ bin: this.config.codexBin });
 
-    const facts: BrainFacts = { wanted, codex: codexProbe, claudeBin: this.config.claudeBin, claudeHome: existsSync(join(homedir(), ".claude")), anthropicApiKey: this.config.anthropicApiKey, baseUrl };
+    const facts: BrainFacts = { wanted, codex: codexProbe, claudeBin: this.config.claudeBin, claudeHome: existsSync(join(process.env["HOME"] || homedir(), ".claude")), anthropicApiKey: this.config.anthropicApiKey, baseUrl };
     const notConfigured = (kind: Kind): string | undefined => brainNotConfigured(kind, facts);
 
     // Every brain proves itself before it takes a task. The same builder makes a spawned
@@ -6238,6 +6247,7 @@ export class Engine extends EventEmitter<EngineEvents> {
 
   async stop(): Promise<void> {
     this.calendarReader.close();
+    await this.planner.stop();
     const workStopped = this.work.stop();
     this.stopping = true;
     this.failureLine?.now();

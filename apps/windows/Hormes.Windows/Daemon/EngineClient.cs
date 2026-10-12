@@ -44,6 +44,8 @@ public sealed class EngineClient : IDisposable
     public event Action<string, string>? Toast;
     /// <summary>Mic and speaker RMS, 0..1.</summary>
     public event Action<double, double>? Levels;
+    /// <summary>Every other message, by type (planner.state, planner.reply, work.state…): the payload is a clone, safe to keep.</summary>
+    public event Action<string, JsonElement>? Message;
 
     public void Start() => _ = Task.Run(() => RunAsync(stop.Token));
 
@@ -101,6 +103,8 @@ public sealed class EngineClient : IDisposable
         unansweredPings = 0;
         using var connection = CancellationTokenSource.CreateLinkedTokenSource(ct);
         await SendJsonAsync(new { type = "hello", pid = Environment.ProcessId, version = "windows-2.0.0", audio = false, protocol = ProtocolVersion }).ConfigureAwait(false);
+        // The planner is not in the snapshot: ask for it on every (re)connect; changes are broadcast after.
+        await SendJsonAsync(new { type = "planner.read" }).ConfigureAwait(false);
         var pinger = PingLoopAsync(p, connection);
         try
         {
@@ -177,6 +181,9 @@ public sealed class EngineClient : IDisposable
                     break;
                 case "bye":
                     byeAnswered?.TrySetResult();
+                    break;
+                default:
+                    Message?.Invoke(typeEl.GetString()!, root.Clone());
                     break;
             }
         }

@@ -93,6 +93,15 @@
 
           <!-- 3 · the middle: an approval, else a problem, else the threads -->
           <StackPanel Grid.Row="2" Margin="0,8,0,0">
+            <!-- An automation ringing: its line, Snooze and Done. -->
+            <DockPanel x:Name="RingRow" Visibility="Collapsed" Margin="0,0,0,6">
+              <Button x:Name="RingDone" Content="Done" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="RingDone_Click"/>
+              <Button x:Name="RingSnooze" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="RingSnooze_Click"/>
+              <StackPanel VerticalAlignment="Center">
+                <TextBlock x:Name="RingText" Foreground="White" FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="RingCalm" Foreground="{StaticResource Dim}" FontSize="11" TextTrimming="CharacterEllipsis"/>
+              </StackPanel>
+            </DockPanel>
             <DockPanel x:Name="ApprovalRow" Visibility="Collapsed" Margin="0,0,0,6">
               <Button x:Name="DenyButton" Content="Deny" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Deny_Click"/>
               <Button x:Name="AllowButton" Content="Allow" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Allow_Click"/>

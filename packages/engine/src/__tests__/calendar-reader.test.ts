@@ -6,7 +6,7 @@ import { world } from "./world.ts";
 
 const receipt = (id: string): CalendarReadResult => ({ id, ok: true, permission: "granted", timeZone: "America/New_York", startsAt: 1791691200000, endsAt: 1791777600000, readAt: 1791744000000, calendars: [{ id: "real", title: "School", account: "iCloud" }], events: [], truncated: false });
 
-test("real Engine runner awaits native calendar receipt without opening or changing selected calendars", async t => {
+test("real Engine runner awaits native calendar receipt without opening or changing selected calendars", { skip: process.platform !== "darwin" && "EventKit is the Mac's; elsewhere read_calendar is the planner's (planner.test.ts)" }, async t => {
   const w = world(); t.after(() => w.engine.stop()); await w.engine.start(); await w.engine.ready();
   const before = w.engine.work.store.state().selectedCalendarIds;
   let requested: CalendarReadRequest | undefined;

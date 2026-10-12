@@ -18,7 +18,7 @@ import {
   type RawToolCall,
 } from "./compatible.ts";
 import type { ToolRunner } from "./runner.ts";
-import { AGENT_SPECS, ALL_TOOL_SPECS, AUTOMATION_SPECS, BROWSER_SPECS, DRAW_SPECS, SELF_SPECS, THREAD_SPECS, specByName, toolSpecsFor, type ToolSpec } from "./tools.ts";
+import { AGENT_SPECS, ALL_TOOL_SPECS, AUTOMATION_SPECS, BROWSER_SPECS, DRAW_SPECS, PLANNER_SPECS, SELF_SPECS, THREAD_SPECS, specByName, toolSpecsFor, type ToolSpec } from "./tools.ts";
 
 /**
  * The local brain: a model on this Mac served by Ollama, LM Studio or llama.cpp.
@@ -59,8 +59,9 @@ export const LOCAL_FIRST_CHUNK_WARM_MS = 45_000;
 export const LOCAL_TOOL_SHARE = 0.35;
 export const EMBED_PREFERENCE: readonly string[] = ["embeddinggemma", "nomic-embed-text", "mxbai-embed-large", "qwen3-embedding", "all-minilm"];
 
-const NOT_LOCAL = new Set([...SELF_SPECS, ...AGENT_SPECS].map((s) => s.name));
-/** ALL_TOOL_SPECS minus SELF_SPECS and AGENT_SPECS; thread_* kept (gated by `threads()` at request time). */
+// The planner (the Windows Console's todos and calendar) stays with the cloud brains: a local model's tool budget is spent as on the Mac.
+const NOT_LOCAL = new Set([...SELF_SPECS, ...AGENT_SPECS, ...PLANNER_SPECS].map((s) => s.name));
+/** ALL_TOOL_SPECS minus SELF_SPECS, AGENT_SPECS and the planner; thread_* kept (gated by `threads()` at request time). */
 export const LOCAL_TOOLS: readonly ToolSpec[] = ALL_TOOL_SPECS.filter((s) => !NOT_LOCAL.has(s.name));
 /** Groups fitTools drops, in order, until tokens(system + tools) ≤ LOCAL_TOOL_SHARE × ctx. */
 export const LOCAL_DROP_ORDER: readonly { name: "draw" | "automation" | "browser" | "thread"; specs: readonly ToolSpec[] }[] = [

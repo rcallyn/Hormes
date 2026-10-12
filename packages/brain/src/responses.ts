@@ -386,6 +386,8 @@ export function progressLine(name: string, args: unknown): string {
       return "Checking what is set.";
     case "read_calendar":
       return "Reading your calendar.";
+    case "planner":
+      return String(a["operation"] ?? "list") === "list" ? "Checking your todos and calendar." : "Updating your planner.";
     case "automation_change":
       return `${String(a["verb"] ?? "Changing")} ${String(a["name"] ?? "an automation")}.`.replace(/^[a-z]/, (c) => c.toUpperCase());
     case "recipe_list":

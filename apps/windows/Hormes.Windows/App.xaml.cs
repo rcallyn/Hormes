@@ -4,9 +4,12 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
+using Hormes.Windows.Audio;
 using Hormes.Windows.Daemon;
+using Hormes.Windows.Model;
 using Hormes.Windows.Speech;
 using Hormes.Windows.UI;
+using Hormes.Windows.UI.Console;
 
 namespace Hormes.Windows;
 
@@ -25,12 +28,22 @@ public partial class App : Application
     private VoiceInput? voice;
     private ElevenLabsSpeaker? speaker;
     private RepliesToSpeak? replies;
+    private Planner? planner;
     private AppSettings settings = new();
     private bool quitting;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        // What goes wrong goes in windows-app.log. A UI error is shown and survived; anything else is logged before the end.
+        DispatcherUnhandledException += (_, ex) =>
+        {
+            AppLog.Write($"ui error: {ex.Exception}");
+            System.Windows.MessageBox.Show($"Something went wrong in Hormes: {ex.Exception.Message}\n\nDetails are in ~/.hormes/windows-app.log.", "Hormes");
+            ex.Handled = true;
+        };
+        AppDomain.CurrentDomain.UnhandledException += (_, ex) => AppLog.Write($"fatal: {ex.ExceptionObject}");
+        System.Threading.Tasks.TaskScheduler.UnobservedTaskException += (_, ex) => { AppLog.Write($"task error: {ex.Exception}"); ex.SetObserved(); };
         single = new Mutex(true, @"Local\Hormes.Windows.App", out var first);
         if (!first)
         {
@@ -43,24 +56,37 @@ public partial class App : Application
         daemon = new DaemonProcess(pipe);
         client = new EngineClient(pipe);
         notch = new NotchWindow(client);
-        console = new ConsoleWindow(client, daemon);
         settings = AppSettings.Load();
         voice = new VoiceInput();
         notch.AttachVoice(voice);
         speaker = new ElevenLabsSpeaker { Enabled = settings.SpeakReplies };
         replies = new RepliesToSpeak(speaker.Say);
-        tray = new TrayIcon(OpenConsole, () => daemon.Restart(), OpenLog, Quit, settings.Clap, on =>
+        planner = new Planner(client);
+
+        // One place changes the voice switches; the tray menu and the Console show the same state.
+        void SetClap(bool on)
         {
             settings.Clap = on;
             settings.Save();
             voice.ClapEnabled = on;
-        }, settings.SpeakReplies, on =>
+            tray?.SetChecks(settings.Clap, settings.SpeakReplies);
+        }
+        void SetSpeak(bool on)
         {
             settings.SpeakReplies = on;
             settings.Save();
             speaker.Enabled = on;
             if (!on) speaker.Stop();
-        });
+            tray?.SetChecks(settings.Clap, settings.SpeakReplies);
+        }
+        var services = new ConsoleServices
+        {
+            Client = client, Daemon = daemon, Planner = planner, Voice = voice, Speaker = speaker, Settings = settings,
+            SetClap = SetClap, SetSpeak = SetSpeak,
+        };
+        console = new ConsoleWindow(services);
+        client.Snapshot += services.OnSnapshot;
+        tray = new TrayIcon(OpenConsole, () => daemon.Restart(), OpenLog, Quit, settings.Clap, SetClap, settings.SpeakReplies, SetSpeak);
 
         // Hormes speaks its answers; its own voice never wakes the clap detector, and a new turn or Stop cuts it off.
         client.Snapshot += replies.OnSnapshot;
@@ -73,7 +99,6 @@ public partial class App : Application
             notch.ShowToast("For spoken replies, add ELEVENLABS_API_KEY to ~/.hormes/env", "info");
 
         client.Snapshot += notch.OnSnapshot;
-        client.Snapshot += console.OnSnapshot;
         client.Levels += notch.OnLevels;
         client.Toast += notch.ShowToast;
         client.ConnectionChanged += notch.OnConnection;
@@ -81,12 +106,34 @@ public partial class App : Application
         daemon.StateChanged += _ => Dispatcher.BeginInvoke(UpdateTray);
         notch.ConsoleRequested += OpenConsole;
 
+        // Automations ring here too (alarms, timers, reminders the brain set): the sound, the line said aloud when
+        // replies are on, a Windows notification; the notch shows the ring with Snooze and Done from the snapshot.
+        client.Message += (type, msg) =>
+        {
+            string? Field(string name) => msg.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+            switch (type)
+            {
+                case "local.say":
+                    // A named sound when this app has it; macOS system sounds ("Ping") fall back to the ring's own.
+                    var sound = Field("sound") is { } named && Earcons.Has(named) ? named : Field("ring") ?? Field("sound");
+                    if (sound is not null) Earcons.Play(Earcons.Has(sound) ? sound : "chime");
+                    if (Field("text") is { Length: > 0 } line) speaker.Say(line);
+                    break;
+                case "notify":
+                    Dispatcher.BeginInvoke(() => tray?.Notify(Field("title") ?? "Hormes", Field("body")));
+                    break;
+            }
+        };
+
         notch.Show();
         daemon.Start();
         client.Start();
         voice.ClapEnabled = settings.Clap;
         _ = voice.WarmUpAsync();
         UpdateTray();
+        // Hormes.exe --console [Home|Calendar|Todos|School|Settings]: open the Console at start.
+        var at = Array.IndexOf(e.Args, "--console");
+        if (at >= 0) console.ShowAndFocus(at + 1 < e.Args.Length ? e.Args[at + 1] : null);
     }
 
     private void UpdateTray()

@@ -88,13 +88,52 @@ endpointer against synthetic turns. The second also feeds a recording through th
 real time (endpointer, early transcription, Whisper) and reports how long after the turn the text
 lands; `--runtime cpu|vulkan` pins the backend.
 
+The checks also run every Mac sound through the CAF reader. `--render <dir>` draws the Console
+(every page, both themes, the todo and event sheets) to PNGs with sample data, for looking at the UI
+without a screen.
+
+## The Console
+
+An Apple-style window (tray icon, the notch's Console button, or `Hormes.exe --console [page]`):
+
+- **Home**: a greeting, today's schedule, what is due, and Ask Hormes with the conversation.
+- **Calendar**: Day, Week and Month like Apple Calendar; click an event to edit it, double-click an
+  empty slot (or a day) to add one; recurring events edit as a series.
+- **Todos**: Reminders' smart lists (Today, Scheduled, All, Completed), category chips, sections by
+  date, round checkboxes in the category colour, quick add.
+- **School**: the week's classes (school-category events), open assignments (school todos and
+  everything Canvas brought in through stits), and Study buttons that hand the work to Claude.
+- **Settings**: your name, **Calendar & Todos** (see below), voice, the engine and its logs.
+
+It follows Windows' light/dark mode; its colours are Apple's system palette and stits' category colours.
+
+## Calendar & todos: Hormes' own, or synced with stits
+
+The planner lives in the engine (`packages/engine/src/planner`), so the Console, the notch and Claude
+(the `planner` tool, and `read_calendar` off the Mac) all see the same todos and events. It has two
+stores, switched in Settings, or with the **Hormes | stits** control on Calendar, Todos and School:
+
+- **Hormes** (default): `~/.hormes/planner.json` on this PC.
+- **stits**: stits' own Postgres, read and written the way stits' API routes do (Canvas deletions are
+  remembered in `canvas_dismissed`, recurring occurrences edit their series), so a change in either
+  app shows in the other; Hormes re-reads stits every minute. The connection comes from
+  `STITS_DATABASE_URL` or `DATABASE_URL` in `~/Documents/Repositories/stits/.env.local` (or
+  `STITS_DIR`); the URL never leaves the engine. Switching on copies this PC's items into stits once;
+  switching off shows this PC's own list again.
+
+## Automations
+
+Alarms, timers and reminders Claude sets (`automation_set`) ring on Windows: the Mac's sound
+(`apps/mac/Resources/Sounds`, copied next to the app), the line spoken when replies are on, a Windows
+notification, and the ring in the notch with **Snooze** and **Done**.
+
 ## Not yet on Windows
 
 | Mac piece | Status here |
 |---|---|
-| Voice (AVAudioEngine, echo guard, barge-in duck) | speech in, on-device (above); no Live voice session and no spoken answers yet. The app says `audio: false` to the daemon and starts it with `HORMES_AUTO_WAKE=0` |
+| Voice (AVAudioEngine, echo guard, barge-in duck) | speech in on-device and answers spoken by ElevenLabs (above); no Live voice session. The app says `audio: false` to the daemon and starts it with `HORMES_AUTO_WAKE=0` |
 | The hands (`packages/hands/native`, AX) | not yet: UI Automation + SendInput |
 | Shell sandbox (`sandbox-exec`) | not yet: AppContainer / job objects |
-| Calendar (EventKit) | not yet |
+| Calendar (EventKit) | the planner instead (above) |
 | Owner authentication (Touch ID) | not yet: an approval that needs it offers Deny only |
-| Hotkeys, Overlay, full Console rails, workspaces | not yet |
+| Overlay, agents rail, lecture capture and whiteboard workspaces | not yet |
