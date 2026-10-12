@@ -191,7 +191,7 @@ public sealed class VoiceInput : IAsyncDisposable
                 continue;
             }
             Level?.Invoke(rms);
-            switch (endpointer.Feed(rms))
+            switch (endpointer.Feed(rms, rms > endpointer.Floor * 2 ? Endpointer.Voicing(frameBuffer, rate) : 0))
             {
                 case Endpointer.Verdict.Done:
                     Finish(true);

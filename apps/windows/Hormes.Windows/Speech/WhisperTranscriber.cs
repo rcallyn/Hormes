@@ -59,6 +59,9 @@ public sealed class WhisperTranscriber : IAsyncDisposable
         return p;
     }
 
+    /// <summary>Segments under this mean token probability are not taken as something User said.</summary>
+    public const float MinSegmentProbability = 0.4f;
+
     public static string ModelPath => Path.Combine(Ipc.StateDir, "models", ModelFile);
 
     /// <summary>"Vulkan" / "Cpu" once loaded: which whisper.cpp runtime took the model.</summary>
@@ -101,7 +104,15 @@ public sealed class WhisperTranscriber : IAsyncDisposable
         {
             var text = new StringBuilder();
             await foreach (var segment in ProcessorFor(samples16k.Length).ProcessAsync(samples16k, ct).ConfigureAwait(false))
+            {
+                // A segment Whisper is unsure of is mostly background: a TV, a voice across the room, its own guess at noise.
+                if (segment.Probability < MinSegmentProbability)
+                {
+                    AppLog.Write($"whisper: dropped a low-confidence segment (p={segment.Probability:0.00}, {segment.Text.Length} chars)");
+                    continue;
+                }
                 text.Append(segment.Text);
+            }
             return Clean(text.ToString());
         }
         finally

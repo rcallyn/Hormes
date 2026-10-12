@@ -181,8 +181,41 @@ using (var doc = JsonDocument.Parse(File.ReadAllBytes(fixture)))
     var blip = new Endpointer();
     blip.Reset();
     var seq = Enumerable.Repeat(0.004, 20).Concat(Enumerable.Repeat(0.2, 3)).Concat(Enumerable.Repeat(0.004, 70)).ToList();
-    var verdicts = seq.Select(blip.Feed).ToList();
+    var verdicts = seq.Select(r => blip.Feed(r)).ToList();
     Check(!verdicts.Contains(Endpointer.Verdict.Done), "a cough alone is not a turn");
+
+    // Voiced, or only loud: a 150 Hz voice-like tone with harmonics against white noise, at 48 kHz.
+    var rnd = new Random(7);
+    var tone = new float[1440];
+    var hiss = new float[1440];
+    for (var i = 0; i < tone.Length; i++)
+    {
+        var t = i / 48000.0;
+        tone[i] = (float)(0.2 * Math.Sin(2 * Math.PI * 150 * t) + 0.1 * Math.Sin(2 * Math.PI * 300 * t) + 0.05 * Math.Sin(2 * Math.PI * 450 * t));
+        hiss[i] = (float)((rnd.NextDouble() * 2 - 1) * 0.2);
+    }
+    var voiced = Endpointer.Voicing(tone, 48000);
+    var unvoiced = Endpointer.Voicing(hiss, 48000);
+    Check(voiced > 0.8 && unvoiced < Endpointer.VoicedAt, "a voice is voiced, hiss is not", $"voice {voiced:0.00}, hiss {unvoiced:0.00}");
+
+    var noisy = new Endpointer { NoSpeechTimeout = TimeSpan.FromSeconds(3) };
+    noisy.Reset(0.004);
+    var noisyVerdict = Endpointer.Verdict.Waiting;
+    for (var i = 0; i < 200 && noisyVerdict == Endpointer.Verdict.Waiting; i++) noisyVerdict = noisy.Feed(0.15, unvoiced);
+    Check(noisyVerdict == Endpointer.Verdict.NoSpeech, "loud noise that is not a voice never opens a turn");
+
+    // A TV across the room, on before the turn (the floor is seeded from it) and on after User stops: the turn ends
+    // 2 s after User's last word, and the TV is not taken for more of the turn.
+    var room = new Endpointer();
+    room.Reset(0.02);
+    var tvTurn = false;
+    for (var i = 0; i < 33; i++) tvTurn |= room.Feed(0.02 + 0.006 * Math.Sin(i), 0.7) != Endpointer.Verdict.Waiting;
+    var userTurn = false;
+    for (var i = 0; i < 66; i++) userTurn |= room.Feed(0.2 + 0.05 * Math.Sin(i), 0.8) == Endpointer.Verdict.Speaking;
+    var endedAfter = -1.0;
+    for (var i = 0; i < 200; i++) if (room.Feed(0.035 + 0.01 * Math.Sin(i), 0.7) == Endpointer.Verdict.Done) { endedAfter = (i + 1) * 0.03; break; }
+    var ended = Math.Abs(endedAfter - 2.0) < 0.15;
+    Check(!tvTurn && userTurn && ended, "a voice in the background neither opens nor holds a turn; User's voice is heard", $"tv {tvTurn}, user {userTurn}, ended {endedAfter:0.00} s after the last word");
 }
 
 Check(WhisperTranscriber.Clean(" [BLANK_AUDIO] ") == "" && WhisperTranscriber.Clean(" Thank you. ") == "" && WhisperTranscriber.Clean(" Open Spotify. ") == "Open Spotify.",

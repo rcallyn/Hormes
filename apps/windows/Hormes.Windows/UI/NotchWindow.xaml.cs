@@ -27,6 +27,8 @@ namespace Hormes.Windows.UI;
 public partial class NotchWindow : Window
 {
     private const double RestWidth = 150, RestHeight = 22;
+    /// <summary>The tab while a browser is in front at the top of the screen: a strip that leaves the tabs clear.</summary>
+    private const double SlimHeight = 4, SlimHitHeight = 4;
     private const double OpenWidth = 440, OpenHeight = 280;
     private static readonly Duration OpenDuration = new(TimeSpan.FromMilliseconds(220));
     private static readonly Duration CloseDuration = new(TimeSpan.FromMilliseconds(180));
@@ -49,6 +51,10 @@ public partial class NotchWindow : Window
     /// <summary>The ring the island opened for, so it opens once per ring.</summary>
     private string? shownRing;
     private IntPtr hwnd;
+    /// <summary>A browser is frontmost and reaches the top edge where the tab hangs: the tab shrinks to a strip.</summary>
+    private bool slim;
+    private readonly DispatcherTimer foregroundWatch = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    private static readonly string[] Browsers = { "chrome", "msedge", "firefox", "brave", "opera", "opera_gx", "vivaldi", "arc", "zen", "librewolf", "waterfox", "thorium", "chromium", "floorp" };
 
     public event Action? ConsoleRequested;
     /// <summary>Stop was pressed: whatever Hormes is saying stops too.</summary>
@@ -91,8 +97,46 @@ public partial class NotchWindow : Window
         // Moving onto a monitor of another DPI resizes the window by Windows' suggestion; settle it once that is done.
         DpiChanged += (_, _) => Dispatcher.BeginInvoke(Place, DispatcherPriority.Background);
 
+        foregroundWatch.Tick += (_, _) => WatchForeground();
+        foregroundWatch.Start();
+
         Apply(content);
     }
+
+    // ------------------------------------------------------------------ slim over a browser
+
+    /// <summary>Slim while a browser's window in front reaches the top of the primary display, under the tab.</summary>
+    private void WatchForeground()
+    {
+        if (hwnd == IntPtr.Zero) return;
+        var next = false;
+        var fg = GetForegroundWindow();
+        if (fg != IntPtr.Zero && fg != hwnd && GetWindowRect(fg, out var r) && GetWindowRect(hwnd, out var mine))
+        {
+            GetWindowThreadProcessId(fg, out var pid);
+            string? name = null;
+            try { using var proc = System.Diagnostics.Process.GetProcessById((int)pid); name = proc.ProcessName.ToLowerInvariant(); } catch { }
+            // Its top within a few pixels of the screen's top (maximized windows sit a little above it), across the tab.
+            next = name is not null && Browsers.Contains(name) && r.Top <= mine.Top + 12 && r.Left < mine.Right && r.Right > mine.Left;
+        }
+        if (next != slim) SetSlim(next);
+    }
+
+    private void SetSlim(bool on)
+    {
+        slim = on;
+        HitZone.Height = on ? SlimHitHeight : 20;
+        HitZone.Width = on ? RestWidth : 260;
+        // A pass across the tabs should not open it: a longer dwell while slim.
+        openDelay.Interval = TimeSpan.FromMilliseconds(on ? 350 : 90);
+        if (isOpen) return;
+        var duration = new Duration(TimeSpan.FromMilliseconds(160));
+        Island.BeginAnimation(HeightProperty, new DoubleAnimation(RestTabHeight, duration));
+        Island.CornerRadius = on ? new CornerRadius(0, 0, 2, 2) : new CornerRadius(0, 0, 11, 11);
+        Peek.BeginAnimation(OpacityProperty, new DoubleAnimation(on ? 0 : 1, duration));
+    }
+
+    private double RestTabHeight => slim ? SlimHeight : RestHeight;
 
     // ------------------------------------------------------------------ content
 
@@ -244,8 +288,8 @@ public partial class NotchWindow : Window
         var duration = open ? OpenDuration : CloseDuration;
         var ease = new CubicEase { EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn };
         Island.BeginAnimation(WidthProperty, new DoubleAnimation(open ? OpenWidth : RestWidth, duration) { EasingFunction = ease });
-        Island.BeginAnimation(HeightProperty, new DoubleAnimation(open ? OpenHeight : RestHeight, duration) { EasingFunction = ease });
-        Island.CornerRadius = open ? new CornerRadius(0, 0, 22, 22) : new CornerRadius(0, 0, 11, 11);
+        Island.BeginAnimation(HeightProperty, new DoubleAnimation(open ? OpenHeight : RestTabHeight, duration) { EasingFunction = ease });
+        Island.CornerRadius = open ? new CornerRadius(0, 0, 22, 22) : slim ? new CornerRadius(0, 0, 2, 2) : new CornerRadius(0, 0, 11, 11);
         IslandShadow.BeginAnimation(System.Windows.Media.Effects.DropShadowEffect.OpacityProperty, new DoubleAnimation(open ? 0.55 : 0, duration));
 
         if (open)
@@ -260,7 +304,7 @@ public partial class NotchWindow : Window
             var fade = new DoubleAnimation(0, TimeSpan.FromMilliseconds(90));
             fade.Completed += (_, _) => { if (!isOpen) Open.Visibility = Visibility.Collapsed; };
             Open.BeginAnimation(OpacityProperty, fade);
-            Peek.BeginAnimation(OpacityProperty, new DoubleAnimation(1, duration) { BeginTime = TimeSpan.FromMilliseconds(80) });
+            Peek.BeginAnimation(OpacityProperty, new DoubleAnimation(slim ? 0 : 1, duration) { BeginTime = TimeSpan.FromMilliseconds(80) });
             if (SayBox.IsKeyboardFocused) Keyboard.ClearFocus();
             ReleaseFocus();
         }
@@ -547,6 +591,15 @@ public partial class NotchWindow : Window
 
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct RECT { public int Left, Top, Right, Bottom; }
+
+    [DllImport("user32.dll")]
+    private static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
 
     [DllImport("kernel32.dll")]
     private static extern uint GetCurrentThreadId();
