@@ -3698,6 +3698,18 @@ export class Engine extends EventEmitter<EngineEvents> {
     }
     const t0 = performance.now();
     const windowMs = 15 * 60_000;
+    // A yes to a waiting question arms it, as the voice path does (sayText, the Delegator): only with its ledger row,
+    // and never past owner authentication. Allow in the notch authenticates first (answerThread) and then says "yes"
+    // here; a yes typed or dictated on its own while authentication is required approves nothing.
+    let confirmation = false;
+    if (YES_PATTERN.test(text.trim()) && this.confirmations.pending) {
+      if (this.confirmations.requiresOwner) {
+        this.toast("Press Allow and confirm with Windows Hello to approve this action.", "warn");
+        log.info(`text turn: yes while owner authentication is required → not armed`);
+        return;
+      }
+      confirmation = this.confirmations.arm((g) => this.ledger.append({ at: this.now(), type: "grant", chainId: this.confirmations.conversationId, app: g.app, actionClass: g.actionClass, until: g.until })) !== undefined;
+    }
     // The text-mode transcript keeps wall-clock ms on its timeline: no session clock runs while asleep.
     const userItem = this.transcript.pushTyped(text, this.now(), "user");
     const items = this.transcript.since(this.now() - windowMs);
@@ -3716,7 +3728,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       request: text,
       dialogue: this.transcript.render(windowMs, this.now(), this.userName),
       userDialogue: items.filter((i) => i.speaker === "user").map((i) => i.text).join("\n"),
-      confirmation: false,
+      confirmation,
       offsetMs: userItem?.startMs ?? this.now(),
       signal: abort.signal,
     };
