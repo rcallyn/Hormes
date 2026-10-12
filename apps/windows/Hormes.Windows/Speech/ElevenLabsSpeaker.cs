@@ -43,7 +43,7 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
     public ElevenLabsSpeaker()
     {
         ApiKey = ReadKey();
-        voiceId = Environment.GetEnvironmentVariable("ELEVENLABS_VOICE_ID");
+        voiceId = Setting("ELEVENLABS_VOICE_ID");
         _ = Task.Run(RunAsync);
     }
 
@@ -223,9 +223,12 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
     }
 
     /// <summary><c>ELEVENLABS_API_KEY</c> from the environment, else from <c>~/.hormes/env</c> (KEY=value lines).</summary>
-    private static string? ReadKey()
+    private static string? ReadKey() => Setting("ELEVENLABS_API_KEY");
+
+    /// <summary>A setting from the environment, else from <c>~/.hormes/env</c> (KEY=value lines).</summary>
+    private static string? Setting(string name)
     {
-        var env = Environment.GetEnvironmentVariable("ELEVENLABS_API_KEY");
+        var env = Environment.GetEnvironmentVariable(name);
         if (!string.IsNullOrWhiteSpace(env)) return env.Trim();
         var file = Path.Combine(Ipc.StateDir, "env");
         if (!File.Exists(file)) return null;
@@ -235,8 +238,8 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
             {
                 var line = raw.Trim();
                 if (line.StartsWith("export ")) line = line[7..].TrimStart();
-                if (!line.StartsWith("ELEVENLABS_API_KEY=")) continue;
-                var value = line["ELEVENLABS_API_KEY=".Length..].Trim().Trim('"', '\'');
+                if (!line.StartsWith(name + "=")) continue;
+                var value = line[(name.Length + 1)..].Trim().Trim('"', '\x27');
                 return value.Length > 0 ? value : null;
             }
         }
