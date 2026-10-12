@@ -10,7 +10,7 @@ public sealed class TrayIcon : IDisposable
 {
     private readonly NotifyIcon icon;
 
-    public TrayIcon(Action openConsole, Action restartDaemon, Action openLog, Action quit, bool clap, Action<bool> setClap)
+    public TrayIcon(Action openConsole, Action restartDaemon, Action openLog, Action quit, bool clap, Action<bool> setClap, bool speak, Action<bool> setSpeak)
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Console", null, (_, _) => openConsole());
@@ -18,6 +18,9 @@ public sealed class TrayIcon : IDisposable
         var clapItem = new ToolStripMenuItem("Listen for double clap") { Checked = clap, CheckOnClick = true };
         clapItem.CheckedChanged += (_, _) => setClap(clapItem.Checked);
         menu.Items.Add(clapItem);
+        var speakItem = new ToolStripMenuItem("Speak replies (ElevenLabs)") { Checked = speak, CheckOnClick = true };
+        speakItem.CheckedChanged += (_, _) => setSpeak(speakItem.Checked);
+        menu.Items.Add(speakItem);
         menu.Items.Add("Restart daemon", null, (_, _) => restartDaemon());
         menu.Items.Add("Open daemon log", null, (_, _) => openLog());
         menu.Items.Add(new ToolStripSeparator());

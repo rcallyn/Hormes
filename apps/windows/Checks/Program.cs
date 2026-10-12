@@ -44,7 +44,8 @@ using (var doc = JsonDocument.Parse(File.ReadAllBytes(fixture)))
         foreach (var gain in new[] { 1.0, 0.5, 0.25 })
         {
             var hits = Detections(frames.Select(f => f with { Rms = f.Rms * gain, Peak = f.Peak * gain }));
-            Check(hits.Count == 1 && hits[0] >= clapsAt[1] - 0.15 && hits[0] <= clapsAt[1] + 0.10,
+            // The Mac window, plus the quiet after the pair that confirms it here.
+            Check(hits.Count == 1 && hits[0] >= clapsAt[1] - 0.15 && hits[0] <= clapsAt[1] + 0.10 + ClapDetector.ConfirmSeconds + 0.05,
                 $"{name} detected once at gain {gain}", string.Join(", ", hits));
         }
         foreach (var removed in new[] { 0, 1 })
@@ -53,6 +54,64 @@ using (var doc = JsonDocument.Parse(File.ReadAllBytes(fixture)))
             var quiet = frames.Select(f => f.At >= clapsAt[0] && f.At <= clapsAt[1] && (removed == 0 ? f.At < mid : f.At >= mid)
                 ? f with { Rms = 0.001, Peak = 0.002, HighFrequency = 0.001 } : f);
             Check(Detections(quiet).Count == 0, $"{name} with clap {removed + 1} removed stays quiet");
+        }
+    }
+}
+
+// Sounds that are not a double clap, and synthetic claps that are: 48 kHz, a quiet room under everything.
+{
+    const int sr = 48000;
+    var rng = new Random(11);
+    float[] Room(double seconds) => Enumerable.Range(0, (int)(seconds * sr)).Select(_ => (float)((rng.NextDouble() - 0.5) * 0.004)).ToArray();
+    void Clap(float[] buf, double at, double amp)
+    {
+        // A clap: a broadband burst that decays in a few milliseconds.
+        var start = (int)(at * sr);
+        for (var i = 0; i < sr * 40 / 1000 && start + i < buf.Length; i++)
+            buf[start + i] += (float)((rng.NextDouble() * 2 - 1) * amp * Math.Exp(-i / (sr * 0.006)));
+    }
+    int Count(float[] buf)
+    {
+        var x = new ClapFrameExtractor();
+        var frames = new List<ClapDetector.Frame>();
+        for (var o = 0; o < buf.Length; o += 960) frames.AddRange(x.Frames(buf.AsSpan(o, Math.Min(960, buf.Length - o)), sr, o / (double)sr));
+        return Detections(frames).Count;
+    }
+
+    foreach (var amp in new[] { 0.9, 0.4, 0.2 })
+    {
+        var two = Room(3); Clap(two, 1.0, amp); Clap(two, 1.35, amp * 0.8);
+        Check(Count(two) == 1, $"a clean double clap counts (amplitude {amp})");
+    }
+    var three = Room(3); Clap(three, 1.0, 0.6); Clap(three, 1.35, 0.6); Clap(three, 1.55, 0.6);
+    Check(Count(three) == 0, "three claps in a row are not a double clap");
+    var uneven = Room(3); Clap(uneven, 1.0, 0.9); Clap(uneven, 1.35, 0.12);
+    Check(Count(uneven) == 0, "a loud bang and a faint tick are not a pair");
+    var slow = Room(3); Clap(slow, 1.0, 0.6); Clap(slow, 1.75, 0.6);
+    Check(Count(slow) == 0, "two claps 0.75 s apart are two claps, not a double clap");
+    var single = Room(3); Clap(single, 1.0, 0.8);
+    Check(Count(single) == 0, "one clap is not two");
+
+    // Typing: clicks every 60-300 ms for 30 s, with none of the quiet a deliberate pair has around it.
+    var typing = Room(30);
+    for (var t = 0.5; t < 29.5; t += 0.06 + rng.NextDouble() * 0.24) Clap(typing, t, 0.15 + rng.NextDouble() * 0.5);
+    Check(Count(typing) == 0, "30 s of keyboard-like clicking does not wake it", $"{Count(typing)} detections");
+
+    // Speech, at its own level and louder: plosives are sharp, but never out of silence and never confirmed by it.
+    var speechDir = Path.Combine(Path.GetTempPath(), "hormes-checks");
+    foreach (var wav in Directory.Exists(speechDir) ? Directory.GetFiles(speechDir, "*.wav") : Array.Empty<string>())
+    {
+        using var r = new AudioFileReader(wav);
+        var buf = new float[(int)r.Length / 4];
+        var n = r.Read(buf.AsSpan());
+        var ch = r.WaveFormat.Channels;
+        var monoSpeech = Enumerable.Range(0, n / ch).Select(i => buf[i * ch]).ToArray();
+        foreach (var gain in new[] { 1f, 3f })
+        {
+            var x = new ClapFrameExtractor();
+            var scaled = monoSpeech.Select(v => Math.Clamp(v * gain, -1f, 1f)).ToArray();
+            var hits = Detections(x.Frames(scaled, r.WaveFormat.SampleRate, 0)).Count;
+            Check(hits == 0, $"speech ({Path.GetFileName(wav)}, gain {gain}) does not wake it", $"{hits} detections");
         }
     }
 }
@@ -121,6 +180,11 @@ using (var doc = JsonDocument.Parse(File.ReadAllBytes(fixture)))
 
 Check(WhisperTranscriber.Clean(" [BLANK_AUDIO] ") == "" && WhisperTranscriber.Clean(" Thank you. ") == "" && WhisperTranscriber.Clean(" Open Spotify. ") == "Open Spotify.",
     "Whisper's filler on silence is dropped, real words kept");
+
+{
+    var spoken = ElevenLabsSpeaker.Speakable("## Done\n- Opened **Spotify** and [your playlist](https://open.spotify.com/x).\n```sh\nrm -rf /tmp/x\n```\nRun `pnpm test` next.");
+    Check(spoken == "Done Opened Spotify and your playlist. (code on screen) Run pnpm test next.", "answers are made speakable: no markdown, links or code read out", spoken);
+}
 
 // ------------------------------------------------------------------ whisper, end to end on a recording
 

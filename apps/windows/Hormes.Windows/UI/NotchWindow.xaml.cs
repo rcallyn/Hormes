@@ -45,9 +45,12 @@ public partial class NotchWindow : Window
     private bool awaitingReply;
     private VoiceInput? voice;
     private VoiceInput.State voiceState = VoiceInput.State.Idle;
+    private bool speaking;
     private IntPtr hwnd;
 
     public event Action? ConsoleRequested;
+    /// <summary>Stop was pressed: whatever Hormes is saying stops too.</summary>
+    public event Action? StopPressed;
 
     public NotchWindow(EngineClient client)
     {
@@ -176,7 +179,7 @@ public partial class NotchWindow : Window
     // ------------------------------------------------------------------ hover
 
     /// <summary>A draft in the Say field, or a line sent and not answered yet: the island stays open.</summary>
-    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || voiceState != VoiceInput.State.Idle;
+    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || voiceState != VoiceInput.State.Idle || speaking;
 
     /// <summary>The answer to a line sent from here landed: hold the island open long enough to read it.</summary>
     private void ShowReply()
@@ -338,10 +341,34 @@ public partial class NotchWindow : Window
         ShowVoice();
     }
 
+    /// <summary>Hormes is saying an answer aloud (ElevenLabs): the bars follow its voice and the island stays up.</summary>
+    public void OnSpeaking(bool on) => Dispatcher.BeginInvoke(() =>
+    {
+        speaking = on;
+        if (on) { closeDelay.Stop(); replyHold.Stop(); }
+        else
+        {
+            PeekBars.Output = OpenBars.Output = 0;
+            replyHold.Stop();
+            replyHold.Start();
+        }
+        Apply(content);
+    });
+
+    public void OnSpeakerLevel(double rms) => Dispatcher.BeginInvoke(() => { PeekBars.Output = OpenBars.Output = rms; });
+
     /// <summary>A turn in progress overrides the anchor and the hero: what Hormes is doing is listening to User.</summary>
     private void ShowVoice()
     {
-        if (voiceState == VoiceInput.State.Idle) return;
+        if (voiceState == VoiceInput.State.Idle)
+        {
+            if (speaking)
+            {
+                PeekBars.Phase = OpenBars.Phase = "speaking";
+                PhaseText.Text = "Speaking";
+            }
+            return;
+        }
         var listening = voiceState == VoiceInput.State.Listening;
         PeekBars.Phase = OpenBars.Phase = listening ? "listening" : "thinking";
         PhaseText.Text = listening ? "Listening" : "Transcribing";
@@ -361,6 +388,7 @@ public partial class NotchWindow : Window
     {
         awaitingReply = false;
         voice?.Cancel();
+        StopPressed?.Invoke();
         _ = client.SendCommandAsync(new { type = "stop" });
     }
 

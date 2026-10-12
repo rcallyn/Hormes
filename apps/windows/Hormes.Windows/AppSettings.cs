@@ -11,6 +11,9 @@ public sealed class AppSettings
     /// <summary>Listen for a double clap to start a voice turn (keeps the microphone open).</summary>
     public bool Clap { get; set; } = true;
 
+    /// <summary>Say Hormes's answers aloud (ElevenLabs, the Alistair voice).</summary>
+    public bool SpeakReplies { get; set; } = true;
+
     private static string PathName => Path.Combine(Ipc.StateDir, "windows-app.json");
 
     public static AppSettings Load()

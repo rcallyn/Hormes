@@ -23,6 +23,8 @@ public partial class App : Application
     private ConsoleWindow? console;
     private TrayIcon? tray;
     private VoiceInput? voice;
+    private ElevenLabsSpeaker? speaker;
+    private RepliesToSpeak? replies;
     private AppSettings settings = new();
     private bool quitting;
 
@@ -45,12 +47,30 @@ public partial class App : Application
         settings = AppSettings.Load();
         voice = new VoiceInput();
         notch.AttachVoice(voice);
+        speaker = new ElevenLabsSpeaker { Enabled = settings.SpeakReplies };
+        replies = new RepliesToSpeak(speaker.Say);
         tray = new TrayIcon(OpenConsole, () => daemon.Restart(), OpenLog, Quit, settings.Clap, on =>
         {
             settings.Clap = on;
             settings.Save();
             voice.ClapEnabled = on;
+        }, settings.SpeakReplies, on =>
+        {
+            settings.SpeakReplies = on;
+            settings.Save();
+            speaker.Enabled = on;
+            if (!on) speaker.Stop();
         });
+
+        // Hormes speaks its answers; its own voice never wakes the clap detector, and a new turn or Stop cuts it off.
+        client.Snapshot += replies.OnSnapshot;
+        speaker.Speaking += on => { voice.SpeakerActive = on; notch.OnSpeaking(on); };
+        speaker.Level += notch.OnSpeakerLevel;
+        speaker.Problem += text => notch.ShowToast(text, "warn");
+        voice.StateChanged += st => { if (st == VoiceInput.State.Listening) speaker.Stop(); };
+        notch.StopPressed += speaker.Stop;
+        if (settings.SpeakReplies && !speaker.Available)
+            notch.ShowToast("For spoken replies, add ELEVENLABS_API_KEY to ~/.hormes/env", "info");
 
         client.Snapshot += notch.OnSnapshot;
         client.Snapshot += console.OnSnapshot;
@@ -91,6 +111,7 @@ public partial class App : Application
         notch?.Hide();
         if (client is not null) await client.ByeAsync(TimeSpan.FromMilliseconds(600));
         await Task.Run(() => daemon?.Stop(TimeSpan.FromSeconds(7)));
+        if (speaker is not null) await speaker.DisposeAsync();
         if (voice is not null) await voice.DisposeAsync();
         client?.Dispose();
         daemon?.Dispose();

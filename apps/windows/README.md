@@ -60,6 +60,18 @@ and is dropped once transcribed.
 - Listening for claps keeps the microphone open (Windows shows its mic indicator); turn it off with
   **Listen for double clap** in the tray menu (`~/.hormes/windows-app.json`).
 
+**Answers are spoken** by ElevenLabs in the *Alistair* voice (`Speech/ElevenLabsSpeaker.cs`),
+streamed so the first words play while the rest is generated. Put `ELEVENLABS_API_KEY=…` in
+`~/.hormes/env`; `ELEVENLABS_VOICE_ID` pins a voice, otherwise the app finds Alistair in your voices
+or the Voice Library. Markdown and code are not read out, and long answers stop at ~1200 characters.
+A new turn or Stop cuts the voice off, Hormes's own voice never triggers the clap detector, and
+**Speak replies** in the tray menu turns it off.
+
+The clap detector is stricter than the Mac's, because the mic is open all day: a double clap must
+come out of 0.3 s of quiet, the two claps must be within 2.5x of each other in strength and 0.2–0.6 s
+apart, and the room must stay quiet for about one more clap interval after (so typing, speech, a
+third clap or music do not count). It rests 3 s after every turn.
+
 Typed text sends on Enter; text pasted in one go (a dictation app such as Wispr Flow) sends itself
 after 0.7 s. An answer holds the island open for 12 s so it can be read. Voice events go to
 `~/.hormes/windows-app.log` (lengths and timings, never the words).

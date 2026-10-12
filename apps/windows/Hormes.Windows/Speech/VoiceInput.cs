@@ -40,9 +40,30 @@ public sealed class VoiceInput : IAsyncDisposable
     /// </summary>
     private Task<string>? early;
     private CancellationTokenSource? earlyCts;
-    private const double EarlyAfter = 0.5;
+    private const double EarlyAfter = 0.7;
+    /// <summary>The last early transcription started, dropped or not: Whisper cannot be stopped mid-run, so a new one waits it out rather than queueing behind it.</summary>
+    private Task? earlyRunning;
 
     public State Current { get; private set; } = State.Idle;
+
+    /// <summary>Sample-clock time of the newest audio; claps are not listened for before <see cref="clapsFrom"/>.</summary>
+    private double lastAt;
+    private double clapsFrom;
+    private bool speakerActive;
+
+    /// <summary>
+    /// Hormes is speaking (ElevenLabs): its own voice through the speakers must not wake it. Claps resume 0.8 s after it
+    /// stops.
+    /// </summary>
+    public bool SpeakerActive
+    {
+        get => speakerActive;
+        set
+        {
+            speakerActive = value;
+            if (!value) clapsFrom = Math.Max(clapsFrom, lastAt + 0.8);
+        }
+    }
 
     public event Action<State>? StateChanged;
     /// <summary>The mic's RMS every 30 ms while a turn listens, for the voice bars.</summary>
@@ -136,8 +157,9 @@ public sealed class VoiceInput : IAsyncDisposable
             frameFill = 0;
         }
 
-        // Claps: only while nothing else is going on.
-        if (Current == State.Idle && clapEnabled)
+        lastAt = at;
+        // Claps: only while nothing else is going on, and not right after a turn or while Hormes speaks.
+        if (Current == State.Idle && clapEnabled && !speakerActive && at >= clapsFrom)
         {
             foreach (var f in clapFrames.Frames(samples, sampleRate, at))
             {
@@ -189,6 +211,7 @@ public sealed class VoiceInput : IAsyncDisposable
 
     private void StartEarly()
     {
+        if (earlyRunning is { IsCompleted: false }) return;
         float[] audio;
         int audioRate;
         lock (gate)
@@ -199,6 +222,7 @@ public sealed class VoiceInput : IAsyncDisposable
         var cts = new CancellationTokenSource();
         earlyCts = cts;
         early = Task.Run(() => whisper.TranscribeAsync(WhisperTranscriber.Resample(audio, audioRate), cts.Token));
+        earlyRunning = early;
     }
 
     private void DropEarly()
@@ -267,7 +291,8 @@ public sealed class VoiceInput : IAsyncDisposable
     {
         if (Current == s) return;
         Current = s;
-        if (s != State.Listening) claps.Reset();
+        // A turn just ended: 3 s before a clap counts again (what follows a turn is rarely a fresh double clap).
+        if (s == State.Idle) clapsFrom = Math.Max(clapsFrom, lastAt + 3);
         StateChanged?.Invoke(s);
     }
 
