@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using Hormes.Windows.Daemon;
+using Hormes.Windows.Speech;
 using Hormes.Windows.UI;
 
 namespace Hormes.Windows;
@@ -21,6 +22,8 @@ public partial class App : Application
     private NotchWindow? notch;
     private ConsoleWindow? console;
     private TrayIcon? tray;
+    private VoiceInput? voice;
+    private AppSettings settings = new();
     private bool quitting;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -39,7 +42,15 @@ public partial class App : Application
         client = new EngineClient(pipe);
         notch = new NotchWindow(client);
         console = new ConsoleWindow(client, daemon);
-        tray = new TrayIcon(OpenConsole, () => daemon.Restart(), OpenLog, Quit);
+        settings = AppSettings.Load();
+        voice = new VoiceInput();
+        notch.AttachVoice(voice);
+        tray = new TrayIcon(OpenConsole, () => daemon.Restart(), OpenLog, Quit, settings.Clap, on =>
+        {
+            settings.Clap = on;
+            settings.Save();
+            voice.ClapEnabled = on;
+        });
 
         client.Snapshot += notch.OnSnapshot;
         client.Snapshot += console.OnSnapshot;
@@ -53,6 +64,8 @@ public partial class App : Application
         notch.Show();
         daemon.Start();
         client.Start();
+        voice.ClapEnabled = settings.Clap;
+        _ = voice.WarmUpAsync();
         UpdateTray();
     }
 
@@ -78,6 +91,7 @@ public partial class App : Application
         notch?.Hide();
         if (client is not null) await client.ByeAsync(TimeSpan.FromMilliseconds(600));
         await Task.Run(() => daemon?.Stop(TimeSpan.FromSeconds(7)));
+        if (voice is not null) await voice.DisposeAsync();
         client?.Dispose();
         daemon?.Dispose();
         Shutdown();

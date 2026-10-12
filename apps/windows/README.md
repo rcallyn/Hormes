@@ -40,23 +40,47 @@ pointer leaves, unless the Say field holds a draft; Esc clears and closes. The t
 focus on hover and stays out of Alt+Tab; its transparent pixels pass the mouse through. It sits
 on the primary monitor, centred, scaled to that monitor (`UI/NotchPlacement.cs`).
 
-## Talking to it: Claude, typed or dictated
+## Talking to it: Claude, by voice or typed
 
-The app starts the daemon with `HORMES_TEXT_BRAIN=1`: with no voice session open, a line from the
-Say field goes straight to the main brain (Claude Code, on your Claude login) and the answer comes
-back on the transcript (`Engine.textTurn`). No OpenAI or Gemini key, no Live session.
+The app starts the daemon with `HORMES_TEXT_BRAIN=1`: with no voice session open, a line goes
+straight to the main brain (Claude Code, on your Claude login) and the answer comes back on the
+transcript (`Engine.textTurn`). No OpenAI or Gemini key, no Live session.
 
-Speech comes from [Wispr Flow](https://wisprflow.ai): with the island open, hold Wispr's
-push-to-talk (Ctrl+Win) and the caret moves into the Say field, so Wispr types there instead of into
-the app underneath. Text that lands in one go sends itself after 0.7 s of quiet; typed text waits
-for Enter. **Ctrl+Alt+Space** opens the island from anywhere with the caret in the field. An answer
-holds the island open for 12 s so it can be read.
+**Voice is recognised on this PC** by OpenAI's Whisper large-v3-turbo through whisper.cpp
+(`Speech/`): on the GPU via Vulkan, the CPU otherwise. The model (`ggml-large-v3-turbo-q5_0.bin`,
+574 MB) lives in `~/.hormes/models` and is downloaded on first run. Audio never leaves the machine
+and is dropped once transcribed.
+
+- **Start a turn** with a double clap (the Mac's clap detector, `Audio/ClapDetector.cs`), the mic
+  button in the island, or **Ctrl+Alt+Space** from anywhere.
+- **It stops when you are done**: `Audio/Endpointer.cs` ends the turn after 2 s of quiet against an
+  adaptive noise floor, so a pause to think does not cut you off; a cough alone is not a turn.
+- **Early transcription**: once you have been quiet 0.5 s, Whisper starts on what you said, so the
+  text is usually ready as the turn ends (0.7–1.5 s after it in the checks). Speaking again drops it.
+- Listening for claps keeps the microphone open (Windows shows its mic indicator); turn it off with
+  **Listen for double clap** in the tray menu (`~/.hormes/windows-app.json`).
+
+Typed text sends on Enter; text pasted in one go (a dictation app such as Wispr Flow) sends itself
+after 0.7 s. An answer holds the island open for 12 s so it can be read. Voice events go to
+`~/.hormes/windows-app.log` (lengths and timings, never the words).
+
+## Checks
+
+```sh
+dotnet run --project apps/windows/Checks
+dotnet run --project apps/windows/Checks -- --whisper speech.wav --expect "the words in it"
+```
+
+The first runs the clap detector against the Mac's recordings (`apps/mac/Scripts/fixtures`) and the
+endpointer against synthetic turns. The second also feeds a recording through the live path in
+real time (endpointer, early transcription, Whisper) and reports how long after the turn the text
+lands; `--runtime cpu|vulkan` pins the backend.
 
 ## Not yet on Windows
 
 | Mac piece | Status here |
 |---|---|
-| Voice (AVAudioEngine, echo guard, barge-in duck) | speech in via Wispr Flow (above); no Live voice session and no spoken answers yet. The app says `audio: false` and the daemon starts with `HORMES_AUTO_WAKE=0` |
+| Voice (AVAudioEngine, echo guard, barge-in duck) | speech in, on-device (above); no Live voice session and no spoken answers yet. The app says `audio: false` to the daemon and starts it with `HORMES_AUTO_WAKE=0` |
 | The hands (`packages/hands/native`, AX) | not yet: UI Automation + SendInput |
 | Shell sandbox (`sandbox-exec`) | not yet: AppContainer / job objects |
 | Calendar (EventKit) | not yet |

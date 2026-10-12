@@ -10,10 +10,14 @@ public sealed class TrayIcon : IDisposable
 {
     private readonly NotifyIcon icon;
 
-    public TrayIcon(Action openConsole, Action restartDaemon, Action openLog, Action quit)
+    public TrayIcon(Action openConsole, Action restartDaemon, Action openLog, Action quit, bool clap, Action<bool> setClap)
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open Console", null, (_, _) => openConsole());
+        // The microphone stays open while this is on (Windows shows its mic indicator); claps are detected on this PC.
+        var clapItem = new ToolStripMenuItem("Listen for double clap") { Checked = clap, CheckOnClick = true };
+        clapItem.CheckedChanged += (_, _) => setClap(clapItem.Checked);
+        menu.Items.Add(clapItem);
         menu.Items.Add("Restart daemon", null, (_, _) => restartDaemon());
         menu.Items.Add("Open daemon log", null, (_, _) => openLog());
         menu.Items.Add(new ToolStripSeparator());
