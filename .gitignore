@@ -34,3 +34,7 @@ apps/mac/Resources/preview-*.png
 *.p8
 *.mobileprovision
 .claude/settings.local.json
+
+# The Windows app's build output
+apps/windows/**/bin/
+apps/windows/**/obj/

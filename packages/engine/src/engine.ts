@@ -2203,7 +2203,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       ? { bin: undefined, version: undefined, signedIn: false, authMode: undefined, desktopRunning: false, configModel: undefined, detail: "not probed (brainOf)" }
       : await probeCodex({ bin: this.config.codexBin });
 
-    const facts: BrainFacts = { wanted, codex: codexProbe, claudeBin: this.config.claudeBin, claudeHome: existsSync(join(process.env["HOME"] ?? "", ".claude")), anthropicApiKey: this.config.anthropicApiKey, baseUrl };
+    const facts: BrainFacts = { wanted, codex: codexProbe, claudeBin: this.config.claudeBin, claudeHome: existsSync(join(homedir(), ".claude")), anthropicApiKey: this.config.anthropicApiKey, baseUrl };
     const notConfigured = (kind: Kind): string | undefined => brainNotConfigured(kind, facts);
 
     // Every brain proves itself before it takes a task. The same builder makes a spawned

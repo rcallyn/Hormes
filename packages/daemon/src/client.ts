@@ -1,5 +1,6 @@
 import { createConnection, type Socket } from "node:net";
 import { EventEmitter } from "node:events";
+import { ipcPath } from "@hormes/core";
 import { PROTOCOL_VERSION } from "@hormes/protocol";
 import { FRAME_JSON, FRAME_MIC, FRAME_SPEAKER, FrameParser, encodeFrame, encodeJson, type ClientMessage, type DaemonMessage } from "./wire.ts";
 
@@ -18,7 +19,7 @@ export class DaemonClient extends EventEmitter<{ message: [DaemonMessage]; audio
    */
   connect(hello: { pid: number; audio?: boolean; protocol?: number | null } = { pid: process.pid }): Promise<void> {
     return new Promise((resolve, reject) => {
-      const socket = createConnection(this.socketPath);
+      const socket = createConnection(ipcPath(this.socketPath));
       this.socket = socket;
       socket.once("connect", () => {
         const protocol = hello.protocol === undefined ? PROTOCOL_VERSION : hello.protocol;

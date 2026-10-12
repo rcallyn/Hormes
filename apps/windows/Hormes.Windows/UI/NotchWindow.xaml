@@ -1,0 +1,126 @@
+<Window x:Class="Hormes.Windows.UI.NotchWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:ui="clr-namespace:Hormes.Windows.UI"
+        Title="Hormes" Width="480" Height="280"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False" ResizeMode="NoResize" ShowActivated="False"
+        FontFamily="Segoe UI Variable Text, Segoe UI" UseLayoutRounding="True">
+  <Window.Resources>
+    <SolidColorBrush x:Key="Ink" Color="#000000"/>
+    <SolidColorBrush x:Key="Box" Color="#1C1C1E"/>
+    <SolidColorBrush x:Key="BoxHover" Color="#2C2C2E"/>
+    <SolidColorBrush x:Key="Hairline" Color="#3A3A3C"/>
+    <SolidColorBrush x:Key="Dim" Color="#8E8E93"/>
+    <SolidColorBrush x:Key="Warn" Color="#FFB340"/>
+
+    <Style x:Key="NotchButton" TargetType="Button">
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="12,5"/>
+      <Setter Property="Margin" Value="6,0,0,0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bg" Background="{StaticResource Box}" BorderBrush="{StaticResource Hairline}" BorderThickness="1" CornerRadius="8" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bg" Property="Background" Value="{StaticResource BoxHover}"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.4"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+
+  <Grid VerticalAlignment="Top" HorizontalAlignment="Center">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- Hover target: a nearly invisible band a little wider and taller than the tab, so the
+         pointer finds it at the screen's top edge. Alpha 1/255 still takes the mouse; alpha 0 would not. -->
+    <Border x:Name="HitZone" Grid.Row="0" Width="260" Height="20" VerticalAlignment="Top" Background="#01000000"/>
+
+    <Border x:Name="Island" Grid.Row="0" Width="150" Height="22" VerticalAlignment="Top" HorizontalAlignment="Center"
+            Background="{StaticResource Ink}" CornerRadius="0,0,11,11" ClipToBounds="True">
+      <Border.Effect>
+        <DropShadowEffect x:Name="IslandShadow" BlurRadius="18" ShadowDepth="3" Opacity="0" Color="Black"/>
+      </Border.Effect>
+      <Grid>
+        <!-- The peek: what the tab shows at rest. -->
+        <Grid x:Name="Peek" VerticalAlignment="Top" Height="22">
+          <ui:VoiceBars x:Name="PeekBars" Width="22" Height="11" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          <Ellipse x:Name="PeekDot" Width="6" Height="6" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,14,0" Fill="{StaticResource Warn}" Visibility="Collapsed"/>
+        </Grid>
+
+        <!-- The island: open on hover. -->
+        <Grid x:Name="Open" Margin="18,10,18,14" Opacity="0" Visibility="Collapsed">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <!-- 1 · the anchor: bars and what Hormes is doing -->
+          <DockPanel Grid.Row="0" LastChildFill="False">
+            <ui:VoiceBars x:Name="OpenBars" Width="26" Height="16" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+            <TextBlock x:Name="PhaseText" Text="Asleep" Foreground="White" FontSize="13" FontWeight="SemiBold" Margin="10,0,0,0" VerticalAlignment="Center" DockPanel.Dock="Left"/>
+            <TextBlock x:Name="BrainText" Foreground="{StaticResource Dim}" FontSize="11" VerticalAlignment="Center" DockPanel.Dock="Right"/>
+          </DockPanel>
+
+          <!-- 2 · the hero: the last line said, or what is being worked on -->
+          <TextBlock x:Name="HeroText" Grid.Row="1" Margin="0,10,0,0" Foreground="White" FontSize="15" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="42"/>
+
+          <!-- 3 · the middle: an approval, else a problem, else the threads -->
+          <StackPanel Grid.Row="2" Margin="0,8,0,0">
+            <DockPanel x:Name="ApprovalRow" Visibility="Collapsed" Margin="0,0,0,6">
+              <Button x:Name="DenyButton" Content="Deny" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Deny_Click"/>
+              <Button x:Name="AllowButton" Content="Allow" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Allow_Click"/>
+              <TextBlock x:Name="ApprovalText" Foreground="{StaticResource Warn}" FontSize="12" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+            </DockPanel>
+            <DockPanel x:Name="ProblemRow" Visibility="Collapsed" Margin="0,0,0,6">
+              <Button x:Name="RemedyButton" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Remedy_Click"/>
+              <TextBlock x:Name="ProblemText" Foreground="{StaticResource Warn}" FontSize="12" TextWrapping="Wrap" MaxHeight="34" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBlock x:Name="ThreadsText" Foreground="{StaticResource Dim}" FontSize="12" TextTrimming="CharacterEllipsis" Visibility="Collapsed"/>
+          </StackPanel>
+
+          <!-- 4 · the control row: the Say field and the transport -->
+          <DockPanel Grid.Row="3" Margin="0,8,0,0">
+            <Button x:Name="ConsoleButton" Content="Console" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Console_Click"/>
+            <Button x:Name="StopButton" Content="Stop" Style="{StaticResource NotchButton}" DockPanel.Dock="Right" Click="Stop_Click"/>
+            <Grid>
+              <TextBox x:Name="SayBox" Background="{StaticResource Box}" Foreground="White" CaretBrush="White" BorderBrush="{StaticResource Hairline}"
+                       FontSize="13" Padding="8,5" VerticalContentAlignment="Center" KeyDown="SayBox_KeyDown"
+                       GotKeyboardFocus="SayBox_FocusChanged" LostKeyboardFocus="SayBox_FocusChanged" TextChanged="SayBox_TextChanged">
+                <TextBox.Resources>
+                  <Style TargetType="Border">
+                    <Setter Property="CornerRadius" Value="8"/>
+                  </Style>
+                </TextBox.Resources>
+              </TextBox>
+              <TextBlock x:Name="SayHint" Text="Type to Hormes…" Foreground="{StaticResource Dim}" FontSize="13" Margin="11,0,0,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+            </Grid>
+          </DockPanel>
+        </Grid>
+      </Grid>
+    </Border>
+
+    <!-- The pill slot: a toast hangs under the tab for a few seconds, open or not. -->
+    <Border x:Name="Pill" Grid.Row="1" Margin="0,6,0,0" HorizontalAlignment="Center" Background="{StaticResource Ink}" CornerRadius="12"
+            Padding="12,5" Opacity="0" Visibility="Collapsed" IsHitTestVisible="False" MaxWidth="440">
+      <TextBlock x:Name="PillText" Foreground="White" FontSize="12" TextTrimming="CharacterEllipsis"/>
+    </Border>
+  </Grid>
+</Window>

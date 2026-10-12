@@ -127,7 +127,7 @@ export async function probeAnthropicKey(key: string, timeoutMs = LOGIN_TIMEOUT_M
 export function bundledClaudeBinary(): string | undefined {
   try {
     const sdk = fileURLToPath(import.meta.resolve("@anthropic-ai/claude-agent-sdk"));
-    return createRequire(sdk).resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude`);
+    return createRequire(sdk).resolve(`@anthropic-ai/claude-agent-sdk-${process.platform}-${process.arch}/claude${process.platform === "win32" ? ".exe" : ""}`);
   } catch {
     return undefined;
   }

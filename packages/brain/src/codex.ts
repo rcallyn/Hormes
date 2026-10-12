@@ -3,7 +3,7 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { LineSplitter, REPO_ROOT, logger } from "@hormes/core";
+import { LineSplitter, REPO_ROOT, ipcPath, logger } from "@hormes/core";
 import { DaemonClient, DaemonServer, type ToolHost } from "@hormes/daemon";
 import { SECRET_KEYS, type Effort } from "@hormes/protocol";
 import type { Brain, BrainAttachment, BrainResult, BrainSink, BrainTask } from "./brain.ts";
@@ -1515,7 +1515,7 @@ function existingAttachments(task: BrainTask): BrainAttachment[] {
  * when nothing there answers like one within the timeout.
  */
 export function daemonPidAt(socketPath: string, timeoutMs = 1000): Promise<number | undefined> {
-  if (!existsSync(socketPath)) return Promise.resolve(undefined);
+  if (!existsSync(ipcPath(socketPath))) return Promise.resolve(undefined);
   return new Promise((resolve) => {
     const client = new DaemonClient(socketPath);
     let done = false;

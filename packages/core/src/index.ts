@@ -1,4 +1,5 @@
 export { writeEnvSecrets, secretsPresent, envFilePath, REPO_ROOT, readConfig, keySource } from "./env.ts";
+export { ipcPath, isPipePath } from "./ipc.ts";
 export type { HormesConfig } from "./env.ts";
 export { newId } from "./ids.ts";
 export { LineSplitter } from "./ndjson.ts";

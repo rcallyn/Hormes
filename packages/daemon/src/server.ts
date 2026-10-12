@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { closeSync, constants as fsConstants, ftruncateSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { readFile, stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { logger } from "@hormes/core";
+import { ipcPath, logger } from "@hormes/core";
 import type { ToolResult } from "@hormes/hands";
 import { specByName } from "@hormes/brain";
 import { MAIN_THREAD_ID, PROTOCOL_VERSION, isAudioState, isEngineCommand, type AudioState, type AudioTelemetryShed, type EngineCommand, type EngineEvent, type Grant, type LedgerDayTotals, type OverlayCommand, type Problem } from "@hormes/protocol";
@@ -409,6 +409,18 @@ export class DaemonServer extends EventEmitter<DaemonServerEvents> {
     }
     const server = createServer((socket) => this.accept(socket));
     this.server = server;
+    if (process.platform === "win32") {
+      // A named pipe (ipcPath): no file to link or unlink. A second listen on a live pipe
+      // fails EADDRINUSE, which is the race link(2) settles on macOS.
+      try {
+        await bind(server, ipcPath(path));
+      } catch (e) {
+        this.server = undefined;
+        if ((e as NodeJS.ErrnoException).code === "EADDRINUSE") throw new SocketInUseError(path);
+        throw e;
+      }
+      return;
+    }
     const staging = stagingPath(path);
     if (staging === undefined) {
       // A path too long for a private sibling name: bind it directly (the close-time unlink of a taken-over path is the one thing lost).
@@ -1195,7 +1207,7 @@ export type SocketProbe =
  */
 export function probeSocket(path: string, timeoutMs = 1000): Promise<SocketProbe> {
   return new Promise((resolve) => {
-    const socket = createConnection(path);
+    const socket = createConnection(ipcPath(path));
     let settled = false;
     const done = (r: SocketProbe): void => {
       if (settled) return;
