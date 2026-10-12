@@ -226,9 +226,9 @@ public partial class NotchWindow : Window
         {
             ApprovalRow.Visibility = Visibility.Visible;
             ApprovalText.Text = a.Description;
-            // Owner authentication needs the platform prompt the Windows app does not have yet: Deny only.
-            AllowButton.IsEnabled = !a.RequiresOwner;
-            AllowButton.ToolTip = a.RequiresOwner ? "Needs device-owner authentication, which the Windows app does not support yet" : null;
+            // Owner authentication: the engine asks Windows Hello (the hands helper) before a yes counts.
+            AllowButton.IsEnabled = true;
+            AllowButton.ToolTip = a.RequiresOwner ? "Confirm with Windows Hello (PIN, face or fingerprint)" : null;
         }
         else ApprovalRow.Visibility = Visibility.Collapsed;
 

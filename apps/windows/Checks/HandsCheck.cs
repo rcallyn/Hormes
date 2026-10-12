@@ -60,48 +60,59 @@ internal static class HandsCheck
         var hello = Call("hello");
         Check(hello is not null && hello.Value.GetProperty("version").GetString() == "2.0.0", "helper says hello");
 
-        int notepadPid = 0;
+        // Only ever acts on Windows Notepad (process "Notepad", exactly), in a new tab of its own that it empties and
+        // closes; never keys into a tab it did not just make, and never into anything else.
+        bool NotepadInFront(out int pid)
+        {
+            pid = 0;
+            var f = Call("frontmost");
+            if (f is null) return false;
+            pid = f.Value.GetProperty("pid").GetInt32();
+            try { using var proc = Process.GetProcessById(pid); return proc.ProcessName.Equals("Notepad", StringComparison.OrdinalIgnoreCase); }
+            catch { return false; }
+        }
+
+        var opened = Call("open_app", new { name = "notepad", ownDriver = true });
+        Check(opened is not null, "open_app notepad");
+        Thread.Sleep(1000);
+        if (!NotepadInFront(out var notepadPid))
+        {
+            Check(false, "Windows Notepad is in front (stopped here; nothing was typed)");
+            try { _helper.StandardInput.Close(); _helper.WaitForExit(3000); } catch { }
+            Console.WriteLine($"{_failures} hands check(s) failed");
+            return 1;
+        }
+        Check(true, "Windows Notepad is in front");
+
+        var tabOpen = false;
         try
         {
-            var opened = Call("open_app", new { name = "notepad", ownDriver = true });
-            Check(opened is not null, "open_app notepad");
-            if (opened is not null) notepadPid = opened.Value.GetProperty("pid").GetInt32();
-            Thread.Sleep(800);
-
-            var front = Call("frontmost");
-            Check(front is not null && (front.Value.GetProperty("app").GetString() ?? "").Contains("notepad", StringComparison.OrdinalIgnoreCase),
-                "Notepad is in front", front is null ? "no frontmost" : front.Value.GetProperty("app").GetString() ?? "");
-            if (front is not null) notepadPid = front.Value.GetProperty("pid").GetInt32();
-
-            // Clear whatever a restored session left in the document, then type.
-            Call("key", new { combo = "ctrl+a", ownDriver = true });
-            Call("key", new { combo = "delete", ownDriver = true });
+            Call("key", new { combo = "ctrl+n", ownDriver = true, expectFront = new { pid = notepadPid } });
+            Thread.Sleep(500);
+            tabOpen = NotepadInFront(out _);
+            if (!tabOpen) { Check(false, "a new Notepad tab (stopped here; nothing was typed)"); return 1; }
             var typed = Call("type", new { text = "hello", ownDriver = true, expectFront = new { pid = notepadPid } });
             Check(typed is not null && typed.Value.GetProperty("characters").GetInt32() == 5, "type hello",
                 typed is null ? "" : $"via {typed.Value.GetProperty("via").GetString()}");
             Thread.Sleep(300);
 
             var focused = Call("focused_text");
+            if (focused is not null) Console.WriteLine($"info focused_text -> {focused.Value.GetRawText()}");
             string value = focused is not null && focused.Value.TryGetProperty("value", out var v) && v.ValueKind == JsonValueKind.String ? v.GetString()! : "";
             Check(value.Contains("hello", StringComparison.Ordinal), "focused_text reads hello back", $"got \"{value}\"");
         }
         finally
         {
-            // Close without saving: Alt+F4, then "Don't save" if Notepad asks; kill what is left.
-            Call("key", new { combo = "alt+F4", ownDriver = true });
-            Thread.Sleep(700);
-            var after = Call("frontmost");
-            if (after is not null && notepadPid > 0 && after.Value.GetProperty("pid").GetInt32() == notepadPid)
+            // Close the check's own tab only: empty it (it holds only "hello"), then Ctrl+W, which closes an empty untitled
+            // tab without a prompt. No "don't save" key is ever sent: if a dialog did appear, it is left for User.
+            if (tabOpen && NotepadInFront(out _))
             {
-                Call("key", new { combo = "n", ownDriver = true });
-                Thread.Sleep(500);
+                Call("key", new { combo = "ctrl+a", ownDriver = true, expectFront = new { pid = notepadPid } });
+                Call("key", new { combo = "delete", ownDriver = true, expectFront = new { pid = notepadPid } });
+                Thread.Sleep(200);
+                if (NotepadInFront(out _)) Call("key", new { combo = "ctrl+w", ownDriver = true, expectFront = new { pid = notepadPid } });
+                Thread.Sleep(400);
             }
-            try
-            {
-                using var np = notepadPid > 0 ? Process.GetProcessById(notepadPid) : null;
-                if (np is not null && !np.HasExited && np.ProcessName.Contains("notepad", StringComparison.OrdinalIgnoreCase)) np.Kill();
-            }
-            catch { /* already closed */ }
             try { _helper.StandardInput.Close(); _helper.WaitForExit(3000); } catch { }
         }
 

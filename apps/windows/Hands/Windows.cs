@@ -137,7 +137,7 @@ internal static class Windows
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs"),
     };
 
-    private static string? FindShortcut(string name)
+    private static string? FindShortcut(string name, bool exact)
     {
         string w = name.Trim().ToLowerInvariant();
         string? contains = null;
@@ -149,10 +149,10 @@ internal static class Windows
             {
                 string stem = Path.GetFileNameWithoutExtension(f).ToLowerInvariant();
                 if (stem == w) return f;
-                if (contains is null && stem.Contains(w) && !stem.Contains("uninstall")) contains = f;
+                if (!exact && contains is null && stem.Contains(w) && !stem.Contains("uninstall")) contains = f;
             }
         }
-        return contains;
+        return exact ? null : contains;
     }
 
     private static bool Shell(string file, string? args = null)
@@ -185,9 +185,13 @@ internal static class Windows
         else
         {
             string n = name!;
-            string? lnk = FindShortcut(n);
+            // Exact names first: a shortcut named exactly so, then what Windows itself resolves ("notepad", "calc", a
+            // registered App Path). Only then a shortcut that merely contains the name, so "notepad" never opens Notepad++.
+            string? lnk = FindShortcut(n, exact: true);
+            string? partial;
             if (lnk is not null && Shell(lnk)) launched = lnk;
-            else if (Shell(n)) launched = n;   // "notepad", "calc", a registered App Path, a URL protocol
+            else if (Shell(n)) launched = n;
+            else if ((partial = FindShortcut(n, exact: false)) is not null && Shell(partial)) launched = partial;
             else throw HandsException.NotFound($"could not find application {n}");
         }
 

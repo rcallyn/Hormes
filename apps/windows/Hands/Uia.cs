@@ -59,7 +59,8 @@ internal static class Uia
             if (e.TryGetCurrentPattern(ValuePattern.Pattern, out var vp))
             {
                 var v = ((ValuePattern)vp).Current.Value;
-                return v is null ? null : v.Length > limit ? v[..limit] : v;
+                // RichEdit controls (Windows 11 Notepad) answer an empty Value and keep their text in TextPattern.
+                if (!string.IsNullOrEmpty(v)) return v.Length > limit ? v[..limit] : v;
             }
         }
         catch { }
