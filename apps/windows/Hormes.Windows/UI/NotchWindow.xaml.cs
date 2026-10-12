@@ -53,9 +53,12 @@ public partial class NotchWindow : Window
         MouseLeave += (_, _) => PointerOut();
         SayBox.PreviewMouseDown += (_, _) => TakeFocus();
 
-        SourceInitialized += (_, _) => InitWindow();
+        SourceInitialized += (_, _) => { InitWindow(); Place(); };
         Loaded += (_, _) => Place();
+        // A monitor plugged in or out, the primary changed, a resolution or scale changed: place again.
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (_, _) => Dispatcher.BeginInvoke(Place);
+        // Moving onto a monitor of another DPI resizes the window by Windows' suggestion; settle it once that is done.
+        DpiChanged += (_, _) => Dispatcher.BeginInvoke(Place, DispatcherPriority.Background);
 
         Apply(content);
     }
@@ -246,11 +249,17 @@ public partial class NotchWindow : Window
 
     // ------------------------------------------------------------------ window plumbing
 
-    /// <summary>Top edge of the primary display, centred: where the notch would be.</summary>
+    /// <summary>The window's size in XAML (DIPs) before scaling.</summary>
+    private const double BaseWidth = 480, BaseHeight = 280;
+
+    /// <summary>Top edge of the primary monitor, centred and scaled to it: where the notch would be (NotchPlacement).</summary>
     private void Place()
     {
-        Left = (SystemParameters.PrimaryScreenWidth - Width) / 2;
-        Top = 0;
+        if (hwnd == IntPtr.Zero) return;
+        var (bounds, dpi) = NotchPlacement.Primary();
+        var p = NotchPlacement.For(bounds, dpi, BaseWidth, BaseHeight);
+        RootScale.ScaleX = RootScale.ScaleY = p.Scale;
+        SetWindowPos(hwnd, IntPtr.Zero, p.X, p.Y, p.Width, p.Height, SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     private void InitWindow()
@@ -279,6 +288,12 @@ public partial class NotchWindow : Window
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;
     private const int WS_EX_NOACTIVATE = 0x08000000;
+
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
     private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
