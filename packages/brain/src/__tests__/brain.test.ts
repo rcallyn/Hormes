@@ -253,7 +253,7 @@ test("the standing orders: precedence stated, secrets on the never list, every n
   // Budget: 900 through v3.1. v3.2 spent ~180 words on act-first (with its one carve-out for a material
   // ambiguity), the verification shape per tool (which results confirm, which only echo) and the browser /
   // applescript speed facts — each a measured multiplier of the first-action latency. 1100 leaves ~15 words
-  // of slack; move it deliberately, and update AGENTS.md ("things that cost real time to learn") with it.
+  // of slack; move it deliberately, and update docs/agents/learnings.md ("things that cost real time to learn") with it.
   // v3.3 (design11): the "Later." paragraph — the four automation tools, the echo line, the one set-up
   // yes with its cost, refusals kept — is ~140 words; the ceiling moves to 1250 for it and nothing else.
   // v3.4: the pronouns about the user are gone (the name, "this Mac", "the task", "they win"); 1224 → 1225 words, the ceiling stays.

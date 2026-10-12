@@ -54,7 +54,7 @@ test("memory prompt: every brain kind that builds its own user turn goes through
   // A source pin rather than five fakes: the claim is "one render site reaches
   // every brain", and the cheapest true test of that is that each brain file
   // calls it. responses.ts is Live's own backend (Live runs the turn itself), so
-  // the per-delegation block cannot reach it — AGENTS.md says so.
+  // the per-delegation block cannot reach it — docs/agents/learnings.md says so.
   const here = dirname(fileURLToPath(import.meta.url));
   for (const file of ["anthropic.ts", "claude.ts", "codex.ts", "compatible.ts"]) {
     const src = readFileSync(join(here, "..", file), "utf8");

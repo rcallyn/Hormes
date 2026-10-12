@@ -3,7 +3,7 @@ import { BYTES_PER_MS } from "./audio-telemetry.ts";
 
 /**
  * The engine asks (LC-7, 2026-10-06). GPT-Live-1 answers what it hears on its own: the protocol has no turn-detection
- * setting, no `create_response` switch and no cancel (packages/live/src/events.ts; AGENTS.md "Stop is local"), and its
+ * setting, no `create_response` switch and no cancel (packages/live/src/events.ts; docs/agents/learnings.md "Stop is local"), and its
  * `response.create` continues the Responses backend, not the voice. F4's orders asked it to keep quiet for the room;
  * in both LC-7 runs it answered the room anyway and delegated its commands, and every answer re-armed the idle clock.
  * So the server's turn-taking runs untouched and the engine decides, per voice turn and before its first audible

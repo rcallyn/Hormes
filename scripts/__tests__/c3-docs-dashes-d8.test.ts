@@ -162,7 +162,7 @@ test("D8: Go / Pause stays ⌥⇧Space, the one hotkey whose combo types a chara
   );
   assert.doesNotMatch(hotkeys, /stays go \/ pause|takes the no-break space/, "the README states the hotkey, not its history, and never says the no-break space is gone");
 
-  const agents = read("AGENTS.md");
+  const agents = read("docs/agents/learnings.md");
   const bullet = agents.slice(agents.indexOf("- **The letter hotkeys are"), agents.indexOf("\n- **Version skew"));
   assert.match(
     bullet,

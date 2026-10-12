@@ -511,4 +511,4 @@ Before F5 (2026-10-06, 4727241) the same bench timed out on a locked screen: ove
 screenshots stopped at their 6 s limit and 3 pointer moves at their 8 s limit. Two helper
 processes started from one executable path both captured through ScreenCaptureKit, one
 capture's callback never came, and the acting helper's queue stayed blocked. Now only the acting helper
-captures, and a capture answers `capture_failed` after 5 s so the queue moves on (AGENTS.md).
+captures, and a capture answers `capture_failed` after 5 s so the queue moves on (docs/agents/learnings.md).
