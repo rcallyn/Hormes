@@ -377,7 +377,9 @@ test("a file at the socket path that is not a socket is never deleted: listen() 
   const path = join(socketDir(), "d.sock");
   writeFileSync(path, "User's notes\n");
   const server = new DaemonServer(new MiniEngine("x") as never, path);
-  await assert.rejects(server.listen(), /cannot take .* \(ENOTSOCK\): something other than a Hormes socket is there/);
+  // Windows serves the path's named pipe (ipcPath), never the file: the file is not in the way, and stays.
+  if (process.platform === "win32") await server.listen();
+  else await assert.rejects(server.listen(), /cannot take .* \(ENOTSOCK\): something other than a Hormes socket is there/);
   await server.close();
   assert.equal(readFileSync(path, "utf8"), "User's notes\n");
 });
