@@ -84,4 +84,4 @@ notch opens, grows to fit (720 DIPs wide, up to 700 tall, scrolling past that) a
 Free) with typeset math (WpfMath) for math-heavy classes, plain otherwise, until Done, a click away or the next
 question. A course is marked for handwriting with `"handwriting": true` in its `course.json` (`courses list` reports it).
 The spoken answer is one line pointing at the notes. Long ordinary answers also widen and heighten the island to fit.
-`Checks.exe --render` draws notes-handwriting.png and notes-plain.png. The Mac ignores `notes` for now.
+`Checks.exe --render` draws notes-handwriting.png, notes-plain.png and notch-notes.png (the real island with notes). The Mac ignores `notes` for now.

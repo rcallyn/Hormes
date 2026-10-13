@@ -69,6 +69,26 @@ public static class Render
             host.Close();
         }
 
+        // The real notch with notes on it: ShowNotes opens the island and grows it to fit.
+        {
+            var notch = new Hormes.Windows.UI.NotchWindow(new EngineClient("hormes-render-none"));
+            notch.Show();
+            notch.ShowNotes("Bayes' rule, worked", SampleNotes, true);
+            Settle(notch, 900);
+            notch.RootScale.ScaleX = notch.RootScale.ScaleY = 1;
+            Settle(notch, 200);
+            {
+                var island = notch.Island;
+                var bmp = new RenderTargetBitmap((int)island.ActualWidth, (int)island.ActualHeight, 96, 96, PixelFormats.Pbgra32);
+                bmp.Render(island);
+                var png = new PngBitmapEncoder();
+                png.Frames.Add(BitmapFrame.Create(bmp));
+                using var file = File.Create(Path.Combine(dir, "notch-notes.png"));
+                png.Save(file);
+            }
+            notch.Close();
+        }
+
         var services = new ConsoleServices
         {
             Client = client,

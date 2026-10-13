@@ -32,7 +32,7 @@ public partial class NotchWindow : Window
     /// <summary>The island open: at least this, and grown to fit a long answer or notes, up to the window's room.</summary>
     private const double MinOpenWidth = 440, MinOpenHeight = 280, WideOpenWidth = 600, NotesWidth = 720, MaxOpenHeight = 700;
     /// <summary>What the island takes besides the hero or the notes: margins, the status row, the rows under it.</summary>
-    private const double OpenChrome = 175;
+    private const double OpenChrome = 120;
     private double openWidth = MinOpenWidth, openHeight = MinOpenHeight;
     /// <summary>Notes are on the island (the explain tool) until Done, a click away, or the next question.</summary>
     private bool notesActive;
