@@ -21,6 +21,7 @@ public sealed class SchoolPage : PageFrame, IConsolePage
     private readonly StackPanel assignments = new();
     private DateOnly weekStart;
     private readonly Button record;
+    private bool recordComputerAudio;
     private readonly CheckBox nudges = new() { IsChecked = true };
     private readonly System.Windows.Threading.DispatcherTimer recordTimer = new() { Interval = TimeSpan.FromSeconds(1) };
 
@@ -93,6 +94,10 @@ public sealed class SchoolPage : PageFrame, IConsolePage
             return;
         }
         var menu = new ContextMenu { PlacementTarget = record, Placement = PlacementMode.Bottom };
+        var computer = new MenuItem { Header = "Computer audio (an online lecture or a call), not the microphone", IsCheckable = true, StaysOpenOnClick = true, IsChecked = recordComputerAudio };
+        computer.Click += (_, _) => recordComputerAudio = computer.IsChecked;
+        menu.Items.Add(computer);
+        menu.Items.Add(new Separator());
         void Item(string header, string? course, string title)
         {
             var item = new MenuItem { Header = header };
@@ -100,16 +105,16 @@ public sealed class SchoolPage : PageFrame, IConsolePage
             {
                 try
                 {
-                    recorder.Start(course, title);
+                    recorder.Start(course, title, recordComputerAudio);
                     recordTimer.Start();
-                    Window.ShowToast($"Recording {title}. Transcribed on this PC; press Stop recording when it ends.");
+                    Window.ShowToast($"Recording {title} from the {recorder.Source}. Transcribed on this PC; press Stop recording when it ends.");
                 }
                 catch (Exception ex) { Window.ShowToast($"Could not start recording: {ex.Message}"); }
             };
             menu.Items.Add(item);
         }
         foreach (var course in LectureRecorder.Courses()) Item(course, course, $"{course} lecture");
-        if (menu.Items.Count > 0) menu.Items.Add(new Separator());
+        if (menu.Items.Count > 2) menu.Items.Add(new Separator());
         Item("Meeting (no course)", null, "Meeting");
         menu.IsOpen = true;
     }

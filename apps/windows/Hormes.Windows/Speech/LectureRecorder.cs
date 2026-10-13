@@ -26,6 +26,9 @@ public sealed class LectureRecorder : IDisposable
     private List<float> pending = new();
     private int pendingRate = 16000;
     private double chunkStart;
+    /// <summary>Seconds of audio received; loopback skips silence and a fed recording runs ahead of the clock, so a
+    /// stamp is the later of this and the wall clock.</summary>
+    private double audioSeconds;
     private double quietFor;
     private Task writes = Task.CompletedTask;
     private CancellationTokenSource? cts;
@@ -35,6 +38,7 @@ public sealed class LectureRecorder : IDisposable
     public bool Recording { get; private set; }
     public string? FilePath { get; private set; }
     public DateTime StartedAt { get; private set; }
+    public string Source { get; private set; } = "microphone";
     public TimeSpan Elapsed => Recording ? DateTime.Now - StartedAt : TimeSpan.Zero;
     public event Action<string>? Problem;
 
@@ -56,7 +60,8 @@ public sealed class LectureRecorder : IDisposable
     }
 
     /// <summary>Start recording into a course's Transcripts folder, or Meetings when course is null.</summary>
-    public void Start(string? course, string title)
+    /// <param name="capture">false: no device opens; samples arrive through <see cref="Feed"/> (the Checks drive it so).</param>
+    public void Start(string? course, string title, bool computerAudio = false, bool capture = true)
     {
         lock (gate)
         {
@@ -66,15 +71,17 @@ public sealed class LectureRecorder : IDisposable
             StartedAt = DateTime.Now;
             var safe = string.Concat(title.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c)).Trim();
             FilePath = Path.Combine(dir, $"{StartedAt:yyyy-MM-dd HHmm} {safe}.md");
-            File.WriteAllText(FilePath, $"# {title}\n\n{(course is null ? "Meeting" : course)} · recorded {StartedAt:dddd d MMMM yyyy, HH:mm} · transcribed on this PC by Whisper; may contain mistakes.\n\n", new UTF8Encoding(false));
+            File.WriteAllText(FilePath, $"# {title}\n\n{(course is null ? "Meeting" : course)} · recorded {StartedAt:dddd d MMMM yyyy, HH:mm} · {(computerAudio ? "computer audio" : "microphone")} · transcribed on this PC by Whisper; may contain mistakes.\n\n", new UTF8Encoding(false));
             pending = new List<float>();
             chunkStart = 0;
+            audioSeconds = 0;
             quietFor = 0;
             cts = new CancellationTokenSource();
-            mic = new MicCapture();
+            mic = new MicCapture(loopback: computerAudio);
+            Source = computerAudio ? "computer audio" : "microphone";
             mic.Samples += OnSamples;
             mic.Problem += p => Problem?.Invoke(p);
-            mic.Start();
+            if (capture) mic.Start();
             Recording = true;
         }
         _ = whisper.EnsureLoadedAsync(cts!.Token).ContinueWith(t => { if (t.IsFaulted) Problem?.Invoke($"transcription model unavailable: {t.Exception?.GetBaseException().Message}"); }, TaskScheduler.Default);
@@ -101,6 +108,9 @@ public sealed class LectureRecorder : IDisposable
         return FilePath;
     }
 
+    /// <summary>Samples as the capture delivers them (mono, any rate).</summary>
+    public void Feed(float[] samples, int rate) => OnSamples(samples, rate, 0);
+
     private void OnSamples(float[] samples, int rate, double at)
     {
         float[]? cut = null;
@@ -109,7 +119,9 @@ public sealed class LectureRecorder : IDisposable
         {
             if (!Recording) return;
             pendingRate = rate;
+            if (pending.Count == 0) chunkStart = Math.Max(audioSeconds, (DateTime.Now - StartedAt).TotalSeconds);
             pending.AddRange(samples);
+            audioSeconds += (double)samples.Length / rate;
             double sum = 0;
             foreach (var s in samples) sum += s * s;
             var rms = samples.Length > 0 ? Math.Sqrt(sum / samples.Length) : 0;
@@ -119,7 +131,6 @@ public sealed class LectureRecorder : IDisposable
             {
                 cut = pending.ToArray();
                 cutAt = chunkStart;
-                chunkStart += seconds;
                 pending = new List<float>();
                 quietFor = 0;
             }

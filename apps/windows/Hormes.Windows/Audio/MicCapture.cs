@@ -21,6 +21,11 @@ public sealed class MicCapture : IDisposable
     private long samplesSeen;
     private bool wanted;
     private bool disposed;
+    private readonly bool loopback;
+
+    /// <summary>loopback: what this PC is playing (an online lecture, a call) instead of the microphone. WASAPI loopback
+    /// sends nothing while nothing plays.</summary>
+    public MicCapture(bool loopback = false) => this.loopback = loopback;
 
     /// <summary>Mono samples (-1..1), their rate, and the time (s, sample clock since this capture started) of the first.</summary>
     public event Action<float[], int, double>? Samples;
@@ -36,7 +41,7 @@ public sealed class MicCapture : IDisposable
             if (Running || disposed) return;
             try
             {
-                var c = new WasapiCapture(WasapiCapture.GetDefaultCaptureDevice(), true, 20);
+                var c = loopback ? new WasapiLoopbackCapture() : new WasapiCapture(WasapiCapture.GetDefaultCaptureDevice(), true, 20);
                 c.DataAvailable += OnData;
                 c.RecordingStopped += OnStopped;
                 samplesSeen = 0;

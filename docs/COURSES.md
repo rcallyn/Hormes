@@ -21,7 +21,8 @@ Read formats: PDF (`pdftotext` from Poppler when on PATH; Git for Windows ships 
 simple fonts), PowerPoint `.pptx` (slides plus speaker notes), Word `.docx`, Jupyter `.ipynb`, HTML, Markdown, text,
 LaTeX and source code. Old `.ppt`/`.doc` files and scanned PDFs are listed as unreadable; export them to PDF or PPTX.
 
-The library never follows links, never reads dotfiles or secret-named files (`.env*`, keys, `credentials*`), writes
+A first index of a big folder runs in the background: a tool call waits at most 8 s and says how far indexing got
+(200 lecture PDFs take about 4 s with pdftotext; a restart reloads the index in milliseconds). The library never follows links, never reads dotfiles or secret-named files (`.env*`, keys, `credentials*`), writes
 nothing beside your files, and keeps its index in `<stateDir>/courses/index.json` (refreshed by size and mtime).
 
 ## What the brain can do (`courses` tool, read-only, policy `run`)
@@ -52,7 +53,8 @@ off), and off while you've asked for quiet or the machine sleeps:
 ## Windows
 
 School page: Prep me for class, Help with homework (coaching, not handing over answers), Exam study guide, Quiz me,
-Plan my week, What's due next, Open course folder, and **Record lecture**. Recording transcribes on this PC with the
+Plan my week, What's due next, Where was I?, Weekly review, Open course folder, and **Record lecture** (from the
+microphone, or from computer audio for an online lecture or a call: WASAPI loopback). Recording transcribes on this PC with the
 voice turn's Whisper model, in chunks of 25 to 40 seconds cut at a pause, into the course's `Transcripts` folder. On stop,
 Hormes is asked for clean notes and any announced deadlines. Ask before recording other people.
 
@@ -61,3 +63,5 @@ Hormes is asked for clean notes and any announced deadlines. Ask before recordin
 Lectures and meetings Hormes captured in a work session (the Mac's lecture and meeting capture) are indexed too, as
 `<course>/Captured/<date> <title>.md` transcripts under the session's course (or a "Captured lectures and meetings"
 course), read from the work store; nothing is written into the course folders. This needs the courses root to exist.
+
+`Checks.exe --recorder lecture.wav` drives the recorder end to end on a recording (no device, nothing played).

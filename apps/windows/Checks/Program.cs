@@ -269,6 +269,33 @@ foreach (var caf in Directory.GetFiles(Path.Combine(repo, "apps", "mac", "Resour
     var t = new FollowUp(); t.Heard(); t.End(); t.ReplyLine();
     Check(!t.Due, "typing or Stop ends the spoken conversation");
 }
+// --recorder a.wav: the lecture recorder end to end on a recording: chunked at pauses, transcribed in order, written as
+// a course transcript under a temporary courses root (no device opens, nothing is played).
+var recArg = Array.IndexOf(args, "--recorder");
+if (recArg >= 0 && recArg + 1 < args.Length)
+{
+    using var reader = new AudioFileReader(args[recArg + 1]);
+    var rate = reader.WaveFormat.SampleRate;
+    var channels = reader.WaveFormat.Channels;
+    var all = new List<float>();
+    var buf = new float[rate * channels];
+    int n;
+    while ((n = reader.Read(buf.AsSpan())) > 0) all.AddRange(buf.Take(n));
+    var mono = Enumerable.Range(0, all.Count / channels).Select(i => (float)Enumerable.Range(0, channels).Average(c => all[i * channels + c])).ToArray();
+    var root = Path.Combine(Path.GetTempPath(), "hormes-recorder-check-" + Guid.NewGuid().ToString("N")[..8]);
+    Environment.SetEnvironmentVariable("HORMES_COURSES_DIR", root);
+    await using var whisper = new WhisperTranscriber();
+    using var recorder = new LectureRecorder(whisper);
+    recorder.Problem += p => Console.WriteLine($"     problem: {p}");
+    var sw = Stopwatch.StartNew();
+    recorder.Start("CS 161", "Scheduling lecture", capture: false);
+    for (var o = 0; o < mono.Length; o += rate / 50) recorder.Feed(mono[o..Math.Min(mono.Length, o + rate / 50)], rate);
+    var path = await recorder.StopAsync();
+    var text = path is null ? "" : File.ReadAllText(path);
+    Console.WriteLine($"     {mono.Length / (double)rate:0.0} s of audio transcribed in {sw.ElapsedMilliseconds} ms into {path}:");
+    Console.WriteLine(text);
+    Check(path is not null && path.StartsWith(Path.Combine(root, "CS 161", "Transcripts")) && text.Contains("[00:") && text.Contains("Recording ended"), "the recorder writes a stamped transcript into the course's Transcripts folder");
+}
 var wavArg = Array.IndexOf(args, "--whisper");
 if (wavArg >= 0 && wavArg + 1 < args.Length)
 {
