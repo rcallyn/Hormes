@@ -6518,7 +6518,8 @@ export class Engine extends EventEmitter<EngineEvents> {
     try { await this.courses.refresh(5 * 60_000); } catch { return; }
     const courses = this.courses.list();
     if (!courses.length) return;
-    const nudges = this.courseNudger.take({ now, courses, agenda: this.planner.state(), homeworkFor: (todo, course) => this.courses.homeworkFor(todo.title, course), lastLecture: (course) => this.courses.lastLecture(course) });
+    const downloads = await this.courses.inbox().catch(() => []);
+    const nudges = this.courseNudger.take({ now, courses, agenda: this.planner.state(), downloads, homeworkFor: (todo, course) => this.courses.homeworkFor(todo.title, course), lastLecture: (course) => this.courses.lastLecture(course) });
     for (const n of nudges) this.emit("event", { type: "notify", id: newId("ntf"), title: n.title, body: n.body, presses: [], automationId: "" });
   }
 

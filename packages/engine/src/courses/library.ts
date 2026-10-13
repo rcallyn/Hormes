@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, extname, join, relative, sep } from "node:path";
 import type { PlannerEvent, PlannerTodo } from "@hormes/protocol";
 import { DOC_EXTENSIONS, MAX_FILE_BYTES, extractUnits, type TextUnit } from "./extract.ts";
+import { defaultDownloadsDir, fileDownload, scanInbox, type InboxItem } from "./inbox.ts";
 
 /**
  * The course library: User's classes as folders, and every slide, handout, homework and note inside them made
@@ -35,6 +36,8 @@ export interface CourseLibraryOptions {
   /** Lectures and meetings Hormes already captured (the work store's transcripts), indexed beside the files as
    * `<course>/Captured/<date> <title>`; nothing is written into the course folders. */
   readonly captured?: () => readonly CapturedTranscript[];
+  /** Where downloads land (default HORMES_DOWNLOADS_DIR, else ~/Downloads): the course inbox. */
+  readonly downloads?: string;
   /** How long a tool call waits for a walk in progress (default 8 s). */
   readonly waitMs?: number;
 }
@@ -227,6 +230,11 @@ export class CourseLibrary {
     } catch { /* the index is a cache; the next refresh reads the files again */ }
   }
 
+  /** Recent downloads that look like course material, with the course each names. */
+  inbox(): Promise<InboxItem[]> {
+    return scanInbox(this.opts.downloads ?? defaultDownloadsDir(), this.list(), this.materials(), this.now());
+  }
+
   /** While a walk is reading files, a line saying the results are partial. */
   private indexing(): { indexing?: string } {
     return this.progress ? { indexing: `Still reading course files: ${this.progress.done} of ${this.progress.total} done; results so far are partial. Ask again in a minute for the rest.` } : {};
@@ -389,8 +397,26 @@ export class CourseLibrary {
         const r = this.read(file, { ...(str("loc") ? { loc: str("loc")! } : {}), ...(typeof payload["maxChars"] === "number" ? { maxChars: payload["maxChars"] } : {}) });
         return JSON.stringify(r ?? { error: `No indexed course file ${JSON.stringify(file)}. Use files to see what is there.` });
       }
+      case "inbox": {
+        if (!existsSync(this.root)) return missing();
+        const items = await this.inbox();
+        return JSON.stringify({ downloads: this.opts.downloads ?? defaultDownloadsDir(), items: items.map(i => ({ ...i, modified: new Date(i.modified).toISOString().slice(0, 16) })), note: items.length ? "Recent downloads not yet in a course folder. import copies one in (the download stays); ask User which course when none is matched." : "No recent course-like downloads." });
+      }
+      case "import": {
+        if (!existsSync(this.root)) return missing();
+        const name = str("file"), courseName = str("course");
+        if (!name || !courseName) return JSON.stringify({ error: "import needs {file (a name from inbox), course}." });
+        const course = this.resolveCourse(courseName);
+        if (!course) return JSON.stringify({ error: `No course matches ${JSON.stringify(courseName)}. Known: ${this.list().map(c => c.title).join(", ") || "none"}.` });
+        const kind = str("kind") as MaterialKind | undefined;
+        try {
+          const path = fileDownload(this.opts.downloads ?? defaultDownloadsDir(), name, course, kind);
+          this.scannedAt = 0;
+          return JSON.stringify({ filed: path, course: course.title, note: "Copied; the download is untouched. It is searchable after the next refresh (seconds)." });
+        } catch (e) { return JSON.stringify({ error: (e as Error).message }); }
+      }
       default:
-        return JSON.stringify({ error: `Unknown courses operation ${JSON.stringify(operation)}; use list, files, search or read.` });
+        return JSON.stringify({ error: `Unknown courses operation ${JSON.stringify(operation)}; use list, files, search, read, inbox or import.` });
     }
   }
 }

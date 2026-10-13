@@ -16,6 +16,8 @@ export interface NudgeInput {
   /** The best homework file for a todo, and the newest lecture of a course (the library's search). */
   readonly homeworkFor?: (todo: PlannerTodo, course: CourseInfo | undefined) => SearchHit | undefined;
   readonly lastLecture?: (course: CourseInfo) => string | undefined;
+  /** Recent downloads that name a course and are not filed yet. */
+  readonly downloads?: readonly { readonly name: string; readonly modified: number; readonly course?: string }[];
 }
 export const MAX_PER_DAY = 6;
 const CLASS_LEAD_MS = 15 * 60_000;
@@ -75,6 +77,12 @@ export function courseNudges(input: NudgeInput): CourseNudge[] {
     if (!when) continue;
     const file = input.homeworkFor?.(t, course);
     add({ key: `due:${t.id}:${t.dueDate}:${when}`, title: `${short(t.title)} is due ${when}`, body: file ? `Hormes has ${short(file.file.split("/").pop()!, 50)} from your ${label(course, "course")} folder. Say "help me with ${short(t.title, 30)}" to start.` : `Say "help me with ${short(t.title, 30)}" and Hormes will pull up the slides that cover it.`, ...(course ? { course: course.id } : {}) });
+  }
+  // New course files in Downloads: one nudge for the lot, once per file set.
+  const fresh = (input.downloads ?? []).filter(d => d.course && now - d.modified < 2 * 86_400_000);
+  if (fresh.length) {
+    const first = fresh[0]!, course = courses.find(c => c.id === first.course);
+    add({ key: `dl:${fresh.map(d => `${d.name}:${Math.round(d.modified)}`).sort().join("|")}`, title: fresh.length === 1 ? `${short(first.name, 40)} looks like ${label(course, "course")} material` : `${fresh.length} new course files in Downloads`, body: `Say "file my downloads" and Hormes copies ${fresh.length === 1 ? "it" : "them"} into the course folder${fresh.length === 1 ? "" : "s"}, where they become searchable.` });
   }
   return out;
 }

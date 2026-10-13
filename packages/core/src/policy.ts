@@ -330,7 +330,7 @@ export function classifyToolScope(name: string, input: Record<string, unknown>, 
   }
   if (name === "meeting_gmail") return work?.mode === "meeting" ? run("explicit app-owned meeting action; trusted payload and owner proof required by runner") : refuse("Gmail actions require a meeting workspace");
   if (name === "tasks") return run("Tasks inbox capability; original user intent and source/version gates are enforced by the application");
-  if (name === "courses") return run("read-only course library: indexed files under the courses folder, links and secret-named files never read");
+  if (name === "courses") return run("the course library: reads indexed files under the courses folder (links and secret-named files never), and import copies a download into a course folder without overwriting anything");
   if (name === "planner") return run("User's own todos and calendar; validated by the planner, nothing leaves the planner's store");
   if (!work) return name === "work" ? refuse("open a work session first") : run("ordinary task scope");
   if (name === "work" || name === "speak_progress") return run("active work session");

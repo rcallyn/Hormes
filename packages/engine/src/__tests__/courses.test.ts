@@ -137,3 +137,31 @@ test("captured lectures and meetings are indexed as transcripts under their cour
   assert.match(await lib.tool("read", { file: meeting!.file }), /Thesis outline due Friday/);
   assert.deepEqual(readdirSync(join(root, "Microeconomics")), [], "the course folder is untouched");
 });
+
+test("the inbox finds recent course downloads by name or first page, and import copies one in without overwriting", async () => {
+  const { root, lib } = library();
+  const downloads = join(root, "..", "Downloads");
+  mkdirSync(downloads, { recursive: true });
+  writeFileSync(join(downloads, "cs161_hw3.md"), "Homework 3: deadlocks.");
+  writeFileSync(join(downloads, "slides-week6.md"), "Intermediate Microeconomics, week 6: oligopoly.");
+  writeFileSync(join(downloads, "receipt.txt"), "Thanks for your order.");
+  writeFileSync(join(downloads, ".env"), "SECRET=1");
+  const inboxLib = new CourseLibrary({ stateDir: join(root, "..", "state2"), root, downloads });
+  const items = (JSON.parse(await inboxLib.tool("inbox", {})) as { items: { name: string; course?: string; why?: string }[] }).items;
+  const by = Object.fromEntries(items.map(i => [i.name, i]));
+  assert.equal(by["cs161_hw3.md"]?.course, "cs-161-operating-systems");
+  assert.equal(by["cs161_hw3.md"]?.why, "its name");
+  assert.equal(by["slides-week6.md"]?.course, "microeconomics");
+  assert.equal(by["slides-week6.md"]?.why, "its first page");
+  assert.equal(by["receipt.txt"]?.course, undefined);
+  assert.equal(by[".env"], undefined);
+  const filed = JSON.parse(await inboxLib.tool("import", { file: "cs161_hw3.md", course: "CS 161" })) as { filed: string };
+  assert.equal(filed.filed, "CS 161 - Operating Systems/Homework/cs161_hw3.md");
+  const again = JSON.parse(await inboxLib.tool("import", { file: "cs161_hw3.md", course: "CS 161" })) as { filed: string };
+  assert.equal(again.filed, "CS 161 - Operating Systems/Homework/cs161_hw3 (2).md", "never overwrites");
+  assert.match(await inboxLib.tool("import", { file: "../Courses/x.md", course: "CS 161" }), /not a file name in Downloads/);
+  assert.match(await inboxLib.tool("import", { file: ".env", course: "CS 161" }), /not a file name/);
+  const after = (JSON.parse(await inboxLib.tool("inbox", {})) as { items: { name: string }[] }).items.map(i => i.name);
+  assert.ok(!after.includes("cs161_hw3.md"), "a filed download leaves the inbox");
+  void lib;
+});

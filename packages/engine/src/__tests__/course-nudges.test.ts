@@ -70,3 +70,11 @@ test("the morning brief lists today's classes and what is due by tomorrow, once,
   assert.equal(courseNudges({ now: local("2026-10-12T07:05:00"), courses, agenda, seen: new Set(["brief:2026-10-12"]) }).length, 0);
   assert.equal(courseNudges({ now: local("2026-10-12T07:05:00"), courses, agenda: { todos: [], events: [] }, seen: new Set() }).length, 0);
 });
+
+test("new course downloads get one nudge for the set; unmatched or old ones none", () => {
+  const now = local("2026-10-12T14:00:00");
+  const one = courseNudges({ now, courses, agenda: { todos: [], events: [] }, seen: new Set(), downloads: [{ name: "cs161_hw3.pdf", modified: now - 3600_000, course: "cs-161" }, { name: "receipt.pdf", modified: now - 3600_000 }, { name: "old.pdf", modified: now - 5 * 86_400_000, course: "cs-161" }] });
+  assert.equal(one.length, 1);
+  assert.equal(one[0]!.title, "cs161_hw3.pdf looks like CS 161 material");
+  assert.match(one[0]!.body, /file my downloads/);
+});

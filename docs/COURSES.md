@@ -33,6 +33,10 @@ nothing beside your files, and keeps its index in `<stateDir>/courses/index.json
 - `files {course?, kind?}`, `search {query, course?, kind?, limit?}` (BM25, at most three passages a file),
   `read {file, loc?, maxChars?}` (from a slide or page on).
 - Kinds: lecture, transcript, homework, exam, syllabus, reading, notes, solution, lab, other (from the path).
+- `inbox`: downloads from the last 14 days (`HORMES_DOWNLOADS_DIR`, else `~/Downloads`) not yet filed, each with the
+  course its name or first page names. `import {file, course, kind?}` copies one into the course folder's subfolder for
+  its kind (Lectures, Homework, Exams…); the download stays, and an existing file is never overwritten (`name (2).pdf`).
+  A nudge says when new course files land in Downloads; the School page has File my downloads.
 
 The tool description tells every brain to search before answering coursework and to cite file and location. Study
 sessions (`study`/`exam`/`review`) get the tool too, and there a `search` or `read` result becomes a work source of kind
