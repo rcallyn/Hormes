@@ -255,6 +255,20 @@ foreach (var caf in Directory.GetFiles(Path.Combine(repo, "apps", "mac", "Resour
 
 // ------------------------------------------------------------------ whisper, end to end on a recording
 
+{
+    var f = new FollowUp();
+    f.ListeningStarted(); f.Heard(); f.ListeningEnded();
+    f.EngineBusy(true); f.ReplyLine(); f.Speaking(true);
+    var early = f.Due;
+    f.EngineBusy(false); f.Speaking(false);
+    var due = f.StillDue();
+    var once = !f.StillDue();
+    f.ListeningStarted(); f.ListeningEnded();
+    f.ReplyLine();
+    Check(!early && due && once && !f.Due && !f.InConversation, "a spoken turn listens again once the answer is done, once, and stops after a silent turn");
+    var t = new FollowUp(); t.Heard(); t.End(); t.ReplyLine();
+    Check(!t.Due, "typing or Stop ends the spoken conversation");
+}
 var wavArg = Array.IndexOf(args, "--whisper");
 if (wavArg >= 0 && wavArg + 1 < args.Length)
 {

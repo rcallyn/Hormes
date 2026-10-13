@@ -16,7 +16,7 @@ public sealed class TodosPage : PageFrame, IConsolePage
 {
     private enum Filter { Today, Scheduled, All, Completed }
 
-    private Filter filter = Filter.Today;
+    private Filter filter = Filter.All;
     private string? category;
     private readonly UniformGrid tiles = new() { Columns = 4, Margin = new Thickness(-5, 0, -5, 0) };
     private readonly WrapPanel chips = new() { Margin = new Thickness(0, 12, 0, 0) };

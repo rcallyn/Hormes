@@ -61,7 +61,11 @@ public partial class App : Application
         notch.AttachVoice(voice);
         speaker = new ElevenLabsSpeaker { Enabled = settings.SpeakReplies };
         // Only short, conversational answers are spoken; anything meant for reading stays on screen.
-        replies = new RepliesToSpeak(line => { if (SpokenReply.Pick(line) is { } spoken) speaker.Say(spoken); });
+        replies = new RepliesToSpeak(line =>
+        {
+            if (SpokenReply.Pick(line) is { } spoken) speaker.Say(spoken);
+            Dispatcher.BeginInvoke(() => { if (followUp.ReplyLine()) ListenAgainSoon(); });
+        });
         planner = new Planner(client);
 
         // One place changes the voice switches; the tray menu and the Console show the same state.
@@ -99,6 +103,24 @@ public partial class App : Application
         speaker.Problem += text => notch.ShowToast(text, "warn");
         voice.StateChanged += st => { if (st == VoiceInput.State.Listening) speaker.Stop(); };
         notch.StopPressed += speaker.Stop;
+
+        // A spoken conversation keeps going: once Hormes has answered, it listens again for the reply.
+        voice.Heard += _ => Dispatcher.BeginInvoke(followUp.Heard);
+        voice.StateChanged += st => Dispatcher.BeginInvoke(() =>
+        {
+            if (st == VoiceInput.State.Listening) followUp.ListeningStarted();
+            else if (st == VoiceInput.State.Idle) followUp.ListeningEnded();
+        });
+        speaker.Speaking += on => Dispatcher.BeginInvoke(() => { if (followUp.Speaking(on)) ListenAgainSoon(); });
+        client.Snapshot += snap =>
+        {
+            var phase = snap.TryGetProperty("phase", out var p) ? p.GetString() : null;
+            var busy = phase is "thinking" or "acting";
+            Dispatcher.BeginInvoke(() => { if (followUp.EngineBusy(busy)) ListenAgainSoon(); });
+        };
+        notch.StopPressed += followUp.End;
+        notch.Typed += followUp.End;
+        services.Asked += followUp.End;
         if (settings.SpeakReplies && !speaker.Available)
             notch.ShowToast("For spoken replies, add ELEVENLABS_API_KEY to ~/.hormes/env", "info");
 
@@ -138,6 +160,14 @@ public partial class App : Application
         // Hormes.exe --console [Home|Calendar|Todos|School|Settings]: open the Console at start.
         var at = Array.IndexOf(e.Args, "--console");
         if (at >= 0) console.ShowAndFocus(at + 1 < e.Args.Length ? e.Args[at + 1] : null);
+    }
+
+    private readonly FollowUp followUp = new();
+
+    private async void ListenAgainSoon()
+    {
+        await Task.Delay(FollowUp.Pause);
+        if (voice is { Current: VoiceInput.State.Idle } && followUp.StillDue()) voice.Begin();
     }
 
     private void UpdateTray()

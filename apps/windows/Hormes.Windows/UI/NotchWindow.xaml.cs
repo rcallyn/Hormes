@@ -62,6 +62,8 @@ public partial class NotchWindow : Window
     public event Action? ConsoleRequested;
     /// <summary>Stop was pressed: whatever Hormes is saying stops too.</summary>
     public event Action? StopPressed;
+    /// <summary>A line was typed and sent (not spoken).</summary>
+    public event Action? Typed;
     /// <summary>The speaker button was pressed: the new value of Speak replies.</summary>
     public event Action<bool>? SpeakToggled;
     private bool speakOn;
@@ -392,6 +394,7 @@ public partial class NotchWindow : Window
         var text = SayBox.Text.Trim();
         if (text.Length == 0) return;
         SayBox.Clear();
+        Typed?.Invoke();
         SendText(text);
     }
 

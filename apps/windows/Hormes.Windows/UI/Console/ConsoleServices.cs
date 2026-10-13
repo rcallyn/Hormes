@@ -31,7 +31,14 @@ public sealed class ConsoleServices
     }
 
     /// <summary>Ask Hormes (Claude) something, as if typed in the notch.</summary>
-    public void Ask(string text) => _ = Client.SendCommandAsync(new { type = "say-text", text });
+    public void Ask(string text)
+    {
+        Asked?.Invoke();
+        _ = Client.SendCommandAsync(new { type = "say-text", text });
+    }
+
+    /// <summary>A line was typed in the Console.</summary>
+    public event Action? Asked;
 
     /// <summary>The name Hormes calls User (Settings › Your name); "" when unset.</summary>
     public string UserName =>
