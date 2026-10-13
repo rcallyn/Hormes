@@ -389,7 +389,7 @@ export function progressLine(name: string, args: unknown): string {
     case "planner":
       return String(a["operation"] ?? "list") === "list" ? "Checking your todos and calendar." : "Updating your planner.";
     case "courses":
-      return a["operation"] === "import" ? "Filing it into your course folder." : a["operation"] === "inbox" ? "Checking your downloads." : a["operation"] === "search" ? "Checking your course materials." : "Looking at your classes.";
+      return a["operation"] === "save" ? "Saving it to your course folder." : a["operation"] === "import" ? "Filing it into your course folder." : a["operation"] === "inbox" ? "Checking your downloads." : a["operation"] === "search" ? "Checking your course materials." : "Looking at your classes.";
     case "automation_change":
       return `${String(a["verb"] ?? "Changing")} ${String(a["name"] ?? "an automation")}.`.replace(/^[a-z]/, (c) => c.toUpperCase());
     case "recipe_list":

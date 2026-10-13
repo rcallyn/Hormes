@@ -165,3 +165,16 @@ test("the inbox finds recent course downloads by name or first page, and import 
   assert.ok(!after.includes("cs161_hw3.md"), "a filed download leaves the inbox");
   void lib;
 });
+
+test("save writes a new Markdown file into the course's folder for its kind, never overwriting, and it becomes searchable", async () => {
+  const { lib } = library();
+  const first = JSON.parse(await lib.tool("save", { course: "CS 161", kind: "exam", title: "Practice exam 2026-10-13", text: "1. Why does round robin need a quantum?" })) as { saved: string };
+  assert.equal(first.saved, "CS 161 - Operating Systems/Exams/Practice exam 2026-10-13.md");
+  const second = JSON.parse(await lib.tool("save", { course: "CS 161", kind: "exam", title: "Practice exam 2026-10-13", text: "Another" })) as { saved: string };
+  assert.equal(second.saved, "CS 161 - Operating Systems/Exams/Practice exam 2026-10-13 (2).md");
+  assert.equal((JSON.parse(await lib.tool("save", { course: "CS 161", title: "../../evil", text: "x" })) as { saved: string }).saved, "CS 161 - Operating Systems/Notes/evil.md", "a title cannot leave the course folder");
+  assert.match(await lib.tool("save", { course: "Biology", title: "x", text: "y" }), /No course matches/);
+  assert.match(await lib.tool("save", { course: "CS 161", title: "x", text: " " }), /save needs/);
+  await lib.refresh(0);
+  assert.equal(lib.search("quantum", { kind: "exam" })[0]?.file, "CS 161 - Operating Systems/Exams/Practice exam 2026-10-13.md");
+});

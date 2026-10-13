@@ -4,6 +4,7 @@ import { basename, extname, join, relative, sep } from "node:path";
 import type { PlannerEvent, PlannerTodo } from "@hormes/protocol";
 import { DOC_EXTENSIONS, MAX_FILE_BYTES, extractUnits, type TextUnit } from "./extract.ts";
 import { defaultDownloadsDir, fileDownload, scanInbox, type InboxItem } from "./inbox.ts";
+import { saveCourseNote } from "./save.ts";
 
 /**
  * The course library: User's classes as folders, and every slide, handout, homework and note inside them made
@@ -407,6 +408,18 @@ export class CourseLibrary {
         const items = await this.inbox();
         return JSON.stringify({ downloads: this.opts.downloads ?? defaultDownloadsDir(), items: items.map(i => ({ ...i, modified: new Date(i.modified).toISOString().slice(0, 16) })), note: items.length ? "Recent downloads not yet in a course folder. import copies one in (the download stays); ask User which course when none is matched." : "No recent course-like downloads." });
       }
+      case "save": {
+        if (!existsSync(this.root)) return missing();
+        const courseName = str("course"), title = str("title"), text = typeof payload["text"] === "string" ? payload["text"] : "";
+        if (!courseName || !title || !text.trim()) return JSON.stringify({ error: "save needs {course, title, text, kind?: notes|exam|homework}." });
+        const course = this.resolveCourse(courseName);
+        if (!course) return JSON.stringify({ error: `No course matches ${JSON.stringify(courseName)}. Known: ${this.list().map(c => c.title).join(", ") || "none"}.` });
+        try {
+          const path = saveCourseNote(course, (str("kind") as MaterialKind | undefined) ?? "notes", title, text);
+          this.scannedAt = 0;
+          return JSON.stringify({ saved: path, course: course.title, note: "A new file; nothing was overwritten. It is searchable after the next refresh (seconds)." });
+        } catch (e) { return JSON.stringify({ error: (e as Error).message }); }
+      }
       case "import": {
         if (!existsSync(this.root)) return missing();
         const name = str("file"), courseName = str("course");
@@ -421,7 +434,7 @@ export class CourseLibrary {
         } catch (e) { return JSON.stringify({ error: (e as Error).message }); }
       }
       default:
-        return JSON.stringify({ error: `Unknown courses operation ${JSON.stringify(operation)}; use list, files, search, read, inbox or import.` });
+        return JSON.stringify({ error: `Unknown courses operation ${JSON.stringify(operation)}; use list, files, search, read, inbox, import or save.` });
     }
   }
 }

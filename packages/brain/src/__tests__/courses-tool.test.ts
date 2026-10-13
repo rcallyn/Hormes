@@ -8,8 +8,8 @@ import { specByName } from "../tools.ts";
 
 const task: BrainTask = { delegationId: "courses", request: "What did the slides say about round robin?", userDialogue: "What did the slides say about round robin?", dialogue: "", confirmation: false, offsetMs: 0, signal: new AbortController().signal };
 
-test("courses: a course tool with six operations; the local brain leaves it out, as it does the planner, to keep its tool table in budget", () => {
-  assert.deepEqual((specByName("courses")!.parameters.properties as { operation: { enum: string[] } }).operation.enum, ["list", "files", "search", "read", "inbox", "import"]);
+test("courses: a course tool with seven operations; the local brain leaves it out, as it does the planner, to keep its tool table in budget", () => {
+  assert.deepEqual((specByName("courses")!.parameters.properties as { operation: { enum: string[] } }).operation.enum, ["list", "files", "search", "read", "inbox", "import", "save"]);
   assert.match(specByName("courses")!.description, /cite file and location/);
   assert.ok(!LOCAL_TOOLS.some((t) => t.name === "courses") && !LOCAL_TOOLS.some((t) => t.name === "planner"));
 });

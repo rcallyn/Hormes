@@ -37,6 +37,9 @@ nothing beside your files, and keeps its index in `<stateDir>/courses/index.json
   course its name or first page names. `import {file, course, kind?}` copies one into the course folder's subfolder for
   its kind (Lectures, Homework, Exams…); the download stays, and an existing file is never overwritten (`name (2).pdf`).
   A nudge says when new course files land in Downloads; the School page has File my downloads.
+- `save {course, title, text, kind?}`: a new Markdown file in the course (Notes, or Exams for kind exam): notes from a
+  lecture, a study guide, a practice exam. Never overwrites (`title (2).md`); searchable at the next refresh. The School
+  page's Practice exam and Exam study guide save through it, so no file-write confirmation is needed.
 
 The tool description tells every brain to search before answering coursework and to cite file and location. Study
 sessions (`study`/`exam`/`review`) get the tool too, and there a `search` or `read` result becomes a work source of kind
