@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -90,7 +90,7 @@ public partial class App : Application
         };
         console = new ConsoleWindow(services);
         client.Snapshot += services.OnSnapshot;
-        tray = new TrayIcon(OpenConsole, () => daemon.Restart(), OpenLog, Quit, settings.Clap, SetClap, settings.SpeakReplies, SetSpeak);
+        tray = new TrayIcon(OpenConsole, () => daemon.Restart(client?.DaemonPid), OpenLog, Quit, settings.Clap, SetClap, settings.SpeakReplies, SetSpeak);
 
         // Hormes speaks its answers; its own voice never wakes the clap detector, and a new turn or Stop cuts it off.
         client.Snapshot += replies.OnSnapshot;
@@ -143,7 +143,7 @@ public partial class App : Application
     private void UpdateTray()
     {
         if (tray is null || daemon is null || client is null) return;
-        tray.Status = client.Connected ? $"connected · {daemon.State}" : daemon.State;
+        tray.Status = client.Connected ? $"connected Â· {daemon.State}" : daemon.State;
     }
 
     private void OpenConsole() => Dispatcher.BeginInvoke(() => console?.ShowAndFocus());

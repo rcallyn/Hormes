@@ -83,7 +83,7 @@ public sealed class SettingsPage : PageFrame, IConsolePage
         engineText.Children.Add(Ui.Text("Engine", "Body"));
         engineText.Children.Add(engineStatus);
         Body.Children.Add(Ui.Group(
-            Ui.Row(engineText, Ui.Button("Restart", () => { Services.Daemon.Restart(); Window.ShowToast("Restarting the engine…"); })),
+            Ui.Row(engineText, Ui.Button("Restart", () => { Services.Daemon.Restart(Services.Client.DaemonPid); Window.ShowToast("Restarting the engine…"); })),
             Ui.Row(Ui.Text("Engine log", "Body"), Ui.Button("Open", () => Open(DaemonProcess.LogPath), "LinkButton")),
             Ui.Row(Ui.Text("App log (voice, speech)", "Body"), Ui.Button("Open", () => Open(AppLog.PathName), "LinkButton"))));
     }

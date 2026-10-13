@@ -51,8 +51,14 @@ public sealed class DaemonProcess : IDisposable
         Spawn();
     }
 
-    /// <summary>Kill the daemon we spawned and start a new one (the Console's Restart daemon).</summary>
-    public void Restart()
+    /// <summary>
+    /// Kill the daemon and start a new one (the Console's Restart daemon). One we spawned is killed and OnExited
+    /// respawns it. One we only attached to (started by an earlier app or a terminal) is found by the pid it
+    /// reported on connecting (<paramref name="connectedPid"/>; the lock file is held open by the daemon), stopped,
+    /// and replaced by one this app owns; otherwise the new daemon would find the old one still serving, exit, and
+    /// the old code would keep answering.
+    /// </summary>
+    public void Restart(int? connectedPid)
     {
         lock (gate)
         {
@@ -62,7 +68,47 @@ public sealed class DaemonProcess : IDisposable
                 return; // OnExited respawns
             }
         }
-        Spawn();
+        _ = Task.Run(() =>
+        {
+            if (Ipc.PipeExists(pipeName) && !StopAttached(connectedPid)) return;
+            Spawn();
+        });
+    }
+
+    /// <summary>Stop the attached daemon (a node process, by the pid it reported), and wait for its pipe to go.</summary>
+    private bool StopAttached(int? connectedPid)
+    {
+        if (connectedPid is not { } pid)
+        {
+            SetState("restart: not connected to the running daemon, so its pid is unknown; quit it and start Hormes again");
+            return false;
+        }
+        try
+        {
+            using var old = Process.GetProcessById(pid);
+            if (!old.ProcessName.Equals("node", StringComparison.OrdinalIgnoreCase))
+            {
+                SetState($"restart: pid {pid} in hormesd.lock is not the daemon; not stopped");
+                return false;
+            }
+            SetState($"restarting: stopping the daemon pid {pid}");
+            WriteLog($"--- hormes app stops the attached daemon pid {pid} to restart it ({DateTime.Now:yyyy-MM-dd HH:mm:ss})");
+            old.Kill(entireProcessTree: true);
+            old.WaitForExit(5000);
+        }
+        catch (ArgumentException) { /* already gone */ }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            SetState($"restart: could not stop pid {pid}: {e.Message}");
+            return false;
+        }
+        for (var i = 0; i < 50 && Ipc.PipeExists(pipeName); i++) Thread.Sleep(100);
+        if (Ipc.PipeExists(pipeName))
+        {
+            SetState("restart: the old daemon did not stop");
+            return false;
+        }
+        return true;
     }
 
     private void Spawn()
