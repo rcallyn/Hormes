@@ -37,6 +37,8 @@ public partial class NotchWindow : Window
     /// <summary>Notes are on the island (the explain tool) until Done, a click away, or the next question.</summary>
     private bool notesActive;
     private string? notesHero;
+    /// <summary>The reply last turned into notes because it carried TeX, so it is shown once.</summary>
+    private string? autoNotesHero;
     private static readonly Duration OpenDuration = new(TimeSpan.FromMilliseconds(220));
     private static readonly Duration CloseDuration = new(TimeSpan.FromMilliseconds(180));
 
@@ -270,6 +272,15 @@ public partial class NotchWindow : Window
         PeekDot.Visibility = c.Approval is not null || c.Problem is not null || c.Ring is not null ? Visibility.Visible : Visibility.Collapsed;
         ShowVoice();
         // A new question puts the notes away; otherwise the island grows or shrinks to what it now shows.
+        // A reply with TeX in it (the brain answered in text instead of using explain) is shown as notes all the same:
+        // typeset and handwritten, never raw dollar signs.
+        if (!notesActive && c.HeroSpeaker != "user" && c.Hero is { Length: > 0 } reply && reply != autoNotesHero && NotesView.HasMath(reply))
+        {
+            autoNotesHero = reply;
+            var asked = c.Asked is { Length: > 0 } q ? char.ToUpper(q[0]) + q[1..] : "Hormes";
+            ShowNotes(asked.Length > 80 ? asked[..79] + "…" : asked, NotesView.FromMarkdown(reply), true);
+            return;
+        }
         if (notesActive && c.HeroSpeaker == "user" && c.Hero != notesHero) ClearNotes();
         else Resize();
     }

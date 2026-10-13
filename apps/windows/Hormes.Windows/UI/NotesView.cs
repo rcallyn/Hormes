@@ -85,6 +85,34 @@ public sealed class NotesView : StackPanel
         return new TextBlock { Text = tex, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = size * 0.8, Foreground = Brushes.White, Margin = margin, HorizontalAlignment = align, TextWrapping = TextWrapping.Wrap };
     }
 
+    private static readonly System.Text.RegularExpressions.Regex MathPattern = new(@"\$\$[\s\S]+?\$\$|\$[^$\n]*[\\^_{}][^$\n]*\$", System.Text.RegularExpressions.RegexOptions.Compiled, TimeSpan.FromMilliseconds(200));
+
+    /// <summary>A reply that carries TeX math ($…$ with a command, sub/superscript or braces, or $$…$$), not just a price.</summary>
+    public static bool HasMath(string text)
+    {
+        try { return MathPattern.IsMatch(text); }
+        catch (System.Text.RegularExpressions.RegexMatchTimeoutException) { return false; }
+    }
+
+    /// <summary>Markdown a model may write, as plain notes: **bold** and __bold__ markers and leading #s dropped, outside math.</summary>
+    public static string FromMarkdown(string text)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var (kind, piece) in Tokens(text.Replace(@"\$", "\u0001")))
+        {
+            if (kind == "text")
+            {
+                var plain = piece.Replace("**", "").Replace("__", "");
+                plain = System.Text.RegularExpressions.Regex.Replace(plain, @"(^|\n)#{1,6} ", "$1");
+                // A bold label run into the sentence ("**Problem:** A café…") reads better on its own line.
+                plain = System.Text.RegularExpressions.Regex.Replace(plain, @" (Problem|Solution|Hint|Answer|Step \d+|\([a-z]\))(:)? ", "\n$1$2 ");
+                sb.Append(plain);
+            }
+            else sb.Append(kind == "display" ? $"$${piece}$$" : $"${piece}$");
+        }
+        return sb.ToString().Replace("\u0001", @"\$");
+    }
+
     /// <summary>Text, $inline$ and $$display$$ pieces in order; \$ is a literal dollar.</summary>
     public static IEnumerable<(string Kind, string Text)> Tokens(string text)
     {

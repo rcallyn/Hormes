@@ -33,6 +33,11 @@ public static class Render
         thread.Join();
     }
 
+    /// <summary>A reply as the brain once wrote it in text (Markdown and TeX) instead of using explain.</summary>
+    private const string SampleReply = """
+        Lecture 9 (Counting III) covers combinatorial proofs of binomial identities and the "balls into bins" / stars-and-bars technique. Here's a practice problem in that style: **Problem:** A café sells 5 flavors of muffin. How many ways can you order a box of 8 muffins, if: (a) there's no restriction on how many of each flavor you pick? (b) you must include at least one muffin of every flavor? Try identifying the balls and the bins, then use the stars-and-bars formulas from the lecture: $\binom{k+n-1}{n-1}$ for any distribution, and $\binom{k-1}{n-1}$ for no bin empty.
+        """;
+
     /// <summary>A worked explanation as the brain writes it for show_notes.</summary>
     private const string SampleNotes = """
         From STAT 418, lecture 3 (conditional probability), page 6.
@@ -87,6 +92,18 @@ public static class Render
                 png.Save(file);
             }
             notch.Close();
+        }
+
+        // A reply that carried TeX instead of using explain: the notch shows it as notes (NotesView.FromMarkdown).
+        {
+            var text = Hormes.Windows.UI.NotesView.FromMarkdown(SampleReply);
+            var notes = new Hormes.Windows.UI.NotesView("Give me a practice problem from lecture 9 cmpsci 360", text, true, null);
+            var paper = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Black, Padding = new Thickness(18, 14, 18, 18), Width = 720, Child = notes };
+            var host = new Window { Left = -12000, Top = 0, ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None, SizeToContent = SizeToContent.WidthAndHeight, Background = System.Windows.Media.Brushes.Black, Content = paper };
+            host.Show();
+            Settle(host, 400);
+            Save(host, Path.Combine(dir, "notes-fallback.png"));
+            host.Close();
         }
 
         var services = new ConsoleServices
