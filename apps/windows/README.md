@@ -62,7 +62,9 @@ and is dropped once transcribed.
 
 **Answers are spoken** by ElevenLabs in the *Alistair* voice (`Speech/ElevenLabsSpeaker.cs`),
 streamed so the first words play while the rest is generated. Put `ELEVENLABS_API_KEY=…` in
-`~/.hormes/env`; `ELEVENLABS_VOICE_ID` pins a voice, otherwise the app finds Alistair in your voices
+`~/.hormes/env`, or keep it in Infisical: with `INFISICAL_PROJECT_ID` (and `INFISICAL_ENV`, default dev) in
+`~/.hormes/env`, the app reads it with the infisical CLI at start, windowless, and keeps it in memory only.
+`ELEVENLABS_VOICE_ID` pins a voice, otherwise the app finds Alistair in your voices
 or the Voice Library. Markdown and code are not read out, and long answers stop at ~1200 characters.
 A new turn or Stop cuts the voice off, Hormes's own voice never triggers the clap detector, and
 **Speak replies** (the speaker button in the notch, the tray menu or Settings) turns it on and off. Only short,

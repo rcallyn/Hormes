@@ -121,8 +121,10 @@ public partial class App : Application
         notch.StopPressed += followUp.End;
         notch.Typed += followUp.End;
         services.Asked += followUp.End;
-        if (settings.SpeakReplies && !speaker.Available)
-            notch.ShowToast("For spoken replies, add ELEVENLABS_API_KEY to ~/.hormes/env", "info");
+        speaker.KeyReady.ContinueWith(_ =>
+        {
+            if (settings.SpeakReplies && !speaker.Available) notch.ShowToast("For spoken replies, add ELEVENLABS_API_KEY to ~/.hormes/env", "info");
+        });
 
         client.Snapshot += notch.OnSnapshot;
         client.Levels += notch.OnLevels;

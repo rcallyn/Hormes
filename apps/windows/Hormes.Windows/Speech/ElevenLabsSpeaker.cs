@@ -42,10 +42,15 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
 
     public ElevenLabsSpeaker()
     {
-        ApiKey = ReadKey();
         voiceId = Setting("ELEVENLABS_VOICE_ID");
+        // The key from the environment or ~/.hormes/env at once; from Infisical in the background (a CLI round trip).
+        ApiKey = ReadKey();
+        KeyReady = ApiKey is not null ? Task.CompletedTask : Task.Run(() => { ApiKey ??= FromInfisical("ELEVENLABS_API_KEY"); });
         _ = Task.Run(RunAsync);
     }
+
+    /// <summary>Done once the key has been looked for everywhere, Infisical included.</summary>
+    public Task KeyReady { get; }
 
     public string? ApiKey { get; private set; }
     public bool Available => !string.IsNullOrEmpty(ApiKey);
@@ -65,7 +70,7 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
         if (Audio.SystemAudio.IsMuted()) return;
         if (!Available)
         {
-            ApiKey = ReadKey(); // added since start?
+            ApiKey = ReadKey() ?? (KeyReady.IsCompleted ? null : WaitForKey()); // added since start, or still arriving?
             if (!Available) return;
         }
         var speakable = Speakable(text);
@@ -224,6 +229,56 @@ public sealed class ElevenLabsSpeaker : IAsyncDisposable
 
     /// <summary><c>ELEVENLABS_API_KEY</c> from the environment, else from <c>~/.hormes/env</c> (KEY=value lines).</summary>
     private static string? ReadKey() => Setting("ELEVENLABS_API_KEY");
+
+    private string? WaitForKey()
+    {
+        KeyReady.Wait(TimeSpan.FromSeconds(20));
+        return ApiKey;
+    }
+
+    /// <summary>
+    /// A secret from Infisical, when ~/.hormes/env names the project (<c>INFISICAL_PROJECT_ID</c>, and
+    /// <c>INFISICAL_ENV</c>, default dev): the infisical CLI is run with no window and the value is kept in memory only.
+    /// </summary>
+    private static string? FromInfisical(string name)
+    {
+        var project = Setting("INFISICAL_PROJECT_ID");
+        if (project is null) return null;
+        try
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("infisical")
+            {
+                ArgumentList = { "secrets", "get", name, "--plain", "--silent", "--projectId", project, "--env", Setting("INFISICAL_ENV") ?? "dev" },
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            using var cli = System.Diagnostics.Process.Start(start);
+            if (cli is null) return null;
+            var output = cli.StandardOutput.ReadToEndAsync();
+            var errors = cli.StandardError.ReadToEndAsync();
+            if (!cli.WaitForExit(20_000))
+            {
+                cli.Kill(true);
+                AppLog.Write($"infisical: no answer for {name} in 20 s");
+                return null;
+            }
+            var value = output.Result.Trim();
+            if (cli.ExitCode != 0 || value.Length == 0)
+            {
+                // Never log the output: on success it is the secret. The error text names no value.
+                AppLog.Write($"infisical: {name} not read (exit {cli.ExitCode}): {errors.Result.Trim().Split('\n').FirstOrDefault()}");
+                return null;
+            }
+            return value;
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            AppLog.Write($"infisical: {e.Message}");
+            return null;
+        }
+    }
 
     /// <summary>A setting from the environment, else from <c>~/.hormes/env</c> (KEY=value lines).</summary>
     private static string? Setting(string name)
