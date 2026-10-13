@@ -1,62 +1,75 @@
 # Hormes
 
-Hormes is a calendar-aware, voice-first workspace for learning and getting work done on a Mac. It carries goals, evidence, notes, and unfinished actions between sessions.
+**Hormes is a voice-first personal assistant for students, for Windows.** It knows the classes you are taking,
+reads your lecture slides, homework and notes, and helps you study, do homework and get through the day without
+the busy work: recalling context, preparing for class, switching between tasks.
 
-The notch is the interaction surface. A lecture caption, recall card, quiz, handwritten whiteboard, or timer drops from it as needed. The floating presence and app icon use the same five white voice bars on black. Console stores work by course, date, and session type, alongside a unified Agents rail.
+Hormes continues the project [Taz33m](https://github.com/Taz33m) and I started at **c0mpiled-15**, a hackathon at
+Penn State. The hackathon build was a Mac app. This repository takes it to Windows and builds it out into a study
+assistant.
 
-## Run locally
+## What it does
 
-Requires Apple silicon, macOS 14+, Swift, Node 24+, and pnpm 10.
+- **Knows your classes.** Each class is a folder under `~/Hormes/Courses`. Hormes reads and indexes everything in
+  it: lecture slides (PDF and PowerPoint, with speaker notes), homework, exams, syllabi, readings, notebooks and
+  code. When it answers a question, it says which file and which slide or page it used.
+- **Helps with homework.** It explains what an assignment asks and points you to the lectures that cover it. On
+  graded work it coaches you toward your own answer.
+- **Explains in handwriting.** For math-heavy classes, explanations and worked solutions appear on the notch in
+  handwriting with typeset math. The notch grows to fit them, and each one is saved to the class's `Notes`
+  folder.
+- **Study and exam prep.** It builds practice exams, study guides, quizzes and weekly reviews from your own course
+  materials, and saves them in the class folder.
+- **Transcribes lectures and meetings.** It records from the microphone, or from computer audio for online
+  lectures and calls. Transcription runs on your PC with Whisper. Transcripts go into the class folder and become
+  searchable.
+- **Reminds you before you have to remember.** A morning brief and an evening "tomorrow" brief; a heads-up
+  15 minutes before class; an offer to turn a lecture into notes once class ends; homework due; exams coming up;
+  course files that land in Downloads. All are notifications only, and you can turn them off on the School page.
+- **Helps you switch tasks.** "Where was I?" catches you up across classes. "File my downloads" puts new course
+  files into the right class folder.
+- **Uses your computer.** Hormes can also carry out tasks in other apps. Every action goes through one central
+  policy, and sensitive actions need your confirmation with Windows Hello.
+
+## Run it
+
+Requires Windows 10 or 11, the .NET 10 SDK, Node 24+ and pnpm 10 (`npm i -g pnpm@10`). Hormes reads PDFs with
+`pdftotext`, which ships with Git for Windows.
 
 ```sh
+git clone -c core.longpaths=true https://github.com/rcallyn/Hormes.git
+cd Hormes
 pnpm install
-pnpm run doctor
-pnpm run check
-pnpm build:hands
-pnpm build:mac
-open -a Hormes
+dotnet run --project apps/windows/Hormes.Windows
 ```
 
-The signed app installs at `/Applications/Hormes.app`. Settings and credentials live under `~/.hormes`; only the private `env` file stores keys. No checkout `.env` is loaded. Console shows credential presence and probe results, never secret values.
+The app starts the Hormes engine (`hormesd`) and talks to it over a named pipe. The brain is Claude Code on your
+Claude login. Voice is recognised on your PC by Whisper; the model, about 570 MB, downloads on first run. Spoken
+replies are optional and use ElevenLabs, with the key kept in `~/.hormes/env`.
 
-GPT provides initial reasoning; Gemini provides realtime tutoring and lecture transcription. A local OpenAI-compatible Qwen endpoint remains configurable. Model weights are never downloaded automatically.
+**Add your classes.** Open the Console's School page and press **Open course folder**. Make one folder per class,
+for example `CS 161 - Operating Systems`, and put its slides, homework and notes inside. An optional `course.json`
+names the class and can turn on handwritten explanations:
 
-## Work that persists
-
-- Lecture speech is saved separately from generated notes and takeaways.
-- Four-question class reviews and quizzes record actual submitted answers.
-- Tutor sessions use the Scholar whiteboard and native voice; assisted, independent, and delayed-recall attempts stay distinguishable.
-- Spoken recall cards reveal after an answer or “I forgot”; timers and breaks stay in the notch.
-- Coding and browser work retain receipts. A model's completion claim is not proof of success.
-
-Calendar suggestions are opt-in. Recording requires an explicit session. The rehearsal calendar is hypothetical and labeled as such.
-
-## Execution and verification
-
-Every brain uses `ToolRunner` and the centralized policy. Shell execution uses OS-enforced isolation. Sensitive actions require device-owner authentication. Credentials are scrubbed from child environments and tool output. See the [execution rules](AGENTS.md#rules) and [product architecture](docs/HORMES_PRD.md).
-
-```sh
-pnpm hormes status
-pnpm hormesd
-pnpm run typecheck
-pnpm test
-pnpm --filter @hormes/workspace build
+```json
+{ "title": "Discrete Mathematics", "code": "CMPSC 360", "handwriting": true }
 ```
 
-The native app and daemon use protocol version 4. Rebuild both after updating. Renaming the macOS bundle identity may require granting microphone, screen, calendar, and other permissions again.
+Then ask: "what did lecture 9 say about stars and bars?", "help me start HW 6", or "make me a practice exam
+for STAT 418".
+
+## Privacy
+
+Settings and keys live under `~/.hormes`. Only the private `env` file holds keys, and they never appear in the
+Console, in tool results or in the processes Hormes starts. Course files stay on your PC. Audio is transcribed
+locally and is not kept.
+
+## Learn more
+
+- [`apps/windows/README.md`](apps/windows/README.md): the Windows app, notch, voice and checks
+- [`docs/COURSES.md`](docs/COURSES.md): the course library, reminders, recording and handwritten explanations
+- [`AGENTS.md`](AGENTS.md): how the engine works, and the rules for working on it
+
+The original Mac app from the hackathon is still in `apps/mac`, but Windows is what this repository targets.
 
 Hormes is licensed under [MIT](LICENSE).
-
-**Uses the Mac.** It carries out actions in other applications. The hands are AX-first: find a control by label, read the focused text, click the element. Screenshots provide visual context and verification as needed.
-
-### Hotkeys
-
-`⌥⇧Space` is go / pause. On the US layout it is the one hotkey that types a character, a no-break space
-(U+00A0). While Hormes runs that combo never reaches a field; `⌥Space` still types one.
-`apps/mac/Scripts/HotkeyCheckMain.swift` allows this one combo.
-
-## License
-
-See LICENSE for the required MIT notice.
-
-Installation asks for permissions through native macOS dialogs and System Settings toggles. There is no separate setup window. You approve the grants; Hormes verifies them and can resume missing permissions from Console or its menu bar. Model and voice configuration stay in Console Settings.
