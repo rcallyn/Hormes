@@ -53,6 +53,7 @@ fire a day. They are on as soon as a course folder exists (setting `courseNudges
 off), and off while you've asked for quiet or the machine sleeps:
 
 - a morning brief from 7 am: today's classes and school work due today or tomorrow (nothing on an empty day);
+- an evening brief from 9 pm: tomorrow's classes and what is due tomorrow;
 - a class event naming a course, 15 minutes before it starts, with the last lecture file and what is due next;
 - school homework due tomorrow (from 5 pm) or today (from 8 am), with the matching homework file;
 - an exam, midterm, final, quiz or test one to three days out (from 9 am).

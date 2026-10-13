@@ -89,3 +89,10 @@ test("after a class: notes from today's transcript while it is fresh, or what is
   assert.match(run("2026-10-12T10:20:00")[0]!.body, /where was I/);
   assert.equal(run("2026-10-12T11:00:00").length, 0, "stale after 30 minutes");
 });
+
+test("the evening brief names tomorrow's classes and what is due tomorrow, once, from 9 pm", () => {
+  const agenda = { todos: [{ id: "t1", title: "CS 161 HW2", done: false, dueDate: "2026-10-13" }], events: [{ id: "e1", title: "CS 161 lecture", date: "2026-10-13", time: "09:00" }] };
+  assert.equal(courseNudges({ now: local("2026-10-12T20:30:00"), courses, agenda, seen: new Set(["brief:2026-10-12"]) }).filter(n => n.key.startsWith("evening:")).length, 0);
+  const evening = courseNudges({ now: local("2026-10-12T21:05:00"), courses, agenda, seen: new Set(["brief:2026-10-12"]) }).find(n => n.key === "evening:2026-10-12");
+  assert.equal(evening?.body, "Classes: CS 161 lecture 09:00. Due: CS 161 HW2. Say \"prep me for tomorrow\" for a recap.");
+});

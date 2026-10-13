@@ -47,6 +47,13 @@ export function courseNudges(input: NudgeInput): CourseNudge[] {
 
   const events = eventsBetween(agenda.events, today, day(now + 3 * 86_400_000));
 
+  // The evening brief: tomorrow's classes and what is due tomorrow, once, from 9 pm, so the morning starts prepared.
+  if (hour >= 21) {
+    const classes = events.filter(e => e.date === tomorrow && e.time && !e.done && schoolish(e) !== false).map(e => `${short(e.title, 30)} ${e.time}`);
+    const due = agenda.todos.filter(t => !t.done && t.dueDate === tomorrow && (courseNamed(courses, t.title) || t.category === "school")).map(t => short(t.title, 30));
+    if (classes.length || due.length) add({ key: `evening:${today}`, title: "Tomorrow", body: [classes.length && `Classes: ${classes.slice(0, 4).join(", ")}.`, due.length && `Due: ${due.slice(0, 4).join(", ")}.`, "Say \"prep me for tomorrow\" for a recap."].filter(Boolean).join(" ") });
+  }
+
   // The morning brief: today's classes and what is due by tomorrow, once, from 7 am. Nothing when the day is empty.
   if (hour >= 7) {
     const classes = events.filter(e => e.date === today && e.time && !e.done && schoolish(e) !== false).map(e => `${short(e.title, 30)} ${e.time}`);
