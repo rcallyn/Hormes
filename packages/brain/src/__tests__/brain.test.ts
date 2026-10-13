@@ -79,8 +79,8 @@ test("runner archives screenshots, routes agent tools, and gates shell", async (
 
 test("tool specs are complete and map to zod shapes", () => {
   // 71 (pinned again in mcp-bridge.test.ts, tools.test.ts and local.test.ts): a tool added or lost anywhere in the table moves this number on purpose.
-  assert.equal(ALL_TOOL_SPECS.length, 17 + 8 + 6 + 5 + 4 + 4 + 11 + 6 + 6 + 4 + 1 + 1 + 1 + 1, "computer, desktop, browser, agents, threads, misc, system, self, draw, automations, work, native calendar, tasks, planner");
-  assert.equal(ALL_TOOL_SPECS.length, 75);
+  assert.equal(ALL_TOOL_SPECS.length, 17 + 8 + 6 + 5 + 4 + 4 + 11 + 6 + 6 + 4 + 1 + 1 + 1 + 1 + 1, "computer, desktop, browser, agents, threads, misc, system, self, draw, automations, work, native calendar, tasks, planner, courses");
+  assert.equal(ALL_TOOL_SPECS.length, 76);
   assert.ok(specByName("read_calendar"), "native Calendar is an actual shared tool");
   const names = new Set(ALL_TOOL_SPECS.map((t) => t.name));
   assert.equal(names.size, ALL_TOOL_SPECS.length, "no duplicate tool names");

@@ -1365,6 +1365,14 @@ export class WorkStore {
     }
     if (!["travel", "study", "exam", "review"].includes(scope.mode)) return;
     const s = this.requireScope(scope);
+    // A course search or read is quoted course material: a citable source for decks, quizzes and artifacts.
+    if (tool === "courses" && ["search", "read"].includes(String(args["operation"])) && !/^\{"error"/.test(text)) {
+      const payload = (args["payload"] ?? {}) as Record<string, unknown>;
+      const what = String(payload["file"] ?? payload["query"] ?? "course materials").slice(0, 160);
+      const source: WorkSource = { id: id("source"), title: `Course ${args["operation"]} · ${what}`, kind: "course", origin: "tool", text: text.slice(0, 18000), at: this.now() };
+      this.transaction(() => { this.put("source", source); s.sourceIds.push(source.id); this.observe(s, "tool", `Read ${source.id} using courses`, "tool"); this.touch(s); });
+      return source.id;
+    }
     if (!["web_fetch", "web_search", "browser_read"].includes(tool)) return;
     const url = typeof args["url"] === "string" ? args["url"] : text.match(/https?:\/\/[^\s<>"\]]+/)?.[0];
     const source: WorkSource = { id: id("source"), title: `${tool} · ${new Date(this.now()).toLocaleTimeString()}`, kind: "web", origin: "tool", text: text.slice(0, 18000), at: this.now(), ...(url && /^https?:\/\//.test(url) ? { url } : {}) };

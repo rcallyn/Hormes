@@ -45,11 +45,18 @@ public sealed class TrayIcon : IDisposable
             Visible = true,
         };
         icon.MouseClick += (_, e) => { if (e.Button == MouseButtons.Left) openConsole(); };
+        icon.BalloonTipClicked += (_, _) => (balloonClick ?? openConsole)();
+        icon.BalloonTipClosed += (_, _) => balloonClick = null;
     }
 
-    /// <summary>A Windows notification from the tray (an automation's banner).</summary>
-    public void Notify(string title, string? body) =>
+    private Action? balloonClick;
+
+    /// <summary>A Windows notification from the tray (an automation's banner, a course reminder); a click on it runs onClick.</summary>
+    public void Notify(string title, string? body, Action? onClick = null)
+    {
+        balloonClick = onClick;
         icon.ShowBalloonTip(8000, title.Length > 63 ? title[..63] : title, string.IsNullOrEmpty(body) ? " " : body, ToolTipIcon.None);
+    }
 
     /// <summary>Tooltip text; Windows caps it at 127 characters.</summary>
     public string Status

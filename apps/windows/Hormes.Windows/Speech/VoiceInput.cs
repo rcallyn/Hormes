@@ -22,6 +22,8 @@ public sealed class VoiceInput : IAsyncDisposable
 
     private readonly MicCapture mic = new();
     private readonly WhisperTranscriber whisper = new();
+    /// <summary>The loaded model, shared with the lecture recorder so it is in memory once.</summary>
+    public WhisperTranscriber Whisper => whisper;
     private readonly ClapDetector claps = new();
     private readonly ClapFrameExtractor clapFrames = new();
     private readonly Endpointer endpointer = new();

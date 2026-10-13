@@ -562,3 +562,16 @@ test("explicit lesson start opens native voice; settled microphone fragments rea
   (w.engine as unknown as { tick(): void }).tick();
   assert.equal(w.engine.work.store.state().evidence.length, 1, "an old voice session cannot answer the new exercise");
 });
+
+test("a course search or read in a study session is a citable source for a deck; a list or an error is not", (t) => {
+  const { store, send } = fixture(t);
+  send({ action: "start", mode: "study" }); const scope = store.scope()!;
+  assert.equal(store.receipt(scope, "courses", { operation: "list", payload: {} }, "{\"courses\":[]}"), undefined);
+  assert.equal(store.receipt(scope, "courses", { operation: "search", payload: { query: "x", course: "biology" } }, "{\"error\":\"No course matches\"}"), undefined);
+  const sourceId = store.receipt(scope, "courses", { operation: "read", payload: { file: "lec03-scheduling.pptx" } }, "{\"text\":\"[slide 1]\nRound robin uses a time quantum\"}")!;
+  const source = store.state().sources.find((s) => s.id === sourceId)!;
+  assert.equal(source.kind, "course");
+  assert.equal(source.title, "Course read · lec03-scheduling.pptx");
+  store.model(scope, "deck", { title: "Scheduling", sourceIds: [sourceId], cards: [{ front: "What does round robin use?", back: "A time quantum", answers: ["a time quantum"] }] });
+  assert.equal(store.state().decks!.at(-1)!.title, "Scheduling");
+});

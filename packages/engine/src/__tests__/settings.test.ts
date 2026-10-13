@@ -112,10 +112,10 @@ test("brain `local` round-trips through settings.json with an empty model (best 
   assert.equal(picked["brainModel"], "qwen3.5:27b");
   assert.equal("brainBaseUrl" in picked, false);
   // The contract's pin: the local brain rides on brain / brainModel / brainBaseUrl and adds no key.
-  // `automations` (design11, 2026-09-14), `audio` (design12, 2026-09-16) and `userName` (release F1, 2026-09-20) are the keys added since: the automations block (switch, unattended kinds, quiet hours, recipes) and the audio block (Recording).
+  // `automations` (design11, 2026-09-14), `audio` (design12, 2026-09-16) `userName` (release F1, 2026-09-20) and `courseNudges` (courses, 2026-10-12) are the keys added since: the automations block (switch, unattended kinds, quiet hours, recipes) and the audio block (Recording).
   assert.deepEqual(
     [...SETTINGS_KEYS].sort(),
-    ["accent", "audio", "autoWake", "automations", "brain", "brainBaseUrl", "brainModel", "effort", "geminiModel", "geminiVoice", "idleSleepMinutes", "language", "ledgerRetentionDays", "memory", "micDeviceId", "observe", "orbHome", "orbPosition", "ownerApproval", "proactive", "reflexes", "shotsRetentionDays", "threadOverflow", "threads", "typedWakes", "userName", "voice", "voiceProvider", "wake", "warmThreads"],
+    ["accent", "audio", "autoWake", "automations", "brain", "brainBaseUrl", "brainModel", "courseNudges", "effort", "geminiModel", "geminiVoice", "idleSleepMinutes", "language", "ledgerRetentionDays", "memory", "micDeviceId", "observe", "orbHome", "orbPosition", "ownerApproval", "proactive", "reflexes", "shotsRetentionDays", "threadOverflow", "threads", "typedWakes", "userName", "voice", "voiceProvider", "wake", "warmThreads"],
   );
   assert.ok(!SETTINGS_KEYS.some((k) => /local/i.test(k)));
 });

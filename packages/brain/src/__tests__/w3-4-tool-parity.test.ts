@@ -29,7 +29,7 @@ const words = (s: string): number => s.split(/\s+/).filter(Boolean).length;
 const named = (s: string): string[] => [...new Set(s.match(/\b[a-z]+_[a-z_]+\b/g) ?? [])].filter((t) => t !== "needs_confirmation");
 
 test("F-SAME-TOOLS (audit repro): the Codex addendum names every one of the 71 tools", () => {
-  assert.equal(ALL_TOOL_SPECS.length, 75);
+  assert.equal(ALL_TOOL_SPECS.length, 76);
   for (const name of ["User", "Sam"]) {
     const addendum = codexAddendum(name, undefined);
     const missing = ALL_TOOL_SPECS.map((s) => s.name).filter((n) => !new RegExp(`\\b${n}\\b`).test(addendum));

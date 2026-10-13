@@ -393,8 +393,8 @@ test("local: thinkFor by effort, only for thinking models, gpt-oss strings", () 
   assert.equal(thinkFor("max", oss), "high");
 });
 
-test("local: fitTools drops draw then browser then thread at ctx 16384 and nothing at 65536; LOCAL_TOOLS has no self_* or agent_*; ALL_TOOL_SPECS.length is 75", () => {
-  assert.equal(ALL_TOOL_SPECS.length, 75);
+test("local: fitTools drops draw then browser then thread at ctx 16384 and nothing at 65536; LOCAL_TOOLS has no self_* or agent_*; ALL_TOOL_SPECS.length is 76", () => {
+  assert.equal(ALL_TOOL_SPECS.length, 76);
   assert.equal(LOCAL_TOOLS.some((t) => t.name.startsWith("self_") || t.name.startsWith("agent_") || t.name.startsWith("agents_")), false);
   assert.ok(LOCAL_TOOLS.some((t) => t.name.startsWith("thread_")), "thread_* stay in the table; the brain gates them by Settings.threads");
   assert.ok(LOCAL_TOOLS.length < ALL_TOOL_SPECS.length);

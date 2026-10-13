@@ -590,6 +590,7 @@ public struct AudioSettings: Codable, Equatable {
 public struct Settings: Codable, Equatable {
     public var ownerApproval: Bool? = nil
     public var proactive: Bool? = nil
+    public var courseNudges: Bool? = nil
     public var voiceProvider: String? = nil
     public var geminiModel: String? = nil
     public var geminiVoice: String? = nil
@@ -1950,6 +1951,7 @@ public struct SettingsPatch: Equatable {
     public var geminiVoice: String?
     public var ownerApproval: Bool?
     public var proactive: Bool?
+    public var courseNudges: Bool? = nil
     public var voice: String?
     public var brain: BrainKind?
     public var brainModel: String?
@@ -2011,6 +2013,7 @@ public struct SettingsPatch: Equatable {
         if let v = voice { o["voice"] = v }
         if let v = ownerApproval { o["ownerApproval"] = v }
         if let v = proactive { o["proactive"] = v }
+        if let v = courseNudges { o["courseNudges"] = v }
         if let v = brain { o["brain"] = v.rawValue }
         if let v = brainModel { o["brainModel"] = v }
         if let v = effort { o["effort"] = v }

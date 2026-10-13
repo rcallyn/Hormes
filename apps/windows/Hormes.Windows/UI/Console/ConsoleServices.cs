@@ -15,6 +15,8 @@ public sealed class ConsoleServices
     public required VoiceInput Voice { get; init; }
     public required ElevenLabsSpeaker Speaker { get; init; }
     public required AppSettings Settings { get; init; }
+    /// <summary>Lecture and meeting transcription into the course folders.</summary>
+    public required LectureRecorder Recorder { get; init; }
     /// <summary>Turn clap listening on or off (and remember it).</summary>
     public required Action<bool> SetClap { get; init; }
     /// <summary>Turn spoken replies on or off (and remember it).</summary>

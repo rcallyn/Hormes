@@ -65,6 +65,8 @@ export interface RunnerOptions {
   readonly readCalendar?: (query: { startDate?: string; days: number }, signal?: AbortSignal) => Promise<CalendarReadResult>;
   /** The planner tool (todos and calendar): the engine's Planner.tool. */
   readonly planner?: (operation: string, payload: Record<string, unknown>) => Promise<string>;
+  /** The courses tool (User's class materials, read-only): the engine's CourseLibrary.tool. */
+  readonly courses?: (operation: string, payload: Record<string, unknown>) => Promise<string>;
   readonly work?: { tasks?(operation: string, payload: Record<string, unknown>, userWords: string, signal?: AbortSignal): Promise<string>; isActive(scope: WorkScope): boolean; model(scope: WorkScope, operation: string, payload: unknown): string; receipt(scope: WorkScope, tool: string, args: Record<string, unknown>, text: string): string | undefined; prepareGrocery?(scope: WorkScope, read: () => Promise<RunOutcome>, browser: () => Promise<RunOutcome>): Promise<void> };
   readonly toolset: ComputerToolset;
   readonly agents: AgentRegistry;
@@ -473,6 +475,12 @@ export class ToolRunner {
         const payload = args["payload"] ?? {};
         if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return { kind: "error", message: "Pass a structured planner payload object." };
         return { kind: "text", text: await this.opts.planner(String(args["operation"] ?? "list"), payload as Record<string, unknown>) };
+      }
+      case "courses": {
+        if (!this.opts.courses) return { kind: "error", message: "The course library is unavailable in this client." };
+        const payload = args["payload"] ?? {};
+        if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return { kind: "error", message: "Pass a structured courses payload object." };
+        return { kind: "text", text: await this.opts.courses(String(args["operation"] ?? "list"), payload as Record<string, unknown>) };
       }
       case "tasks": {
         if (!this.task || this.task.signal.aborted || !this.opts.work?.tasks) return { kind: "error", message: "The Tasks inbox is unavailable or this request expired." };

@@ -17,7 +17,7 @@ test("a learning capability exposes work, reporting and read-only sources to the
     await brain.start();
     await brain.handle({ ...makeTask("Draw one hint"), work: { sessionId: "lesson", mode: "study" } }, makeSink().sink);
     const body = server.seen[1]!.body as { tools: Array<{ function: { name: string } }> };
-    assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), ["planner", "read_calendar", "speak_progress", "tasks", "web_fetch", "web_search", "work"]);
+    assert.deepEqual(body.tools.map((tool) => tool.function.name).sort(), ["courses", "planner", "read_calendar", "speak_progress", "tasks", "web_fetch", "web_search", "work"]);
   } finally { await server.close(); }
 });
 

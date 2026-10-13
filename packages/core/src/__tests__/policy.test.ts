@@ -908,3 +908,15 @@ test("windowsShellWorkspaceReason refuses broad and system roots, case-insensiti
   for (const p of refused) assert.ok(windowsShellWorkspaceReason(p, home, temp, sys), p);
   for (const p of ["C:/Users/Ada/Projects/demo", "D:/work/demo", "C:/Users/Ada/Documents"]) assert.equal(windowsShellWorkspaceReason(p, home, temp, sys), undefined, p);
 });
+
+test("courses: the read-only course library runs in every scope but a proactive agent review", () => {
+  const cases: Array<[string | undefined, { sessionId: string; mode: "study" | "exam" | "coding" | "grocery" } | undefined, Verdict]> = [
+    [undefined, undefined, "run"],
+    [undefined, { sessionId: "s", mode: "study" }, "run"],
+    [undefined, { sessionId: "s", mode: "exam" }, "run"],
+    [undefined, { sessionId: "s", mode: "coding" }, "run"],
+    [undefined, { sessionId: "s", mode: "grocery" }, "run"],
+    ["suggested_agent", undefined, "refuse"],
+  ];
+  for (const [review, scope, verdict] of cases) assert.equal(classifyToolScope("courses", { operation: "search", payload: { query: "x" } }, review, scope).verdict, verdict, `${review} ${scope?.mode}`);
+});

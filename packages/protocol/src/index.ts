@@ -785,6 +785,8 @@ export interface Settings {
   readonly ownerApproval: boolean;
   /** Local, bounded suggestions from existing status evidence. No background model calls. */
   readonly proactive: boolean;
+  /** Course notifications: the morning brief, class soon, homework due, exam ahead (passive; no voice, no tool). */
+  readonly courseNudges: boolean;
   /** Voice transport; local Qwen remains a separate brain selection. */
   readonly voiceProvider?: "openai" | "gemini";
   readonly geminiModel?: string;
@@ -860,6 +862,7 @@ export function wakeSettingsOf(value: unknown): WakeSettings {
 export const DEFAULT_SETTINGS: Settings = {
   ownerApproval: true,
   proactive: false,
+  courseNudges: true,
   voiceProvider: "gemini",
   geminiModel: "gemini-3.8-live",
   geminiVoice: "Kore",
@@ -894,7 +897,7 @@ export const DEFAULT_SETTINGS: Settings = {
  * and both fail to compile until the key is listed.
  */
 export const SETTINGS_KEYS = [
-  "ownerApproval", "proactive",
+  "ownerApproval", "proactive", "courseNudges",
   "voiceProvider", "geminiModel", "geminiVoice", "voice", "brain", "brainModel", "brainBaseUrl", "effort", "micDeviceId", "idleSleepMinutes", "autoWake", "orbPosition", "wake", "reflexes", "orbHome",
   "ledgerRetentionDays", "shotsRetentionDays", "threads", "language", "accent", "memory", "observe", "typedWakes", "threadOverflow", "warmThreads",
   "automations", // design11: the automations block joins SETTINGS_KEYS so settings.json keeps it

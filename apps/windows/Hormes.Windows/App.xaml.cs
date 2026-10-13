@@ -89,7 +89,7 @@ public partial class App : Application
         notch.SpeakToggled += on => Dispatcher.BeginInvoke(() => SetSpeak(on));
         var services = new ConsoleServices
         {
-            Client = client, Daemon = daemon, Planner = planner, Voice = voice, Speaker = speaker, Settings = settings,
+            Client = client, Daemon = daemon, Planner = planner, Voice = voice, Speaker = speaker, Settings = settings, Recorder = new LectureRecorder(voice.Whisper),
             SetClap = SetClap, SetSpeak = SetSpeak,
         };
         console = new ConsoleWindow(services);
@@ -148,7 +148,9 @@ public partial class App : Application
                     if (Field("text") is { Length: > 0 } line) speaker.Say(line);
                     break;
                 case "notify":
-                    Dispatcher.BeginInvoke(() => tray?.Notify(Field("title") ?? "Hormes", Field("body")));
+                    // A course reminder (no automation behind it) opens the School page, where its prep and homework help are.
+                    var fromCourses = Field("automationId") is "" or null;
+                    Dispatcher.BeginInvoke(() => tray?.Notify(Field("title") ?? "Hormes", Field("body"), fromCourses ? () => console?.ShowAndFocus("School") : null));
                     break;
             }
         };

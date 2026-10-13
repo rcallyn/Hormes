@@ -8,7 +8,7 @@ import type { WorkScope, WorkState } from "@hormes/protocol";
 import { EventEmitter } from "node:events";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, statfsSync, writeFileSync, writeSync } from "node:fs";
 import { homedir, totalmem } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { HANDS_OFF_APPS, PRESENCE_WINDOW_MS, REPO_ROOT, accountFullName, classifyAction, dataPaths, effectiveUserName, noLiveModelLine, isLoopbackHost, presenceGated, writeEnvSecrets, secretsPresent, Ledger, Trash, logger, newId, readConfig, type HormesConfig, type SweepResult } from "@hormes/core";
 import { LiveSession, GeminiSession, GEMINI_LIVE_MODEL, GEMINI_LIVE_VOICE, type VoiceSession, Transcript, buildLiveInstructions, classifyLiveError, languageSection, type SessionConfig } from "@hormes/live";
 import { ComputerToolset, ConfirmationDesk, ConfirmationState, DEFAULT_SHOT_BUDGET, FocusLease, HELPER_PERMISSION_KINDS, HandsPool, QUICK_SHOT_BUDGET, ScreenStateCache, SplitHands, YES_PATTERN, axLabels, fakeHandsSpawn, renderCompositeLook, type ActionEvent, type AxNodeInfo, type AxTreeResult, type ElementInfo, type FocusedText, type FrontmostInfo, type HelloPermissions, type HelperPermissionKind, type NativeHands, type NativeHandsProcess, type ScreenshotResult, type ToolResult, type ToolsetOptions, type UserIdle, type WindowInfo } from "@hormes/hands";
@@ -20,6 +20,7 @@ import { MemoryBridge, type LocalMemoryTarget, type MemoryBridgeSeams } from "./
 import { Planner } from "./planner/index.ts";
 import { AudioTelemetry } from "./audio-telemetry.ts";
 import { ProactiveSuggestions, suggestionBudget } from "./proactive.ts";
+import { CourseLibrary, CourseNudger } from "./courses/index.ts";
 import { EXCHANGE_MAX_MS, EXCHANGE_WINDOW_MS, VoiceAttention, type Verdict, type VoiceGrant } from "./voice-attention.ts";
 import { ActionObserver, ActingSerializer } from "./observe.ts";
 import { LaneRunner, ThreadAwareRunner, ThreadLog, ThreadScheduler, ThreadTable, type ThreadBrainFactory, type ThreadBrainSpec, type ThreadParent, type ThreadVoice } from "./threads/index.ts";
@@ -538,6 +539,10 @@ export class Engine extends EventEmitter<EngineEvents> {
   private readonly calendarReader = new CalendarReader(request => this.emit("event", { type: "calendar.read", request }), () => this.work.store.state().selectedCalendarIds ?? []);
   /** User's todos and calendar (planner/planner.ts): the Console's pages and the brain's `planner` tool. */
   readonly planner: Planner;
+  /** User's class folders, indexed for the brain's courses tool. */
+  readonly courses: CourseLibrary;
+  private readonly courseNudger: CourseNudger;
+  private courseNudgeAt = 0;
   /** The main toolset's hands: reads on the reading helper, acts on the acting one — a look never queues behind a `type`. */
   readonly splitHands: SplitHands;
   /** What the screen is like right now, from the reading helper: the observer's `now:` line reads it, the composite look reads it, the AX tick feeds it. */
@@ -837,6 +842,8 @@ export class Engine extends EventEmitter<EngineEvents> {
     mkdirSync(this.config.stateDir, { recursive: true });
     // User's todos and calendar: this PC's own, or stits when synced (planner/planner.ts).
     this.planner = new Planner({ stateDir: this.config.stateDir, now: this.now });
+    this.courses = new CourseLibrary({ stateDir: this.config.stateDir, now: this.now, agenda: () => this.planner.state(), captured: () => this.capturedTranscripts() });
+    this.courseNudger = new CourseNudger(join(this.config.stateDir, "courses", "nudges.json"), (path, text) => { mkdirSync(dirname(path), { recursive: true }); writeFileAtomic(path, text); }, (path) => { try { return readFileSync(path, "utf8"); } catch { return undefined; } });
     this.planner.on("changed", (state) => this.emit("event", { type: "planner.state", state }));
     this.ledger = new Ledger(this.config.stateDir);
     this.loadUsageToday();
@@ -984,6 +991,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       // No EventKit off the Mac: the schedule there is the planner's (this PC's calendar, or stits).
       readCalendar: (query, signal) => (process.platform === "darwin" ? this.calendarReader.read(query, signal) : Promise.resolve(this.planner.readCalendar(query))),
       planner: (operation, payload) => this.planner.tool(operation, payload),
+      courses: (operation, payload) => this.courses.tool(operation, payload),
       work: this.work,
       agents: this.agents,
       userName: () => this.userName,
@@ -1305,7 +1313,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     // Only the keys Settings has; nested objects merge field-wise so a file from before a field existed still validates.
     const known: Record<string, unknown> = {};
     for (const key of SETTINGS_KEYS) if (key in saved) known[key] = saved[key];
-    for (const key of ["ownerApproval", "proactive"] as const) if (typeof known[key] !== "boolean") delete known[key];
+    for (const key of ["ownerApproval", "proactive", "courseNudges"] as const) if (typeof known[key] !== "boolean") delete known[key];
     if (known["voiceProvider"] !== "openai" && known["voiceProvider"] !== "gemini") delete known["voiceProvider"];
     for (const key of ["geminiModel", "geminiVoice"]) if (typeof known[key] !== "string" || !/^[A-Za-z0-9._-]{1,100}$/.test(known[key] as string)) delete known[key];
     // A hand-edited `"userName": null` (or a number) means unset; the setter's guard covers a patch, this one the file (release F1).
@@ -1346,7 +1354,7 @@ export class Engine extends EventEmitter<EngineEvents> {
   updateSettings(patch: SettingsPatch, o: { readonly quiet?: boolean; readonly ownerAuthenticated?: boolean } = {}): void {
     const next: Record<string, unknown> = { ...this.settings };
     for (const [key, value] of Object.entries(patch)) {
-      if ((key === "ownerApproval" || key === "proactive") && typeof value !== "boolean") continue;
+      if ((key === "ownerApproval" || key === "proactive" || key === "courseNudges") && typeof value !== "boolean") continue;
       if (key === "voiceProvider" && value !== "openai" && value !== "gemini") continue;
       if ((key === "geminiModel" || key === "geminiVoice") && (typeof value !== "string" || !/^[A-Za-z0-9._-]{1,100}$/.test(value))) continue;
       if (key === "ownerApproval" && value === false && this.settings.ownerApproval && !o.ownerAuthenticated) continue;
@@ -6488,8 +6496,35 @@ export class Engine extends EventEmitter<EngineEvents> {
     if (a.member === "mouse_move" && a.points) this.emit("overlay", { cmd: "point", x: a.points.x, y: a.points.y, ttlMs: 3000 });
   }
 
+  /** The lectures and meetings the work store captured (not demo ones), for the course library to index. */
+  private capturedTranscripts(): { course?: string; title: string; at: number; text: string }[] {
+    const state = this.work.store.state();
+    const out: { course?: string; title: string; at: number; text: string }[] = [];
+    for (const session of state.sessions) {
+      const sourceId = session.lecture?.sourceId ?? session.meeting?.sourceId;
+      if (session.demo || !sourceId) continue;
+      const source = state.sources.find((x) => x.id === sourceId);
+      if (!source?.text.trim()) continue;
+      const course = state.courses?.find((c) => c.id === session.courseId)?.title ?? session.courseId;
+      out.push({ ...(course ? { course } : {}), title: session.title, at: source.at, text: source.text });
+    }
+    return out;
+  }
+
+  /** Course nudges (class soon, homework due, exam ahead) as plain notifications: no voice, no tool, no change. Only
+   * once a course folder exists; never while User asked for quiet or the machine sleeps. */
+  private async nudgeCourses(now: number): Promise<void> {
+    if (!this.settings.courseNudges || this.work.store.quiet() || this.proactiveSleeping) return;
+    try { await this.courses.refresh(5 * 60_000); } catch { return; }
+    const courses = this.courses.list();
+    if (!courses.length) return;
+    const nudges = this.courseNudger.take({ now, courses, agenda: this.planner.state(), homeworkFor: (todo, course) => this.courses.homeworkFor(todo.title, course), lastLecture: (course) => this.courses.lastLecture(course) });
+    for (const n of nudges) this.emit("event", { type: "notify", id: newId("ntf"), title: n.title, body: n.body, presses: [], automationId: "" });
+  }
+
   private tick(): void {
     const now = this.now();
+    if (now - this.courseNudgeAt >= 60_000) { this.courseNudgeAt = now; void this.nudgeCourses(now); }
     const quiet = !this.work.store.quiet() && !this.proactiveLocked && !this.proactiveSleeping && !this.connecting && !this.live && !this.confirmations.pending && !this.delegator?.active && this.threads.running() === 0 && now - this.lastUserAt >= 30_000;
     // The local brain's smaller tool table cannot read agent sessions.
     if (this.proactive.update(this.agentsList, this.settings.proactive && this.settings.brain !== "local", quiet && !this.work.store.scope() && !this.work.store.calendarPending())) {

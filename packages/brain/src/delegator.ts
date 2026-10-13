@@ -410,7 +410,7 @@ const GENERIC_WORKING_LINE = "working on it.";
  * on the side".
  */
 const SILENT_TOOLS: ReadonlySet<string> = new Set([
-  "read_calendar", "planner",
+  "read_calendar", "planner", "courses",
   "screenshot", "zoom", "cursor_position", "frontmost_app", "list_windows", "element_at", "find_element", "read_focused_text", "wait",
   "browser_tabs", "browser_find", "agents_list", "self_status", "recall", "remember", "speak_progress", "show_clear",
   "thread_start", "thread_wait", "thread_read", "thread_stop",

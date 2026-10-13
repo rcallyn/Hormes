@@ -44,6 +44,7 @@ public static class Render
             Daemon = new DaemonProcess("hormes-render-none"),
             Planner = planner,
             Voice = new VoiceInput(useMic: false),
+            Recorder = new Hormes.Windows.Speech.LectureRecorder(new Hormes.Windows.Speech.WhisperTranscriber()),
             Speaker = new ElevenLabsSpeaker { Enabled = false },
             Settings = new AppSettings(),
             SetClap = _ => { },
