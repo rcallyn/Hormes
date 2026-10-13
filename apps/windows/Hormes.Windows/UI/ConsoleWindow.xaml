@@ -1,9 +1,17 @@
 <Window x:Class="Hormes.Windows.UI.ConsoleWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="Hormes" Width="1180" Height="780" MinWidth="900" MinHeight="580"
+        WindowStyle="None" ResizeMode="CanResize" AllowsTransparency="False"
         Background="{DynamicResource Bg}" WindowStartupLocation="CenterScreen"
         FontFamily="Segoe UI Variable Text, Segoe UI" UseLayoutRounding="True" TextOptions.TextFormattingMode="Display">
+  <!-- No standard title bar: the top 44 px is the drag area (double-click maximizes, Aero Snap works), the window's own
+       iOS-style controls sit in the top-right, and the DWM supplies the rounded corners and shadow. -->
+  <shell:WindowChrome.WindowChrome>
+    <shell:WindowChrome CaptionHeight="44" ResizeBorderThickness="6" GlassFrameThickness="0" CornerRadius="0"
+                        UseAeroCaptionButtons="False" NonClientFrameEdges="None"/>
+  </shell:WindowChrome.WindowChrome>
   <Window.Resources>
     <ResourceDictionary>
       <ResourceDictionary.MergedDictionaries>
@@ -12,16 +20,16 @@
     </ResourceDictionary>
   </Window.Resources>
 
-  <Grid>
+  <Grid x:Name="Shell">
     <Grid.ColumnDefinitions>
-      <ColumnDefinition Width="232"/>
+      <ColumnDefinition Width="248"/>
       <ColumnDefinition Width="*"/>
     </Grid.ColumnDefinitions>
 
     <!-- Sidebar -->
     <Border Background="{DynamicResource Sidebar}">
-      <DockPanel Margin="12,18,12,14">
-        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="8,0,0,18">
+      <DockPanel Margin="14,12,14,14">
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="6,0,0,14">
           <Border Width="30" Height="30" CornerRadius="8" Background="Black">
             <Canvas Width="18" Height="14">
               <Rectangle Canvas.Left="0" Canvas.Top="4.5" Width="2.4" Height="5" RadiusX="1.2" RadiusY="1.2" Fill="White"/>
@@ -35,7 +43,7 @@
         </StackPanel>
 
         <StackPanel DockPanel.Dock="Bottom">
-          <Border Style="{StaticResource CardPanel}" Padding="12,10">
+          <Border Style="{StaticResource CardPanel}" Padding="14,12">
             <StackPanel>
               <StackPanel Orientation="Horizontal">
                 <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource Tertiary}" VerticalAlignment="Center"/>
@@ -46,12 +54,13 @@
           </Border>
         </StackPanel>
 
-        <StackPanel x:Name="Nav">
+        <StackPanel x:Name="Nav" shell:WindowChrome.IsHitTestVisibleInChrome="True">
+          <TextBlock Text="PLANNER" Style="{StaticResource SectionHeader}" Margin="12,6,0,6"/>
           <RadioButton Style="{StaticResource SidebarItem}" Tag="&#xE80F;" Content="Home" x:Name="NavHome" GroupName="nav" Checked="Nav_Checked"/>
           <RadioButton Style="{StaticResource SidebarItem}" Tag="&#xE787;" Content="Calendar" x:Name="NavCalendar" GroupName="nav" Checked="Nav_Checked"/>
           <RadioButton Style="{StaticResource SidebarItem}" Tag="&#xE73A;" Content="Todos" x:Name="NavTodos" GroupName="nav" Checked="Nav_Checked"/>
           <RadioButton Style="{StaticResource SidebarItem}" Tag="&#xE7BE;" Content="School" x:Name="NavSchool" GroupName="nav" Checked="Nav_Checked"/>
-          <Border Height="1" Background="{DynamicResource Separator}" Margin="10,10"/>
+          <TextBlock Text="PREFERENCES" Style="{StaticResource SectionHeader}" Margin="12,20,0,6"/>
           <RadioButton Style="{StaticResource SidebarItem}" Tag="&#xE713;" Content="Settings" x:Name="NavSettings" GroupName="nav" Checked="Nav_Checked"/>
         </StackPanel>
       </DockPanel>
@@ -60,20 +69,28 @@
     <!-- Page -->
     <ContentControl x:Name="Page" Grid.Column="1" Focusable="False"/>
 
-    <!-- Sheet: an editor slides over a dimmed window, like a macOS sheet. -->
+    <!-- Sheet: an editor slides over a dimmed window, like an iOS sheet. -->
     <Grid x:Name="SheetHost" Grid.ColumnSpan="2" Visibility="Collapsed">
       <Border Background="{DynamicResource Dim}" MouseLeftButtonDown="Dim_MouseDown"/>
-      <Border x:Name="Sheet" Background="{DynamicResource Card}" CornerRadius="14" Padding="22,18" Width="460"
+      <Border x:Name="Sheet" Background="{DynamicResource Card}" CornerRadius="16" Padding="24,20" Width="460"
               HorizontalAlignment="Center" VerticalAlignment="Center" MaxHeight="640">
-        <Border.Effect><DropShadowEffect BlurRadius="30" ShadowDepth="6" Opacity="0.35"/></Border.Effect>
+        <Border.Effect><DropShadowEffect BlurRadius="40" ShadowDepth="8" Opacity="0.45"/></Border.Effect>
         <ContentControl x:Name="SheetContent" Focusable="False"/>
       </Border>
     </Grid>
 
     <!-- Toast -->
     <Border x:Name="Toast" Grid.ColumnSpan="2" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,24"
-            Background="#E6202022" CornerRadius="10" Padding="16,9" Visibility="Collapsed" IsHitTestVisible="False">
-      <TextBlock x:Name="ToastText" Foreground="White" FontSize="13" TextWrapping="Wrap" MaxWidth="520"/>
+            Background="#EB2C2C2E" CornerRadius="20" Padding="18,10" Visibility="Collapsed" IsHitTestVisible="False">
+      <TextBlock x:Name="ToastText" Foreground="White" FontSize="14" TextWrapping="Wrap" MaxWidth="520"/>
     </Border>
+
+    <!-- Window controls: minimize, maximize / restore, close. -->
+    <StackPanel x:Name="Controls" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top"
+                Margin="0,10,12,0" Panel.ZIndex="100" shell:WindowChrome.IsHitTestVisibleInChrome="True">
+      <Button x:Name="MinimizeButton" Style="{StaticResource WindowControl}" Content="&#xE921;" ToolTip="Minimize" Click="Minimize_Click"/>
+      <Button x:Name="MaximizeButton" Style="{StaticResource WindowControl}" Content="&#xE922;" ToolTip="Maximize" Click="Maximize_Click"/>
+      <Button x:Name="CloseButton" Style="{StaticResource CloseControl}" Content="&#xE8BB;" ToolTip="Close" Click="Close_Click"/>
+    </StackPanel>
   </Grid>
 </Window>

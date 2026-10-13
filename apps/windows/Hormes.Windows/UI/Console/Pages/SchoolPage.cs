@@ -25,10 +25,10 @@ public sealed class SchoolPage : PageFrame, IConsolePage
         Toolbar.Children.Add(SourceSwitch());
         Toolbar.Children.Add(ToolbarButton("", "New assignment", () => Editors.Todo(Window, Services.Planner, null, null, "school")));
 
-        Body.Children.Add(Ui.Text("This week's classes", "SectionHeader"));
+        Body.Children.Add(Ui.Header("This week's classes"));
         Body.Children.Add(Ui.Card(week, new Thickness(8, 10, 8, 10)));
 
-        Body.Children.Add(Ui.Text("Study with Hormes", "SectionHeader"));
+        Body.Children.Add(Ui.Header("Study with Hormes"));
         var actions = new WrapPanel();
         foreach (var (label, prompt) in new[]
         {
@@ -97,7 +97,7 @@ public sealed class SchoolPage : PageFrame, IConsolePage
         assignments.Children.Clear();
         if (open.Count == 0)
         {
-            assignments.Children.Add(Ui.Text("Assignments", "SectionHeader"));
+            assignments.Children.Add(Ui.Header("Assignments"));
             assignments.Children.Add(Ui.Card(Ui.Empty("No open assignments. School todos and Canvas assignments (synced through stits) show up here.")));
             return;
         }
@@ -110,16 +110,16 @@ public sealed class SchoolPage : PageFrame, IConsolePage
         })
         {
             if (items.Count == 0) continue;
-            var header = Ui.Text(title, "SectionHeader");
+            var header = Ui.Header(title);
             if (title == "Overdue") header.SetResourceReference(TextBlock.ForegroundProperty, "Red");
             assignments.Children.Add(header);
-            assignments.Children.Add(Ui.Group(items.Take(40).Select(Row).ToArray()));
+            assignments.Children.Add(Ui.Group(52, items.Take(40).Select(Row).ToArray()));
         }
     }
 
     private UIElement Row(PlannerTodo t)
     {
-        var check = new CheckBox { IsChecked = t.Done, Foreground = Theme.Category("school"), Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        var check = new CheckBox { IsChecked = t.Done, Foreground = Theme.Category("school"), Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center };
         check.SetResourceReference(StyleProperty, "RoundCheck");
         check.Click += (_, _) => Window.Run(Services.Planner.UpdateTodo(t.Id, new { done = check.IsChecked == true }), check.IsChecked == true ? $"Done: {t.Title}" : null);
         var text = new StackPanel();

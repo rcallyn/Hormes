@@ -88,10 +88,10 @@ public sealed class TodosPage : PageFrame, IConsolePage
         }
         foreach (var (title, items) in Sections(shown, filter, today))
         {
-            var header = Ui.Text(title, "SectionHeader");
+            var header = Ui.Header(title);
             if (title == "Overdue") header.SetResourceReference(TextBlock.ForegroundProperty, "Red");
             list.Children.Add(header);
-            list.Children.Add(Ui.Group(items.Select(Row).ToArray()));
+            list.Children.Add(Ui.Group(52, items.Select(Row).ToArray()));
         }
     }
 
@@ -122,7 +122,7 @@ public sealed class TodosPage : PageFrame, IConsolePage
 
     private UIElement Row(PlannerTodo t)
     {
-        var check = new CheckBox { IsChecked = t.Done, Foreground = Theme.Category(t.Category), Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        var check = new CheckBox { IsChecked = t.Done, Foreground = Theme.Category(t.Category), Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center };
         check.SetResourceReference(StyleProperty, "RoundCheck");
         check.Click += (_, _) => Window.Run(Services.Planner.UpdateTodo(t.Id, new { done = check.IsChecked == true }));
         var text = new StackPanel();

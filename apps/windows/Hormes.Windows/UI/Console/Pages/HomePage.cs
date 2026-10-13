@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text.Json;
@@ -30,7 +31,7 @@ public sealed class HomePage : PageFrame, IConsolePage
         Body.Children.Add(columns);
 
         // Ask Hormes: typed here, answered by Claude (and spoken, when replies are on).
-        Body.Children.Add(Ui.Text("Ask Hormes", "SectionHeader"));
+        Body.Children.Add(Ui.Header("Ask Hormes"));
         ask = Ui.Field("Ask anything, or say \"remind me to…\"");
         ask.KeyDown += (_, e) => { if (e.Key == System.Windows.Input.Key.Enter) Send(); };
         var mic = Ui.Button("", () => Services.Voice.Toggle(), "IconButton");
@@ -58,14 +59,15 @@ public sealed class HomePage : PageFrame, IConsolePage
     {
         var stack = new StackPanel();
         var head = new Grid();
-        var t = Ui.Text(title, "SectionHeader");
+        var t = Ui.Header(title);
         head.Children.Add(t);
         var more = Ui.Button("Show all", () => Window.Navigate(page), "LinkButton");
         more.HorizontalAlignment = HorizontalAlignment.Right;
-        more.Margin = new Thickness(0, 12, 0, 4);
+        more.VerticalAlignment = VerticalAlignment.Bottom;
+        more.Margin = new Thickness(0, 0, -6, 0);
         head.Children.Add(more);
         stack.Children.Add(head);
-        stack.Children.Add(Ui.Card(list, new Thickness(0, 4, 0, 4)));
+        stack.Children.Add(Ui.Rounded(Ui.Card(list, new Thickness(0))));
         return stack;
     }
 
@@ -90,8 +92,7 @@ public sealed class HomePage : PageFrame, IConsolePage
         var overdue = dueSoon.Count(t => t.Due < todayDate);
         Subtitle.Text = $"{DateTime.Now.ToString("dddd, MMMM d", CultureInfo.CurrentCulture)} · {Count(events.Count, "event")} · {Count(dueSoon.Count, "todo")} due{(overdue > 0 ? $" ({overdue} overdue)" : "")}";
 
-        today.Children.Clear();
-        if (events.Count == 0) today.Children.Add(Ui.Empty("Nothing on the calendar today."));
+        var eventRows = new List<UIElement>();
         foreach (var e in events.Take(9))
         {
             var bar = new Border { Width = 4, CornerRadius = new CornerRadius(2), Background = Theme.Category(e.Category), Margin = new Thickness(0, 1, 10, 1) };
@@ -99,21 +100,23 @@ public sealed class HomePage : PageFrame, IConsolePage
             text.Children.Add(Ui.Text(e.Title, "Body"));
             text.Children.Add(Ui.Text(Editors.TimeRange(e) + (e.Category is { } c ? " · " + Planner.CategoryLabel(c) : ""), "Caption"));
             var current = e;
-            today.Children.Add(Ui.Row(new DockPanel { Children = { bar, text } }, null, () => Editors.Event(Window, Services.Planner, current)));
+            eventRows.Add(Ui.Row(new DockPanel { Children = { bar, text } }, null, () => Editors.Event(Window, Services.Planner, current)));
         }
-        if (events.Count > 9) today.Children.Add(Ui.Empty($"+{events.Count - 9} more"));
+        if (events.Count == 0) eventRows.Add(Ui.Empty("Nothing on the calendar today."));
+        if (events.Count > 9) eventRows.Add(Ui.Empty($"+{events.Count - 9} more"));
+        Ui.Fill(today, 30, eventRows.ToArray());
 
-        due.Children.Clear();
-        if (dueSoon.Count == 0) due.Children.Add(Ui.Empty("Nothing due today or tomorrow."));
-        foreach (var t in dueSoon.Take(9)) due.Children.Add(TodoRow(t));
-        if (dueSoon.Count > 9) due.Children.Add(Ui.Empty($"+{dueSoon.Count - 9} more"));
+        var dueRows = dueSoon.Take(9).Select(TodoRow).ToList();
+        if (dueSoon.Count == 0) dueRows.Add(Ui.Empty("Nothing due today or tomorrow."));
+        if (dueSoon.Count > 9) dueRows.Add(Ui.Empty($"+{dueSoon.Count - 9} more"));
+        Ui.Fill(due, 52, dueRows.ToArray());
 
         RenderConversation();
     }
 
     private UIElement TodoRow(PlannerTodo t)
     {
-        var check = new CheckBox { IsChecked = t.Done, Foreground = Theme.Category(t.Category), Margin = new Thickness(0, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
+        var check = new CheckBox { IsChecked = t.Done, Foreground = Theme.Category(t.Category), Margin = new Thickness(0, 0, 14, 0), VerticalAlignment = VerticalAlignment.Center };
         check.SetResourceReference(StyleProperty, "RoundCheck");
         check.Click += (_, _) => Window.Run(Services.Planner.UpdateTodo(t.Id, new { done = check.IsChecked == true }));
         var text = new StackPanel();
@@ -140,8 +143,8 @@ public sealed class HomePage : PageFrame, IConsolePage
             if (text.Length == 0) continue;
             var bubble = new Border
             {
-                CornerRadius = new CornerRadius(14),
-                Padding = new Thickness(12, 7, 12, 7),
+                CornerRadius = new CornerRadius(18),
+                Padding = new Thickness(14, 8, 14, 8),
                 Margin = new Thickness(mine ? 80 : 0, 4, mine ? 0 : 80, 0),
                 HorizontalAlignment = mine ? HorizontalAlignment.Right : HorizontalAlignment.Left,
             };

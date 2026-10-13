@@ -5,7 +5,7 @@ using System.Windows.Controls;
 namespace Hormes.Windows.UI.Console.Pages;
 
 /// <summary>
-/// A page's frame: a large title with a subtitle, a toolbar on the right, and a scrolling body, inset like a macOS
+/// A page's frame: a large title with a subtitle, a toolbar on the right, and a scrolling body, inset like an iPad
 /// app's content. <see cref="Fixed"/> pages (Calendar) manage their own scrolling.
 /// </summary>
 public class PageFrame : UserControl
@@ -22,7 +22,7 @@ public class PageFrame : UserControl
     {
         Services = services;
         Window = window;
-        Root = new Grid { Margin = new Thickness(36, 26, 36, 0) };
+        Root = new Grid { Margin = new Thickness(32, 46, 32, 0) };
         Root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         Root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
@@ -32,8 +32,8 @@ public class PageFrame : UserControl
         var titles = new StackPanel();
         TitleText = Ui.Text(title, "LargeTitle");
         Subtitle = Ui.Text("", "Caption");
-        Subtitle.FontSize = 14;
-        Subtitle.Margin = new Thickness(1, 2, 0, 0);
+        Subtitle.FontSize = 15;
+        Subtitle.Margin = new Thickness(2, 0, 0, 0);
         titles.Children.Add(TitleText);
         titles.Children.Add(Subtitle);
         header.Children.Add(titles);
@@ -42,10 +42,10 @@ public class PageFrame : UserControl
         header.Children.Add(Toolbar);
         Root.Children.Add(header);
 
-        Body = new StackPanel { Margin = new Thickness(0, 0, 0, 32) };
+        Body = new StackPanel { Margin = new Thickness(0, 0, 0, 36) };
         if (scroll)
         {
-            var scroller = new ScrollViewer { Content = Body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false, Margin = new Thickness(0, 0, -16, 0), Padding = new Thickness(0, 0, 16, 0) };
+            var scroller = new ScrollViewer { Content = Body, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false, Margin = new Thickness(0, 0, -32, 0), Padding = new Thickness(0, 0, 32, 0) };
             Grid.SetRow(scroller, 1);
             Root.Children.Add(scroller);
         }

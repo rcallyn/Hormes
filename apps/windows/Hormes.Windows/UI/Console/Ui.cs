@@ -33,16 +33,55 @@ public static class Ui
         return b;
     }
 
-    /// <summary>A grouped list: rows separated by hairlines inset past the leading icon, like iOS Settings.</summary>
-    public static Border Group(params UIElement[] rows)
+    /// <summary>A section header: small grey capitals, inset to the text of the cells below it.</summary>
+    public static TextBlock Header(string text) => Text(text.ToUpperInvariant(), "SectionHeader");
+
+    /// <summary>
+    /// An inset grouped list: rows separated by hairlines that start at the text's left edge (<paramref name="inset"/>:
+    /// 16 for plain rows, past the leading check or bar otherwise), the cells clipped to the card's rounded corners.
+    /// </summary>
+    public static Border Group(params UIElement[] rows) => Group(16, rows);
+
+    public static Border Group(double inset, params UIElement[] rows)
     {
         var stack = new StackPanel();
         for (var i = 0; i < rows.Length; i++)
         {
-            if (i > 0) stack.Children.Add(Hairline(new Thickness(16, 0, 0, 0)));
+            if (i > 0) stack.Children.Add(Hairline(new Thickness(inset, 0, 0, 0)));
             stack.Children.Add(rows[i]);
         }
-        return Card(stack, new Thickness(0, 4, 0, 4));
+        return Rounded(Card(stack, new Thickness(0)));
+    }
+
+    /// <summary>Fill a grouped card's stack (one a page redraws) with rows and inset hairlines between them.</summary>
+    public static void Fill(Panel list, double inset, params UIElement[] rows)
+    {
+        list.Children.Clear();
+        for (var i = 0; i < rows.Length; i++)
+        {
+            if (i > 0) list.Children.Add(Hairline(new Thickness(inset, 0, 0, 0)));
+            list.Children.Add(rows[i]);
+        }
+    }
+
+    /// <summary>Clip a card's children to its corner radius (a Border does not), so a row's hover reaches the corners.</summary>
+    public static Border Rounded(Border card)
+    {
+        card.SizeChanged += (_, e) =>
+        {
+            var r = card.CornerRadius.TopLeft;
+            card.Clip = new RectangleGeometry(new Rect(0, 0, e.NewSize.Width, e.NewSize.Height), r, r);
+        };
+        return card;
+    }
+
+    /// <summary>The disclosure chevron at a navigating row's trailing edge.</summary>
+    public static TextBlock Chevron()
+    {
+        var t = Glyph("", 12, "Tertiary");
+        t.FontWeight = FontWeights.Bold;
+        t.Margin = new Thickness(8, 0, 0, 0);
+        return t;
     }
 
     public static Border Hairline(Thickness? margin = null)
@@ -55,24 +94,35 @@ public static class Ui
     public static Ellipse Dot(Brush fill, double size = 9) =>
         new() { Width = size, Height = size, Fill = fill, VerticalAlignment = VerticalAlignment.Center };
 
-    /// <summary>A hoverable row: content, optional trailing element, click handler.</summary>
-    public static Border Row(UIElement content, UIElement? trailing = null, Action? click = null)
+    /// <summary>
+    /// A cell: content, optional trailing element, click handler. A tappable row with nothing trailing gets the
+    /// disclosure chevron (<paramref name="chevron"/> overrides), and fades a highlight in under the pointer.
+    /// </summary>
+    public static Border Row(UIElement content, UIElement? trailing = null, Action? click = null, bool? chevron = null)
     {
-        var grid = new Grid();
+        var grid = new Grid { Margin = new Thickness(16, 9, 16, 9) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         if (content is FrameworkElement c) c.VerticalAlignment = VerticalAlignment.Center;
         grid.Children.Add(content);
+        if (trailing is null && (chevron ?? click is not null)) trailing = Chevron();
         if (trailing is not null)
         {
             Grid.SetColumn(trailing, 1);
             if (trailing is FrameworkElement fe) fe.VerticalAlignment = VerticalAlignment.Center;
             grid.Children.Add(trailing);
         }
-        var row = new Border { Child = grid };
+        var hover = new Border { IsHitTestVisible = false, Opacity = 0 };
+        hover.SetResourceReference(Border.BackgroundProperty, "CardHover");
+        var layers = new Grid();
+        layers.Children.Add(hover);
+        layers.Children.Add(grid);
+        var row = new Border { Child = layers };
         row.SetResourceReference(FrameworkElement.StyleProperty, "Row");
         if (click is not null)
         {
+            row.MouseEnter += (_, _) => hover.BeginAnimation(UIElement.OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(1, TimeSpan.FromMilliseconds(110)));
+            row.MouseLeave += (_, _) => hover.BeginAnimation(UIElement.OpacityProperty, new System.Windows.Media.Animation.DoubleAnimation(0, TimeSpan.FromMilliseconds(220)));
             row.Cursor = System.Windows.Input.Cursors.Hand;
             row.MouseLeftButtonUp += (_, e) =>
             {
@@ -96,6 +146,15 @@ public static class Ui
         b.SetResourceReference(FrameworkElement.StyleProperty, style);
         b.Click += (_, _) => click();
         return b;
+    }
+
+    /// <summary>A Fluent picker (ComboBox, DatePicker) on the Console's grey fill with no outline.</summary>
+    public static T Picker<T>(T picker) where T : Control
+    {
+        picker.SetResourceReference(Control.BackgroundProperty, "Fill");
+        picker.BorderBrush = Brushes.Transparent;
+        picker.BorderThickness = new Thickness(0);
+        return picker;
     }
 
     public static StackPanel HStack(double spacing, params UIElement[] children)

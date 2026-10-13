@@ -1,10 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
+using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using Hormes.Windows.Model;
@@ -14,7 +17,7 @@ using Hormes.Windows.UI.Console.Pages;
 namespace Hormes.Windows.UI;
 
 /// <summary>
-/// The Console: an Apple-style window with a sidebar (Home, Calendar, Todos, School, Settings). Pages are built once and
+/// The Console: an iPadOS-style window (no title bar; its own small window controls) with a sidebar (Home, Calendar, Todos, School, Settings). Pages are built once and
 /// refreshed when the planner or the engine snapshot changes, at most every 120 ms; an editor opens as a sheet over the
 /// window. Closing only hides it: the tray icon and the notch reopen it.
 /// </summary>
@@ -38,8 +41,85 @@ public partial class ConsoleWindow : Window
         services.Client.ConnectionChanged += _ => Dispatcher.BeginInvoke(ScheduleRefresh);
         services.Daemon.StateChanged += _ => Dispatcher.BeginInvoke(ScheduleRefresh);
         KeyDown += (_, e) => { if (e.Key == Key.Escape && SheetHost.Visibility == Visibility.Visible) CloseSheet(); };
+        StateChanged += (_, _) => UpdateWindowState();
         NavHome.IsChecked = true;
     }
+
+    // ------------------------------------------------------------------ chrome
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+    [DllImport("user32.dll")] private static extern IntPtr MonitorFromWindow(IntPtr hwnd, int flags);
+    [DllImport("user32.dll")] private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfo info);
+    [DllImport("user32.dll")] private static extern bool GetWindowRect(IntPtr hwnd, out Rect rect);
+
+    [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] private struct Point { public int X, Y; }
+    [StructLayout(LayoutKind.Sequential)] private struct MonitorInfo { public int Size; public Rect Monitor, Work; public int Flags; }
+    [StructLayout(LayoutKind.Sequential)] private struct MinMaxInfo { public Point Reserved, MaxSize, MaxPosition, MinTrackSize, MaxTrackSize; }
+
+    private const int DwmWindowCornerPreference = 33;
+    private const int DwmcpRound = 2;
+    private const int WmGetMinMaxInfo = 0x0024;
+
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+        var hwnd = new WindowInteropHelper(this).Handle;
+        // WindowChrome with no glass frame would otherwise lose Windows 11's rounded corners.
+        try
+        {
+            var corner = DwmcpRound;
+            DwmSetWindowAttribute(hwnd, DwmWindowCornerPreference, ref corner, sizeof(int));
+        }
+        catch (Exception) { /* older Windows: square corners */ }
+        HwndSource.FromHwnd(hwnd)?.AddHook(WndProc);
+        UpdateWindowState();
+    }
+
+    /// <summary>A chromeless window maximizes over the taskbar; keep it to the monitor's work area.</summary>
+    private static IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg != WmGetMinMaxInfo) return IntPtr.Zero;
+        var monitor = MonitorFromWindow(hwnd, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info)) return IntPtr.Zero;
+        var mmi = Marshal.PtrToStructure<MinMaxInfo>(lParam);
+        mmi.MaxPosition = new Point { X = info.Work.Left - info.Monitor.Left, Y = info.Work.Top - info.Monitor.Top };
+        mmi.MaxSize = new Point { X = info.Work.Right - info.Work.Left, Y = info.Work.Bottom - info.Work.Top };
+        Marshal.StructureToPtr(mmi, lParam, true);
+        return IntPtr.Zero;
+    }
+
+    /// <summary>Maximized, pad the content by however far the window still overhangs the work area, so nothing is cut off.</summary>
+    private void UpdateWindowState()
+    {
+        var maximized = WindowState == WindowState.Maximized;
+        Shell.Margin = maximized ? MaximizedInset() : new Thickness(0);
+        MaximizeButton.Content = maximized ? "" : "";
+        MaximizeButton.ToolTip = maximized ? "Restore" : "Maximize";
+    }
+
+    private Thickness MaximizedInset()
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        var monitor = MonitorFromWindow(hwnd, 2);
+        var info = new MonitorInfo { Size = Marshal.SizeOf<MonitorInfo>() };
+        if (hwnd == IntPtr.Zero || monitor == IntPtr.Zero || !GetMonitorInfo(monitor, ref info) || !GetWindowRect(hwnd, out var r)) return new Thickness(0);
+        var scale = VisualTreeHelper.GetDpi(this).DpiScaleX;
+        double Over(int v) => Math.Max(0, v) / scale;
+        return new Thickness(Over(info.Work.Left - r.Left), Over(info.Work.Top - r.Top), Over(r.Right - info.Work.Right), Over(r.Bottom - info.Work.Bottom));
+    }
+
+    private void Minimize_Click(object sender, RoutedEventArgs e) => SystemCommands.MinimizeWindow(this);
+
+    private void Maximize_Click(object sender, RoutedEventArgs e)
+    {
+        if (WindowState == WindowState.Maximized) SystemCommands.RestoreWindow(this);
+        else SystemCommands.MaximizeWindow(this);
+    }
+
+    private void Close_Click(object sender, RoutedEventArgs e) => Close();
 
     protected override void OnClosing(CancelEventArgs e)
     {

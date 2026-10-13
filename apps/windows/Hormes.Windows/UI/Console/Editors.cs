@@ -32,7 +32,7 @@ public static class Editors
         notes.VerticalContentAlignment = VerticalAlignment.Top;
         stack.Children.Add(notes);
 
-        var due = new DatePicker { SelectedDate = (todo?.Due ?? defaultDue)?.ToDateTime(TimeOnly.MinValue), Width = 170 };
+        var due = Ui.Picker(new DatePicker { SelectedDate = (todo?.Due ?? defaultDue)?.ToDateTime(TimeOnly.MinValue), Width = 170 });
         var hasDue = new CheckBox { IsChecked = todo?.Due is not null || defaultDue is not null };
         hasDue.SetResourceReference(FrameworkElement.StyleProperty, "Switch");
         due.IsEnabled = hasDue.IsChecked == true;
@@ -102,7 +102,7 @@ public static class Editors
         title.Margin = new Thickness(0, 14, 0, 8);
         stack.Children.Add(title);
 
-        var date = new DatePicker { SelectedDate = (series?.Day ?? day ?? Planner.Today).ToDateTime(TimeOnly.MinValue), Width = 170 };
+        var date = Ui.Picker(new DatePicker { SelectedDate = (series?.Day ?? day ?? Planner.Today).ToDateTime(TimeOnly.MinValue), Width = 170 });
         var allDay = new CheckBox { IsChecked = series is not null ? series.AllDay : at is null };
         allDay.SetResourceReference(FrameworkElement.StyleProperty, "Switch");
         var start = TimePicker(series?.Start ?? at ?? new TimeOnly(9, 0));
@@ -118,7 +118,7 @@ public static class Editors
         };
 
         var repeat = Segmented(Repeats.Select(r => r.Label).ToArray(), Array.FindIndex(Repeats, r => r.Freq == series?.Recurrence?.Freq) is var ri and >= 0 ? ri : 0);
-        var until = new DatePicker { SelectedDate = Planner.ParseDate(series?.Recurrence?.Until)?.ToDateTime(TimeOnly.MinValue), Width = 170 };
+        var until = Ui.Picker(new DatePicker { SelectedDate = Planner.ParseDate(series?.Recurrence?.Until)?.ToDateTime(TimeOnly.MinValue), Width = 170 });
         var untilRow = Labeled("Until", until);
         void ShowUntil() => untilRow.Visibility = repeat.Index == 0 ? Visibility.Collapsed : Visibility.Visible;
         repeat.Changed += ShowUntil;
@@ -232,7 +232,7 @@ public static class Editors
 
     private static ComboBox CategoryPicker(string? selected)
     {
-        var box = new ComboBox { Width = 170, HorizontalAlignment = HorizontalAlignment.Left, DisplayMemberPath = "Label", SelectedValuePath = "Id" };
+        var box = Ui.Picker(new ComboBox { Width = 170, HorizontalAlignment = HorizontalAlignment.Left, DisplayMemberPath = "Label", SelectedValuePath = "Id" });
         box.Items.Add(new { Id = (string?)null, Label = "None" });
         foreach (var (id, label) in Planner.Categories) box.Items.Add(new { Id = (string?)id, Label = label });
         box.SelectedValue = selected;
@@ -242,7 +242,7 @@ public static class Editors
 
     private static ComboBox TimePicker(TimeOnly value)
     {
-        var box = new ComboBox { Width = 120, IsEditable = false, MaxDropDownHeight = 300 };
+        var box = Ui.Picker(new ComboBox { Width = 120, IsEditable = false, MaxDropDownHeight = 300 });
         for (var m = 0; m < 24 * 60; m += 15)
         {
             var t = new TimeOnly(m / 60, m % 60);

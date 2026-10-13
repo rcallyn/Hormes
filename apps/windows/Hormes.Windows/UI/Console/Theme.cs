@@ -6,7 +6,7 @@ using Microsoft.Win32;
 namespace Hormes.Windows.UI.Console;
 
 /// <summary>
-/// The Console's colours: Apple's system palette (grouped backgrounds, labels, separators, the system tints), light or
+/// The Console's colours: iOS's system palette (grouped backgrounds, labels, separators, the system tints), light or
 /// dark with Windows' app mode, applied as brushes on the window's resources so every DynamicResource follows a change.
 /// Category colours are stits' defaults (src/lib/itemColor.ts), so an item looks the same in both apps.
 /// </summary>
@@ -37,41 +37,52 @@ public static class Theme
         void Set(string key, string hex) => r[key] = Brush(hex);
         if (dark)
         {
+            // iOS's dark system palette: black, grouped cell, raised, separator, secondary label, the system tints.
             Set("Bg", "#000000");
-            Set("Sidebar", "#161618");
+            Set("Sidebar", "#0C0C0D");
             Set("Card", "#1C1C1E");
             Set("CardHover", "#2C2C2E");
             Set("Fill", "#2C2C2E");
             Set("Label", "#FFFFFF");
-            Set("Secondary", "#98989F");
-            Set("Tertiary", "#5A5A5F");
+            Set("Secondary", "#8E8E93");
+            Set("Tertiary", "#636366");
             Set("Separator", "#38383A");
             Set("Accent", "#0A84FF");
-            Set("AccentSoft", "#1A0A84FF");
+            Set("AccentSoft", "#2B0A84FF");
             Set("Red", "#FF453A");
             Set("Orange", "#FF9F0A");
             Set("Green", "#30D158");
             Set("Selection", "#2C2C2E");
             Set("Dim", "#99000000");
+            Set("SegmentTrack", "#3D767680");
+            Set("SegmentSelected", "#636366");
+            Set("SwitchOff", "#51787880");
+            Set("ControlFill", "#59787880");
+            Set("ControlHover", "#8C787880");
         }
         else
         {
             Set("Bg", "#F2F2F7");
             Set("Sidebar", "#E9E9EE");
             Set("Card", "#FFFFFF");
-            Set("CardHover", "#F2F2F7");
+            Set("CardHover", "#E5E5EA");
             Set("Fill", "#EEEEF0");
             Set("Label", "#000000");
-            Set("Secondary", "#6E6E73");
+            Set("Secondary", "#8A8A8E");
             Set("Tertiary", "#AEAEB2");
-            Set("Separator", "#D8D8DC");
+            Set("Separator", "#C6C6C8");
             Set("Accent", "#007AFF");
-            Set("AccentSoft", "#1A007AFF");
+            Set("AccentSoft", "#1F007AFF");
             Set("Red", "#FF3B30");
             Set("Orange", "#FF9500");
             Set("Green", "#34C759");
             Set("Selection", "#DCDCE1");
             Set("Dim", "#59000000");
+            Set("SegmentTrack", "#1F767680");
+            Set("SegmentSelected", "#FFFFFF");
+            Set("SwitchOff", "#29787880");
+            Set("ControlFill", "#33787880");
+            Set("ControlHover", "#59787880");
         }
     }
 

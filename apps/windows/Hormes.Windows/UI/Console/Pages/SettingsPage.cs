@@ -30,7 +30,7 @@ public sealed class SettingsPage : PageFrame, IConsolePage
         Subtitle.Text = "Hormes for Windows";
 
         // You
-        Body.Children.Add(Ui.Text("You", "SectionHeader"));
+        Body.Children.Add(Ui.Header("You"));
         name = Ui.Field("What should Hormes call you?");
         name.Width = 260;
         name.LostFocus += (_, _) => SaveName();
@@ -38,7 +38,7 @@ public sealed class SettingsPage : PageFrame, IConsolePage
         Body.Children.Add(Ui.Group(Ui.Row(Ui.Text("Name", "Body"), name)));
 
         // Calendar & Todos: the choice between Hormes' own and stits.
-        Body.Children.Add(Ui.Text("Calendar & Todos", "SectionHeader"));
+        Body.Children.Add(Ui.Header("Calendar & Todos"));
         useLocal = Choice("Use Hormes' calendar and todos", "Kept on this PC, in ~/.hormes/planner.json.");
         useStits = Choice("Sync with stits", "Hormes reads and writes stits' own calendar and todos, so changes show up in both. Your PC's items are copied into stits once when you switch.");
         stitsStatus = Ui.Text("", "Caption");
@@ -56,7 +56,7 @@ public sealed class SettingsPage : PageFrame, IConsolePage
         useStits.Checked += (_, _) => { if (!updating) Window.Run(Services.Planner.SetSync(true), "Synced with stits"); };
 
         // Voice
-        Body.Children.Add(Ui.Text("Voice", "SectionHeader"));
+        Body.Children.Add(Ui.Header("Voice"));
         clap = Switch(on => Services.SetClap(on));
         speak = Switch(on => Services.SetSpeak(on));
         keyStatus = Ui.Text("", "Caption");
@@ -77,7 +77,7 @@ public sealed class SettingsPage : PageFrame, IConsolePage
             Ui.Row(whisperText)));
 
         // Hormes
-        Body.Children.Add(Ui.Text("Hormes", "SectionHeader"));
+        Body.Children.Add(Ui.Header("Hormes"));
         engineStatus = Ui.Text("", "Caption");
         var engineText = new StackPanel();
         engineText.Children.Add(Ui.Text("Engine", "Body"));
