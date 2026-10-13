@@ -26,6 +26,9 @@ assistant.
 - **Reminds you before you have to remember.** A morning brief and an evening "tomorrow" brief; a heads-up
   15 minutes before class; an offer to turn a lecture into notes once class ends; homework due; exams coming up;
   course files that land in Downloads. All are notifications only, and you can turn them off on the School page.
+- **Works with [stits](https://github.com/rcallyn/stits).** Hormes can use stits as its planner. It shares stits'
+  todos and calendar, including the Canvas assignments stits brings in, so a change made in either app shows up
+  in the other. Reminders and homework help use those due dates, and you can ask Hormes to add or move things.
 - **Helps you switch tasks.** "Where was I?" catches you up across classes. "File my downloads" puts new course
   files into the right class folder.
 - **Uses your computer.** Hormes can also carry out tasks in other apps. Every action goes through one central
@@ -54,6 +57,11 @@ names the class and can turn on handwritten explanations:
 ```json
 { "title": "Discrete Mathematics", "code": "CMPSC 360", "handwriting": true }
 ```
+
+**Connect stits (optional).** If you use stits, switch the planner to **stits** in Settings or with the
+**Hormes | stits** control on the Calendar, Todos and School pages. Hormes finds the stits database through
+`STITS_DATABASE_URL`, or the `.env.local` in your stits checkout, and the connection string never leaves the
+engine. Without stits, Hormes keeps its own todos and calendar on your PC.
 
 Then ask: "what did lecture 9 say about stars and bars?", "help me start HW 6", or "make me a practice exam
 for STAT 418".
