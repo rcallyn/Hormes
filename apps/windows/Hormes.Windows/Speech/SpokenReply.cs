@@ -11,9 +11,9 @@ namespace Hormes.Windows.Speech;
 public static class SpokenReply
 {
     /// <summary>At most this many characters once made speakable.</summary>
-    public const int MaxChars = 280;
+    public const int MaxChars = 500;
     /// <summary>At most this many sentences.</summary>
-    public const int MaxSentences = 3;
+    public const int MaxSentences = 5;
 
     /// <summary>The line to speak, or null when the answer is one to read.</summary>
     public static string? Pick(string text)

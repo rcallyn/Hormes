@@ -227,6 +227,11 @@ using (var doc = JsonDocument.Parse(File.ReadAllBytes(fixture)))
 
 Check(WhisperTranscriber.Clean(" [BLANK_AUDIO] ") == "" && WhisperTranscriber.Clean(" Thank you. ") == "" && WhisperTranscriber.Clean(" Open Spotify. ") == "Open Spotify.",
     "Whisper's filler on silence is dropped, real words kept");
+Check(WhisperTranscriber.Clean(" I'm going to go to the top of the top of the top of the top.") == "" && WhisperTranscriber.Clean(" I'm going to go.") == "",
+    "Whisper's loops and stock lines on noise are dropped");
+Check(WhisperTranscriber.Clean(" Claude Code, Wispr.") == "" && WhisperTranscriber.Clean(" Ask Claude.") == "Ask Claude.", "its own hint words read back on noise are dropped");
+Check(WhisperTranscriber.Clean(" Move the meeting to the top of the list.") == "Move the meeting to the top of the list." && WhisperTranscriber.Clean(" Yes, yes.") == "Yes, yes.",
+    "a phrase said once or twice is kept");
 
 {
     var spoken = ElevenLabsSpeaker.Speakable("## Done\n- Opened **Spotify** and [your playlist](https://open.spotify.com/x).\n```sh\nrm -rf /tmp/x\n```\nRun `pnpm test` next.");
@@ -236,7 +241,8 @@ Check(WhisperTranscriber.Clean(" [BLANK_AUDIO] ") == "" && WhisperTranscriber.Cl
     Check(SpokenReply.Pick("Run this:\n```sh\npnpm test\n```") is null, "code is not spoken");
     Check(SpokenReply.Pick("It's at https://example.com/page.") is null, "a link is not spoken");
     Check(SpokenReply.Pick(string.Join(" ", Enumerable.Repeat("This sentence explains one more detail.", 8))) is null, "a long explanation is not spoken");
-    Check(SpokenReply.Pick("Yes. It's 72 degrees. Bring a jacket tonight. Rain after nine.") is null, "four sentences is too many to speak");
+    Check(SpokenReply.Pick("Yes. It's 72 degrees. Bring a jacket tonight. Rain after nine. Wind from the west.") is not null, "five sentences are spoken");
+    Check(SpokenReply.Pick("Yes. It's 72 degrees. Bring a jacket tonight. Rain after nine. Wind from the west. Clear by morning.") is null, "six sentences is too many to speak");
 }
 
 // The Mac's sounds play here: every .caf parses to PCM of a sensible length.

@@ -66,7 +66,7 @@ streamed so the first words play while the rest is generated. Put `ELEVENLABS_AP
 or the Voice Library. Markdown and code are not read out, and long answers stop at ~1200 characters.
 A new turn or Stop cuts the voice off, Hormes's own voice never triggers the clap detector, and
 **Speak replies** (the speaker button in the notch, the tray menu or Settings) turns it on and off. Only short,
-conversational answers are spoken (`Speech/SpokenReply.cs`: at most 3 sentences and 280 characters, no
+conversational answers are spoken (`Speech/SpokenReply.cs`: at most 5 sentences and 500 characters, no
 lists, tables, code, links or headings); anything meant for reading stays on screen and costs no credits.
 Nothing is sent to ElevenLabs while Windows output is muted or at zero volume (`Audio/SystemAudio.cs`).
 

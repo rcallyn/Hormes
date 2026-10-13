@@ -51,8 +51,11 @@ public sealed class WhisperTranscriber : IAsyncDisposable
             .WithLanguage("auto")
             .WithThreads(Math.Clamp(Environment.ProcessorCount / 2, 2, 8))
             // Names it should spell right; a prompt only biases, it is never output.
-            .WithPrompt("Hormes, Claude, Claude Code, Wispr.")
-            .WithNoSpeechThreshold(0.6f);
+            .WithPrompt(Prompt)
+            .WithNoSpeechThreshold(0.6f)
+            // The no-speech check only applies with a log-probability floor; with both, a window of noise decodes to nothing.
+            .WithLogProbThreshold(-1.0f)
+            .WithProbabilities();
         if (ctx < 1500) builder = builder.WithAudioContextSize(ctx);
         p = builder.Build();
         processors[ctx] = p;
@@ -101,7 +104,15 @@ public sealed class WhisperTranscriber : IAsyncDisposable
         {
             var text = new StringBuilder();
             await foreach (var segment in ProcessorFor(samples16k.Length).ProcessAsync(samples16k, ct).ConfigureAwait(false))
+            {
+                // Words made up from noise come out unsure; a segment Whisper is not confident of is not something User said.
+                if (segment.Probability < MinSegmentProbability)
+                {
+                    AppLog.Write($"whisper: dropped an unsure segment ({segment.Probability:0.00}, {segment.Text.Trim().Length} chars)");
+                    continue;
+                }
                 text.Append(segment.Text);
+            }
             return Clean(text.ToString());
         }
         finally
@@ -140,6 +151,13 @@ public sealed class WhisperTranscriber : IAsyncDisposable
     /// Whisper on near-silence makes things up: bracketed tags ("[BLANK_AUDIO]", "(music)") and a few stock lines.
     /// Those alone are not something User said.
     /// </summary>
+    /// <summary>Names Whisper should spell right; it biases recognition, never adds words of its own.</summary>
+    private const string Prompt = "Hormes, Claude, Claude Code, Wispr.";
+    private static readonly string[] PromptWords = Regex.Split(Prompt.ToLowerInvariant(), @"\W+").Where(w => w.Length > 0).ToArray();
+
+    /// <summary>The mean token probability under which a segment is taken as made up from noise.</summary>
+    public const float MinSegmentProbability = 0.45f;
+
     public static string Clean(string raw)
     {
         var text = Regex.Replace(raw, @"\[[^\]]*\]|\([^)]*\)|\*[^*]*\*", " ");
@@ -147,8 +165,14 @@ public sealed class WhisperTranscriber : IAsyncDisposable
         // A sentence said once and written twice in a row (a cut window's known loop): once.
         text = Regex.Replace(text, @"(?<s>[^.!?]{8,}[.!?])(\s+\k<s>)+", "${s}", RegexOptions.IgnoreCase);
         var bare = text.Trim('.', '!', '?', ',', ' ').ToLowerInvariant();
-        string[] filler = { "", "you", "thank you", "thanks for watching", "thank you for watching", "bye", ".", "so" };
-        return filler.Contains(bare) ? "" : text;
+        string[] filler = { "", "you", "thank you", "thanks for watching", "thank you for watching", "bye", ".", "so", "i'm going to go", "oh", "hmm", "um", "uh" };
+        if (filler.Contains(bare)) return "";
+        // On noise Whisper can read its own hint back ("Claude Code, Wispr."): words only from the prompt are not speech.
+        var words = Regex.Split(bare, @"\W+").Where(w => w.Length > 0).ToArray();
+        if (words.Length > 0 && words.All(w => PromptWords.Contains(w))) return "";
+        // Whisper stuck in a loop on noise ("the top of the top of the top of the top"): a short phrase three or more
+        // times in a row is not speech.
+        return Regex.IsMatch(bare, @"\b(?<p>(\w+\W+){1,4}?)\k<p>\k<p>") ? "" : text;
     }
 
     /// <summary>The mic's rate to 16 kHz: a Hann-windowed sinc, plenty for speech.</summary>

@@ -12,11 +12,16 @@
     <AssemblyName>Hormes</AssemblyName>
     <RootNamespace>Hormes.Windows</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <!-- The repo icon (five white bars on black), from scripts/make-windows-icon.ts. -->
+    <ApplicationIcon>Hormes.ico</ApplicationIcon>
     <Version>2.0.0</Version>
     <!-- WinForms is here only for the tray icon; the manifest's PerMonitorV2 is the WPF app's. -->
     <NoWarn>$(NoWarn);WFO0003;WPF0001</NoWarn>
   </PropertyGroup>
 
+  <ItemGroup>
+    <EmbeddedResource Include="Hormes.ico" LogicalName="Hormes.ico" />
+  </ItemGroup>
   <ItemGroup>
     <PackageReference Include="NAudio" Version="3.1.0" />
     <!-- apps/windows/Checks drives VoiceInput with recordings. -->

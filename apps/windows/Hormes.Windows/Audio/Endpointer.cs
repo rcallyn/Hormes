@@ -15,7 +15,7 @@ public sealed class Endpointer
     public enum Verdict { Waiting, Speaking, Done, NoSpeech }
 
     public TimeSpan EndSilence { get; init; } = TimeSpan.FromSeconds(2.0);
-    public TimeSpan MinSpeech { get; init; } = TimeSpan.FromSeconds(0.25);
+    public TimeSpan MinSpeech { get; init; } = TimeSpan.FromSeconds(0.5);
     public TimeSpan NoSpeechTimeout { get; init; } = TimeSpan.FromSeconds(7);
     public TimeSpan MaxTurn { get; init; } = TimeSpan.FromSeconds(90);
 

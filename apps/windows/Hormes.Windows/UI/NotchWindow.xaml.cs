@@ -91,6 +91,10 @@ public partial class NotchWindow : Window
         Island.MouseEnter += (_, _) => PointerIn();
         MouseLeave += (_, _) => PointerOut();
         SayBox.PreviewMouseDown += (_, _) => TakeFocus();
+        // A click anywhere off the island collapses it. The window never takes focus on hover, so no event says the
+        // user clicked elsewhere; while open, the mouse buttons are read every 50 ms instead.
+        outsideClick.Tick += (_, _) => WatchOutsideClick();
+        Deactivated += (_, _) => { if (isOpen && !IsMouseOver) Dismiss(); };
 
         SourceInitialized += (_, _) => { InitWindow(); Place(); };
         Loaded += (_, _) => Place();
@@ -286,10 +290,39 @@ public partial class NotchWindow : Window
         if (isOpen && !HoldOpen) closeDelay.Start();
     }
 
+    private readonly DispatcherTimer outsideClick = new() { Interval = TimeSpan.FromMilliseconds(50) };
+    private bool buttonWasDown;
+
+    private void WatchOutsideClick()
+    {
+        var down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0;
+        var pressed = down && !buttonWasDown;
+        buttonWasDown = down;
+        if (!pressed || !GetCursorPos(out var at) || hwnd == IntPtr.Zero) return;
+        // Inside the island (or the toast under it) is a click on Hormes, not a click away.
+        var point = Island.PointFromScreen(new System.Windows.Point(at.X, at.Y));
+        if (point.X >= 0 && point.Y >= 0 && point.X <= Island.ActualWidth && point.Y <= Island.ActualHeight) return;
+        Dismiss();
+    }
+
+    /// <summary>The user clicked away: close now, whatever was holding the island open, and give the keyboard back.</summary>
+    private void Dismiss()
+    {
+        openDelay.Stop();
+        closeDelay.Stop();
+        replyHold.Stop();
+        awaitingReply = false;
+        if (SayBox.IsKeyboardFocused) Keyboard.ClearFocus();
+        ReleaseFocus();
+        SetOpen(false);
+    }
+
     private void SetOpen(bool open)
     {
         if (open == isOpen) return;
         isOpen = open;
+        if (open) { buttonWasDown = true; outsideClick.Start(); }
+        else outsideClick.Stop();
         if (open && !awaitingReply && content.Hero is { Length: > 0 } hero && DateTime.UtcNow - heroShownAt > StaleAfter && hero != clearedHero)
         {
             // The last exchange is old news: open clean (it stays in the Console's history).
@@ -554,6 +587,15 @@ public partial class NotchWindow : Window
         if (hwnd == IntPtr.Zero) return;
         SetWindowLong(hwnd, GWL_EXSTYLE, GetWindowLong(hwnd, GWL_EXSTYLE) | WS_EX_NOACTIVATE);
     }
+
+    private const int VK_LBUTTON = 0x01;
+    private const int VK_RBUTTON = 0x02;
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int key);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CursorPoint { public int X; public int Y; }
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out CursorPoint point);
 
     private const int GWL_EXSTYLE = -20;
     private const int WS_EX_TOOLWINDOW = 0x00000080;

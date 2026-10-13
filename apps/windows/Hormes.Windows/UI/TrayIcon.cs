@@ -39,7 +39,7 @@ public sealed class TrayIcon : IDisposable
         menu.Items.Add("Quit Hormes", null, (_, _) => quit());
         icon = new NotifyIcon
         {
-            Icon = Draw(),
+            Icon = AppIcon(),
             Text = "Hormes",
             ContextMenuStrip = menu,
             Visible = true,
@@ -58,6 +58,21 @@ public sealed class TrayIcon : IDisposable
     }
 
     /// <summary>The mark, drawn: five white bars on a black rounded square.</summary>
+    /// <summary>The app icon (Hormes.ico, the repo's five bars) at the notification area's size; the drawn one if it cannot load.</summary>
+    public static Icon AppIcon()
+    {
+        try
+        {
+            using var stream = typeof(TrayIcon).Assembly.GetManifestResourceStream("Hormes.ico");
+            if (stream is not null) return new Icon(stream, SystemInformation.SmallIconSize);
+        }
+        catch (Exception e) when (e is ArgumentException or System.ComponentModel.Win32Exception)
+        {
+            AppLog.Write($"tray icon: {e.Message}");
+        }
+        return Draw();
+    }
+
     public static Icon Draw(int size = 32)
     {
         using var bmp = new Bitmap(size, size);

@@ -19,6 +19,7 @@
     "hormes": "tsx packages/cli/src/main.ts",
     "build:hands": "tsx scripts/build-hands.ts",
     "build:icon": "tsx scripts/make-icon.ts",
+    "build:icon:windows": "tsx scripts/make-windows-icon.ts",
     "hormesd": "tsx packages/daemon/src/main.ts",
     "build:mac": "tsx scripts/build-mac.ts",
     "build:ios": "zsh apps/ios/Scripts/build.sh"
