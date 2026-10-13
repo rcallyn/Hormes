@@ -75,3 +75,13 @@ Lectures and meetings Hormes captured in a work session (the Mac's lecture and m
 course), read from the work store; nothing is written into the course folders. This needs the courses root to exist.
 
 `Checks.exe --recorder lecture.wav` drives the recorder end to end on a recording (no device, nothing played).
+
+## Explanations on the notch (`explain`)
+
+When User asks Hormes to explain, teach or work through something, the brain calls `explain {title, text, handwriting?,
+course?}`: short paragraphs with `$inline$` and `$$display$$` TeX. The engine broadcasts a `notes` event; the Windows
+notch opens, grows to fit (720 DIPs wide, up to 700 tall, scrolling past that) and shows the notes: handwritten (Ink
+Free) with typeset math (WpfMath) for math-heavy classes, plain otherwise, until Done, a click away or the next
+question. A course is marked for handwriting with `"handwriting": true` in its `course.json` (`courses list` reports it).
+The spoken answer is one line pointing at the notes. Long ordinary answers also widen and heighten the island to fit.
+`Checks.exe --render` draws notes-handwriting.png and notes-plain.png. The Mac ignores `notes` for now.

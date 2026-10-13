@@ -226,3 +226,11 @@ test("save and import refuse the root-level pseudo-courses; a save during a refr
   assert.equal(lib.search("coffman")[0]?.file, "CS 161/Notes/Deadlock notes.md", "a save marks the library dirty, so even a young index walks again");
   assert.deepEqual(readdirSync(root).sort(), ["CS 161", "loose-notes.md"], "no Notes or Lectures folder appears at the root");
 });
+
+test("course.json can mark a class for handwritten explanations, and list says so", async () => {
+  const { root, lib } = library();
+  writeFileSync(join(root, "Microeconomics", "course.json"), JSON.stringify({ title: "Intermediate Microeconomics", code: "ECON 201", handwriting: true }));
+  const courses = (JSON.parse(await lib.tool("list", {})) as { courses: { code?: string; handwriting?: boolean }[] }).courses;
+  assert.equal(courses.find(c => c.code === "ECON 201")?.handwriting, true);
+  assert.equal(courses.find(c => c.code === "CS 161")?.handwriting, undefined);
+});

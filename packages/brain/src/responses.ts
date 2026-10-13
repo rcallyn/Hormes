@@ -388,6 +388,8 @@ export function progressLine(name: string, args: unknown): string {
       return "Reading your calendar.";
     case "planner":
       return String(a["operation"] ?? "list") === "list" ? "Checking your todos and calendar." : "Updating your planner.";
+    case "explain":
+      return "Writing it out.";
     case "courses":
       return a["operation"] === "save" ? "Saving it to your course folder." : a["operation"] === "import" ? "Filing it into your course folder." : a["operation"] === "inbox" ? "Checking your downloads." : a["operation"] === "search" ? "Checking your course materials." : "Looking at your classes.";
     case "automation_change":

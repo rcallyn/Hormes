@@ -147,6 +147,9 @@ public partial class App : Application
                     if (sound is not null) Earcons.Play(Earcons.Has(sound) ? sound : "chime");
                     if (Field("text") is { Length: > 0 } line) speaker.Say(line);
                     break;
+                case "notes":
+                    notch.ShowNotes(Field("title") ?? "Notes", Field("text") ?? "", msg.TryGetProperty("handwriting", out var hw) && hw.ValueKind == System.Text.Json.JsonValueKind.True);
+                    break;
                 case "notify":
                     // A course reminder (no automation behind it) opens the School page, where its prep and homework help are.
                     var fromCourses = Field("automationId") is "" or null;

@@ -994,6 +994,7 @@ export class Engine extends EventEmitter<EngineEvents> {
       readCalendar: (query, signal) => (process.platform === "darwin" ? this.calendarReader.read(query, signal) : Promise.resolve(this.planner.readCalendar(query))),
       planner: (operation, payload) => this.planner.tool(operation, payload),
       courses: (operation, payload) => this.courses.tool(operation, payload),
+      notes: (notes) => this.emit("event", { type: "notes", id: newId("notes"), ...notes }),
       work: this.work,
       agents: this.agents,
       userName: () => this.userName,

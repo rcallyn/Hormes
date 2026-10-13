@@ -1523,7 +1523,9 @@ export type EngineEvent =
    */
   | { readonly type: "local.say"; readonly text?: string; readonly sound?: "Pop" | "Glass" | "Ping" | "Hero"; readonly ring?: LocalSayRing; readonly automationId: string }
   /** A banner with the ring's presses; a press lands on the same row as the island's. */
-  | { readonly type: "notify"; readonly id: string; readonly title: string; readonly body?: string; readonly presses: readonly AutomationPress[]; readonly automationId: string };
+  | { readonly type: "notify"; readonly id: string; readonly title: string; readonly body?: string; readonly presses: readonly AutomationPress[]; readonly automationId: string }
+  /** A worked explanation the brain wrote for User to read (explain): paragraphs with $inline$ and $display$ TeX; handwriting for math-heavy classes. Display only. */
+  | { readonly type: "notes"; readonly id: string; readonly title: string; readonly text: string; readonly handwriting: boolean; readonly course?: string };
 
 /**
  * A settings change. `null` clears an optional field (JSON has no way to send

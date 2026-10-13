@@ -29,6 +29,7 @@
     <PackageReference Include="Whisper.net" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
     <PackageReference Include="Whisper.net.Runtime.Vulkan" Version="1.9.1" />
+    <PackageReference Include="WpfMath" Version="2.1.0" />
   </ItemGroup>
 
   <ItemGroup>

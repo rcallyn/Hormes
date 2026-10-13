@@ -359,7 +359,7 @@ test("tool table: the four thread specs follow the agents (71 with the automatio
   assert.deepEqual(THREAD_SPECS.map((s) => s.name), ["thread_start", "thread_wait", "thread_read", "thread_stop"]);
   const names = ALL_TOOL_SPECS.map((s) => s.name);
   assert.equal(names.indexOf("thread_start"), names.indexOf("agent_start") + 1, "THREAD_SPECS follow AGENT_SPECS in the table");
-  assert.equal(ALL_TOOL_SPECS.length, 76);
+  assert.equal(ALL_TOOL_SPECS.length, 77);
   assert.equal(AGENT_SPECS.length, 5, "a Thread is not an Agent: the agent tools are unchanged");
   assert.ok(!("kind" in (specByName("agent_start")!.parameters.properties as Record<string, unknown>)), "agent_start takes `tool`; no second spelling");
   // The rule the standing orders do not carry: one thread per independent app, in the same turn as the
@@ -604,7 +604,7 @@ test("tool table: toolSpecsFor renders the table for another name — the same n
   assert.equal(toolSpecsFor(""), ALL_TOOL_SPECS, "an unset name is the default");
   const sam = toolSpecsFor("Sam");
   assert.equal(sam.length, ALL_TOOL_SPECS.length);
-  assert.equal(sam.length, 76);
+  assert.equal(sam.length, 77);
   const strip = (v: unknown): unknown => JSON.parse(JSON.stringify(v, (k, x) => (k === "description" ? undefined : x)));
   let named = 0;
   for (const [i, spec] of ALL_TOOL_SPECS.entries()) {

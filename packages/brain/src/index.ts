@@ -4,7 +4,7 @@ export { calendarClockContext } from "./calendar-query.ts";
 export type { Brain, BrainTask, BrainSink, BrainResult, BrainAttachment } from "./brain.ts";
 export { brainSystemPrompt, SYSTEM_PROMPT_VERSION } from "./brain.ts";
 export { loadAttachments, markNote, attachmentsPreamble, attachmentsRecap, screenNote } from "./attachments.ts";
-export { ALL_TOOL_SPECS, PLANNER_SPECS, COURSE_SPECS, AGENT_SPECS, SYSTEM_SPECS, SELF_SPECS, DRAW_SPECS, THREAD_SPECS, AUTOMATION_SPECS, OBSERVATION_CLAUSE, specByName, toolSpecsFor } from "./tools.ts";
+export { ALL_TOOL_SPECS, PLANNER_SPECS, COURSE_SPECS, NOTES_SPECS, AGENT_SPECS, SYSTEM_SPECS, SELF_SPECS, DRAW_SPECS, THREAD_SPECS, AUTOMATION_SPECS, OBSERVATION_CLAUSE, specByName, toolSpecsFor } from "./tools.ts";
 export { ToolRunner, resultText, prepareGroceryBrowser } from "./runner.ts";
 export type { RunnerOptions, RunOutcome } from "./runner.ts";
 export { AUTOMATION_VERBS, AUTOMATION_LIST_STATES, AUTOMATION_NAME_CHARS, AUTOMATION_ECHO_CHARS, WAKE_BRAIN_DEFAULT_BUDGET, draftFromArgs, describeActions, describeDraft, armedLine, changedLine, renderAutomations, renderRecipes, canonicalArgs } from "./automations.ts";

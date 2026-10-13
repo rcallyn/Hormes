@@ -128,6 +128,8 @@ export type DaemonMessage =
   | { readonly type: "local.say"; readonly text?: string; readonly sound?: string; readonly ring?: string; readonly automationId: string }
   /** Engine → app: a banner with the ring's presses (Snooze · Done / Open · Done); a press comes back as an `automation.*` command. Broadcast. */
   | { readonly type: "notify"; readonly id: string; readonly title: string; readonly body?: string; readonly presses: readonly unknown[]; readonly automationId: string }
+  /** Notes the brain wrote for User to read (explain); every surface may show them. */
+  | { readonly type: "notes"; readonly id: string; readonly title: string; readonly text: string; readonly handwriting: boolean; readonly course?: string }
   /**
    * Answer to `tool.run`, sent only to the client that asked. `result` is the
    * ToolResult as the runner produced it (text / image {pngBase64, width, height,

@@ -337,7 +337,7 @@ test("canonicalArgs judges the identical re-call by content: key order and outer
 
 test("the table: four automation specs close ALL_TOOL_SPECS at 71, carry the rules, shape to zod, have progress lines; the read tools are looks; the orders' 'Later.' paragraph names them and only real tools", () => {
   assert.deepEqual(AUTOMATION_SPECS.map((s) => s.name), ["automation_set", "automation_list", "automation_change", "recipe_list"]);
-  assert.equal(ALL_TOOL_SPECS.length, 76);
+  assert.equal(ALL_TOOL_SPECS.length, 77);
   assert.deepEqual(ALL_TOOL_SPECS.slice(-4).map((s) => s.name), AUTOMATION_SPECS.map((s) => s.name), "AUTOMATION_SPECS close the table");
   const set = specByName("automation_set")!;
   // The rules the Contract table asks the description to carry.

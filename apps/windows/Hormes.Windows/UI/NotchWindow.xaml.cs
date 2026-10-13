@@ -29,7 +29,14 @@ public partial class NotchWindow : Window
     private const double RestWidth = 150, RestHeight = 22;
     /// <summary>The tab while a browser is in front at the top of the screen: a strip that leaves the tabs clear.</summary>
     private const double SlimHeight = 4, SlimHitHeight = 4;
-    private const double OpenWidth = 440, OpenHeight = 280;
+    /// <summary>The island open: at least this, and grown to fit a long answer or notes, up to the window's room.</summary>
+    private const double MinOpenWidth = 440, MinOpenHeight = 280, WideOpenWidth = 600, NotesWidth = 720, MaxOpenHeight = 700;
+    /// <summary>What the island takes besides the hero or the notes: margins, the status row, the rows under it.</summary>
+    private const double OpenChrome = 175;
+    private double openWidth = MinOpenWidth, openHeight = MinOpenHeight;
+    /// <summary>Notes are on the island (the explain tool) until Done, a click away, or the next question.</summary>
+    private bool notesActive;
+    private string? notesHero;
     private static readonly Duration OpenDuration = new(TimeSpan.FromMilliseconds(220));
     private static readonly Duration CloseDuration = new(TimeSpan.FromMilliseconds(180));
 
@@ -262,12 +269,72 @@ public partial class NotchWindow : Window
         SayBox.IsEnabled = c.Phase != "disconnected";
         PeekDot.Visibility = c.Approval is not null || c.Problem is not null || c.Ring is not null ? Visibility.Visible : Visibility.Collapsed;
         ShowVoice();
+        // A new question puts the notes away; otherwise the island grows or shrinks to what it now shows.
+        if (notesActive && c.HeroSpeaker == "user" && c.Hero != notesHero) ClearNotes();
+        else Resize();
+    }
+
+    // ------------------------------------------------------------------ notes and size
+
+    /// <summary>Notes the brain wrote (the explain tool): shown in place of the hero, the island opened and grown to fit.</summary>
+    public void ShowNotes(string title, string text, bool handwriting) => Dispatcher.BeginInvoke(() =>
+    {
+        var view = new NotesView(title, text, handwriting, TryFindResource("NotchButton") as Style);
+        view.DoneClicked += ClearNotes;
+        NotesHost.Content = view;
+        notesActive = true;
+        notesHero = content.Hero;
+        HeroScroll.Visibility = Visibility.Collapsed;
+        NotesScroll.Visibility = Visibility.Visible;
+        NotesScroll.ScrollToTop();
+        heroShownAt = DateTime.UtcNow;
+        if (isOpen) Resize();
+        else SetOpen(true);
+    });
+
+    private void ClearNotes()
+    {
+        if (!notesActive) return;
+        notesActive = false;
+        NotesHost.Content = null;
+        NotesScroll.Visibility = Visibility.Collapsed;
+        HeroScroll.Visibility = Visibility.Visible;
+        Resize();
+    }
+
+    /// <summary>The open size for what the island shows now: notes wide, a long answer wider, both as tall as they need.</summary>
+    private void Fit()
+    {
+        FrameworkElement body;
+        if (notesActive && NotesHost.Content is FrameworkElement notes) { openWidth = NotesWidth; body = notes; }
+        else
+        {
+            var length = (HeroText.Text?.Length ?? 0) + (AskedText.Visibility == Visibility.Visible ? AskedText.Text.Length : 0);
+            openWidth = length > 260 ? WideOpenWidth : MinOpenWidth;
+            body = (FrameworkElement)HeroScroll.Content;
+        }
+        // 36: the island's side margins; 18: room for a scroll bar.
+        body.Measure(new Size(openWidth - 36 - 18, double.PositiveInfinity));
+        openHeight = Math.Clamp(body.DesiredSize.Height + OpenChrome, MinOpenHeight, MaxOpenHeight);
+    }
+
+    /// <summary>Open: animate to the size that fits now.</summary>
+    private void Resize()
+    {
+        if (!isOpen) return;
+        var (w, h) = (openWidth, openHeight);
+        Fit();
+        if (Math.Abs(w - openWidth) < 1 && Math.Abs(h - openHeight) < 1) return;
+        var duration = new Duration(TimeSpan.FromMilliseconds(200));
+        var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+        Island.BeginAnimation(WidthProperty, new DoubleAnimation(openWidth, duration) { EasingFunction = ease });
+        Island.BeginAnimation(HeightProperty, new DoubleAnimation(openHeight, duration) { EasingFunction = ease });
     }
 
     // ------------------------------------------------------------------ hover
 
     /// <summary>A draft in the Say field, or a line sent and not answered yet: the island stays open.</summary>
-    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || voiceState != VoiceInput.State.Idle || speaking || content.Ring is not null;
+    private bool HoldOpen => (SayBox.IsKeyboardFocused && SayBox.Text.Length > 0) || awaitingReply || voiceState != VoiceInput.State.Idle || speaking || content.Ring is not null || notesActive;
 
     /// <summary>The answer to a line sent from here landed: hold the island open long enough to read it.</summary>
     private void ShowReply()
@@ -334,8 +401,9 @@ public partial class NotchWindow : Window
         if (!open) heroShownAt = DateTime.UtcNow;
         var duration = open ? OpenDuration : CloseDuration;
         var ease = new CubicEase { EasingMode = open ? EasingMode.EaseOut : EasingMode.EaseIn };
-        Island.BeginAnimation(WidthProperty, new DoubleAnimation(open ? OpenWidth : RestWidth, duration) { EasingFunction = ease });
-        Island.BeginAnimation(HeightProperty, new DoubleAnimation(open ? OpenHeight : RestTabHeight, duration) { EasingFunction = ease });
+        if (open) Fit();
+        Island.BeginAnimation(WidthProperty, new DoubleAnimation(open ? openWidth : RestWidth, duration) { EasingFunction = ease });
+        Island.BeginAnimation(HeightProperty, new DoubleAnimation(open ? openHeight : RestTabHeight, duration) { EasingFunction = ease });
         Island.CornerRadius = open ? new CornerRadius(0, 0, 22, 22) : slim ? new CornerRadius(0, 0, 2, 2) : new CornerRadius(0, 0, 11, 11);
         IslandShadow.BeginAnimation(System.Windows.Media.Effects.DropShadowEffect.OpacityProperty, new DoubleAnimation(open ? 0.55 : 0, duration));
 
@@ -542,7 +610,7 @@ public partial class NotchWindow : Window
     // ------------------------------------------------------------------ window plumbing
 
     /// <summary>The window's size in XAML (DIPs) before scaling.</summary>
-    private const double BaseWidth = 480, BaseHeight = 360;
+    private const double BaseWidth = 800, BaseHeight = 760;
 
     /// <summary>Top edge of the primary monitor, centred and scaled to it: where the notch would be (NotchPlacement).</summary>
     private void Place()

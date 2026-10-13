@@ -33,6 +33,17 @@ public static class Render
         thread.Join();
     }
 
+    /// <summary>A worked explanation as the brain writes it for show_notes.</summary>
+    private const string SampleNotes = """
+        From STAT 418, lecture 3 (conditional probability), page 6.
+
+        Bayes' rule turns $P(B \mid A)$ around:
+        $P(A \mid B) = \dfrac{P(B \mid A)\,P(A)}{P(B)}$
+        Step 1. The test is 99% sensitive: $P(+ \mid D) = 0.99$, and 1% of people have the disease: $P(D) = 0.01$.
+        Step 2. Total probability: $P(+) = 0.99 \cdot 0.01 + 0.05 \cdot 0.99 = 0.0594$.
+        Step 3. So $P(D \mid +) = \frac{0.0099}{0.0594} \approx 0.167$: only about 1 in 6 positives is sick.
+        """;
+
     /// <summary>A courses.state as the daemon sends it, for the School page's Your classes.</summary>
     private const string SampleCourses = """
         {"type":"courses.state","courses":{"root":"C:/Users/you/Hormes/Courses","courses":[
@@ -46,6 +57,18 @@ public static class Render
         _ = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
         var client = new EngineClient("hormes-render-none");
         var planner = new Planner(client);
+        // The notch's notes (show_notes), handwritten with typeset math, as the island shows them.
+        foreach (var (name, hand) in new[] { ("notes-handwriting", true), ("notes-plain", false) })
+        {
+            var notes = new Hormes.Windows.UI.NotesView("Bayes' rule, worked", SampleNotes, hand, null);
+            var paper = new System.Windows.Controls.Border { Background = System.Windows.Media.Brushes.Black, Padding = new Thickness(18, 14, 18, 18), Width = 720, Child = notes };
+            var host = new Window { Left = -12000, Top = 0, ShowActivated = false, ShowInTaskbar = false, WindowStyle = WindowStyle.None, SizeToContent = SizeToContent.WidthAndHeight, Background = System.Windows.Media.Brushes.Black, Content = paper };
+            host.Show();
+            Settle(host, 400);
+            Save(host, Path.Combine(dir, $"{name}.png"));
+            host.Close();
+        }
+
         var services = new ConsoleServices
         {
             Client = client,

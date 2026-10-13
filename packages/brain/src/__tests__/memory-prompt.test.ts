@@ -244,7 +244,7 @@ test("tools: `remember` says it is for this session and points facts about User 
   assert.match(remember.description, /later in this session/);
   assert.match(remember.description, /Not for facts about User/);
   assert.match(remember.description, /durable memory learns those from the conversation on its own/);
-  assert.equal(ALL_TOOL_SPECS.length, 76);
+  assert.equal(ALL_TOOL_SPECS.length, 77);
   assert.equal(specByName("memory_add"), undefined);
   assert.equal(specByName("memory_forget"), undefined);
 });

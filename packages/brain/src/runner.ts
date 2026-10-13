@@ -67,6 +67,8 @@ export interface RunnerOptions {
   readonly planner?: (operation: string, payload: Record<string, unknown>) => Promise<string>;
   /** The courses tool (User's class materials, read-only): the engine's CourseLibrary.tool. */
   readonly courses?: (operation: string, payload: Record<string, unknown>) => Promise<string>;
+  /** explain: a worked explanation for User to read on the notch (display only). */
+  readonly notes?: (notes: { title: string; text: string; handwriting: boolean; course?: string }) => void;
   readonly work?: { tasks?(operation: string, payload: Record<string, unknown>, userWords: string, signal?: AbortSignal): Promise<string>; isActive(scope: WorkScope): boolean; model(scope: WorkScope, operation: string, payload: unknown): string; receipt(scope: WorkScope, tool: string, args: Record<string, unknown>, text: string): string | undefined; prepareGrocery?(scope: WorkScope, read: () => Promise<RunOutcome>, browser: () => Promise<RunOutcome>): Promise<void> };
   readonly toolset: ComputerToolset;
   readonly agents: AgentRegistry;
@@ -475,6 +477,16 @@ export class ToolRunner {
         const payload = args["payload"] ?? {};
         if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return { kind: "error", message: "Pass a structured planner payload object." };
         return { kind: "text", text: await this.opts.planner(String(args["operation"] ?? "list"), payload as Record<string, unknown>) };
+      }
+      case "explain": {
+        if (!this.opts.notes) return { kind: "error", message: "Notes cannot be shown in this client; answer in words." };
+        const title = typeof args["title"] === "string" ? args["title"].trim().slice(0, 200) : "";
+        const text = typeof args["text"] === "string" ? args["text"].trim() : "";
+        if (!title || !text) return { kind: "error", message: "explain needs {title, text}." };
+        if (text.length > 20_000) return { kind: "error", message: "Notes are at most 20,000 characters; split them or summarize." };
+        const course = typeof args["course"] === "string" && args["course"].trim() ? args["course"].trim().slice(0, 120) : undefined;
+        this.opts.notes({ title, text, handwriting: args["handwriting"] === true, ...(course ? { course } : {}) });
+        return { kind: "text", text: "Shown on the notch, which grew to fit. Say one short line pointing at it; do not read the notes aloud." };
       }
       case "courses": {
         if (!this.opts.courses) return { kind: "error", message: "The course library is unavailable in this client." };

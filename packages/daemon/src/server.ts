@@ -355,6 +355,8 @@ export class DaemonServer extends EventEmitter<DaemonServerEvents> {
           return this.broadcast({ type: "automation.event", event: e.event });
         case "local.say":
           return this.broadcast({ type: "local.say", ...(e.text !== undefined ? { text: e.text } : {}), ...(e.sound !== undefined ? { sound: e.sound } : {}), ...(e.ring !== undefined ? { ring: e.ring } : {}), automationId: e.automationId });
+        case "notes":
+          return this.broadcast({ type: "notes", id: e.id, title: e.title, text: e.text, handwriting: e.handwriting, ...(e.course !== undefined ? { course: e.course } : {}) });
         case "notify":
           return this.broadcast({ type: "notify", id: e.id, title: e.title, ...(e.body !== undefined ? { body: e.body } : {}), presses: e.presses, automationId: e.automationId });
       }

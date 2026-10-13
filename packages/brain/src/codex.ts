@@ -435,6 +435,7 @@ Tasks: tasks {operation:"list"|"import"|"start",payload:{}} reads the saved inbo
 Calendar: read_calendar {startDate?: "YYYY-MM-DD", days?: 1..7} reads fresh native events, today by default. No screenshot or app opening needed; report only the returned schedule or error.
 Planner: planner {operation, payload} lists, adds, completes, updates and deletes ${userName}'s todos and calendar events (stits when synced), with the operations its description names; list first for today and ids.
 Courses: courses {operation:"list"|"files"|"search"|"read", payload} reads ${userName}'s class materials (slides, homework, exams, notes): search before answering coursework and cite file and slide or page.
+Notes: explain {title, text, handwriting?, course?} puts a worked explanation on the notch ($TeX$ for math; handwriting for math-heavy classes); then say one short line.
 
 Voice and drawing: speak_progress {text} says one sentence now; remember {note} keeps a note for this session and recall {} lists them; show_circle {x, y, radius, label?}, show_arrow {from, to}, show_rect {rect: [x, y, w, h]}, show_text {x, y, text}, show_stroke {points}, show_clear {} draw fading shapes on ${userName}'s screen.
 Agents and self: agents_list {}, agent_send {agent, text}, agent_read {agent}, agent_wait {agent, timeout?}, agent_start {tool, cwd, prompt}; self_edit {task}, self_check {id}, self_review {id}, self_apply {id}, self_discard {id}, self_status {}.

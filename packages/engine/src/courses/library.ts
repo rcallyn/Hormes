@@ -18,6 +18,8 @@ export type MaterialKind = "transcript" | "lecture" | "homework" | "exam" | "syl
 export interface CourseInfo {
   readonly id: string; readonly title: string; readonly code?: string; readonly aliases: readonly string[];
   readonly instructor?: string; readonly meets?: string; readonly notes?: string; readonly dir: string;
+  /** course.json says explanations for this class are best written out by hand (math, circuits, proofs). */
+  readonly handwriting?: boolean;
 }
 export interface MaterialFile {
   readonly path: string; readonly course: string; readonly kind: MaterialKind; readonly mtimeMs: number; readonly size: number;
@@ -373,7 +375,7 @@ export class CourseLibrary {
             for (const f of files) byKind[f.kind] = (byKind[f.kind] ?? 0) + 1;
             const { todos, events } = this.agendaFor(c, today);
             return {
-              id: c.id, title: c.title, ...(c.code ? { code: c.code } : {}), ...(c.instructor ? { instructor: c.instructor } : {}), ...(c.meets ? { meets: c.meets } : {}), ...(c.notes ? { notes: c.notes } : {}),
+              id: c.id, title: c.title, ...(c.code ? { code: c.code } : {}), ...(c.instructor ? { instructor: c.instructor } : {}), ...(c.meets ? { meets: c.meets } : {}), ...(c.notes ? { notes: c.notes } : {}), ...(c.handwriting ? { handwriting: true } : {}),
               files: files.length, byKind,
               recent: [...files].sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 5).map(f => ({ file: f.path, kind: f.kind })),
               due: todos.slice(0, 6).map(t => ({ title: t.title, ...(t.dueDate ? { dueDate: t.dueDate } : {}) })),
@@ -456,7 +458,7 @@ function readCourseInfo(dir: string, name: string): CourseInfo {
   const title = s("title") ?? parsed?.[2] ?? name;
   const aliases = Array.isArray(meta["aliases"]) ? (meta["aliases"] as unknown[]).filter((a): a is string => typeof a === "string").map(a => a.slice(0, 80)).slice(0, 10) : [];
   const instructor = s("instructor"), meets = s("meets"), notes = s("notes");
-  return { id: slug(name), title, ...(code ? { code } : {}), aliases: [...new Set([name, ...aliases])], ...(instructor ? { instructor } : {}), ...(meets ? { meets } : {}), ...(notes ? { notes } : {}), dir };
+  return { ...(meta["handwriting"] === true ? { handwriting: true } : {}), id: slug(name), title, ...(code ? { code } : {}), aliases: [...new Set([name, ...aliases])], ...(instructor ? { instructor } : {}), ...(meets ? { meets } : {}), ...(notes ? { notes } : {}), dir };
 }
 
 export function localDay(ms: number): string {
