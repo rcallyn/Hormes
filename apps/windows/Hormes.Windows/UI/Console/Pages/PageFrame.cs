@@ -53,8 +53,8 @@ public class PageFrame : UserControl
     }
 
     /// <summary>
-    /// "This PC | stits": where the calendar and todos live (the planner's sync switch). stits is offered only when a
-    /// stits database was found; switching shows the daemon's answer.
+    /// "Hormes | stits": where the calendar and todos live (the planner's sync switch). Shown only while stits is linked
+    /// (Settings › Calendar &amp; Todos › Sync with stits); without stits there is nothing to switch to.
     /// </summary>
     protected FrameworkElement SourceSwitch()
     {
@@ -74,6 +74,7 @@ public class PageFrame : UserControl
         {
             updating = true;
             var s = Services.Planner.State;
+            bar.Visibility = s.StitsSync ? Visibility.Visible : Visibility.Collapsed;
             local.IsChecked = !s.StitsSync;
             stits.IsChecked = s.StitsSync;
             stits.IsEnabled = s.StitsAvailable || s.StitsSync;
