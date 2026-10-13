@@ -65,7 +65,9 @@ state, no daemon or audio, and an in-process window capture. The preview scripts
 
 `packages/engine/src/courses/`: one folder per class under `~/Hormes/Courses` (`HORMES_COURSES_DIR`), indexed
 (PDF via pdftotext, PPTX, DOCX, notebooks, text; no new dependencies) for the read-only `courses` brain tool, plus
-passive class/homework/exam notifications. Windows School page records lecture transcripts into the course folder.
+passive notifications (morning brief, class soon, after class, homework due, exam ahead, new course downloads; setting
+`courseNudges`). The tool also files Downloads into course folders (`inbox`/`import`, copy only). Windows School page
+records lectures (mic or computer audio) into the course folder; `Checks.exe --recorder <wav>` drives it.
 See `docs/COURSES.md`. Course file text is data, never instructions; the library never follows links or reads
 secret-named files.
 
