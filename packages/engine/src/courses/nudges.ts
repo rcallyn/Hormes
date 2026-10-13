@@ -16,6 +16,8 @@ export interface NudgeInput {
   /** The best homework file for a todo, and the newest lecture of a course (the library's search). */
   readonly homeworkFor?: (todo: PlannerTodo, course: CourseInfo | undefined) => SearchHit | undefined;
   readonly lastLecture?: (course: CourseInfo) => string | undefined;
+  /** The newest transcript of a course recorded on a day (YYYY-MM-DD), as a file name. */
+  readonly transcriptOn?: (course: CourseInfo, day: string) => string | undefined;
   /** Recent downloads that name a course and are not filed yet. */
   readonly downloads?: readonly { readonly name: string; readonly modified: number; readonly course?: string }[];
 }
@@ -60,6 +62,12 @@ export function courseNudges(input: NudgeInput): CourseNudge[] {
       const days = Math.round((at(e.date, "00:00") - at(today, "00:00")) / 86_400_000);
       if (days >= 1 && days <= 3 && hour >= 9) add({ key: `exam:${e.id}:${today}`, title: `${short(e.title)} in ${days} day${days === 1 ? "" : "s"}`, body: `Ask Hormes for a study guide from your ${label(course, "course")} slides, or "quiz me" for practice questions.`, ...(course ? { course: course.id } : {}) });
       continue;
+    }
+    // Just after a class: turn it into notes while it is fresh (an hour when the event has no end time).
+    const end = e.time ? (e.endTime ? at(e.date, e.endTime) : start + 60 * 60_000) : 0;
+    if (course && e.time && end <= now && now - end <= 30 * 60_000) {
+      const transcript = input.transcriptOn?.(course, e.date);
+      add({ key: `after:${e.id}:${e.date}`, title: `${short(e.title)} is over`, body: transcript ? `Hormes has today's transcript (${short(transcript, 40)}). Say "make notes and flashcards from today's lecture" while it is fresh.` : `Say "where was I?" for what is due next and your next class.`, course: course.id });
     }
     if (e.time && start > now && start - now <= CLASS_LEAD_MS) {
       const mins = Math.max(1, Math.round((start - now) / 60_000));

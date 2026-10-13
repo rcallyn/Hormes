@@ -78,3 +78,14 @@ test("new course downloads get one nudge for the set; unmatched or old ones none
   assert.equal(one[0]!.title, "cs161_hw3.pdf looks like CS 161 material");
   assert.match(one[0]!.body, /file my downloads/);
 });
+
+test("after a class: notes from today's transcript while it is fresh, or what is next; once, within 30 minutes of the end", () => {
+  const agenda = { todos: [], events: [{ id: "e1", title: "CS 161 lecture", date: "2026-10-12", time: "09:00", endTime: "10:15" }] };
+  const run = (at: string, transcript?: string) => courseNudges({ now: local(at), courses, agenda, seen: new Set(["brief:2026-10-12"]), transcriptOn: () => transcript });
+  assert.equal(run("2026-10-12T10:10:00").length, 0, "still in class");
+  const after = run("2026-10-12T10:20:00", "2026-10-12 0900 CS 161 lecture.md");
+  assert.equal(after[0]!.title, "CS 161 lecture is over");
+  assert.match(after[0]!.body, /today's transcript \(2026-10-12 0900 CS 161 lecture\.md\)/);
+  assert.match(run("2026-10-12T10:20:00")[0]!.body, /where was I/);
+  assert.equal(run("2026-10-12T11:00:00").length, 0, "stale after 30 minutes");
+});

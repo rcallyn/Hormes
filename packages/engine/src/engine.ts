@@ -6519,7 +6519,7 @@ export class Engine extends EventEmitter<EngineEvents> {
     const courses = this.courses.list();
     if (!courses.length) return;
     const downloads = await this.courses.inbox().catch(() => []);
-    const nudges = this.courseNudger.take({ now, courses, agenda: this.planner.state(), downloads, homeworkFor: (todo, course) => this.courses.homeworkFor(todo.title, course), lastLecture: (course) => this.courses.lastLecture(course) });
+    const nudges = this.courseNudger.take({ now, courses, agenda: this.planner.state(), downloads, homeworkFor: (todo, course) => this.courses.homeworkFor(todo.title, course), lastLecture: (course) => this.courses.lastLecture(course), transcriptOn: (course, day) => this.courses.transcriptOn(course, day) });
     for (const n of nudges) this.emit("event", { type: "notify", id: newId("ntf"), title: n.title, body: n.body, presses: [], automationId: "" });
   }
 

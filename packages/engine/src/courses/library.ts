@@ -326,6 +326,11 @@ export class CourseLibrary {
     return this.materials(course.id).filter(f => f.kind === "lecture").sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.path.split("/").pop();
   }
 
+  /** The newest transcript of a course recorded on a day, by its file name's date or its modification day. */
+  transcriptOn(course: CourseInfo, day: string): string | undefined {
+    return this.materials(course.id).filter(f => f.kind === "transcript" && (f.path.split("/").pop()!.startsWith(day) || localDay(f.mtimeMs) === day)).sort((a, b) => b.mtimeMs - a.mtimeMs)[0]?.path.split("/").pop();
+  }
+
   /** The course file that best matches a homework title: a homework file first, else anything. */
   homeworkFor(title: string, course: CourseInfo | undefined): SearchHit | undefined {
     const opts = course ? { course: course.id } : {};

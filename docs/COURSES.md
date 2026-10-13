@@ -53,6 +53,8 @@ off), and off while you've asked for quiet or the machine sleeps:
 - a class event naming a course, 15 minutes before it starts, with the last lecture file and what is due next;
 - school homework due tomorrow (from 5 pm) or today (from 8 am), with the matching homework file;
 - an exam, midterm, final, quiz or test one to three days out (from 9 am).
+- just after a class (up to 30 minutes past its end, or an hour after its start): notes and flashcards from that day's
+  transcript when one was recorded, else what is next;
 
 ## Windows
 
