@@ -63,7 +63,7 @@ public sealed class NotesView : StackPanel
                     var word = words[w];
                     if (word.Length == 0) continue;
                     // ", " or "." straight after a formula: pull it up to the formula instead of leaving a gap.
-                    if (w == 0 && p == 0 && line is { Children.Count: > 0 } && char.IsPunctuation(word[0]) && line.Children[^1] is Border prev) prev.Margin = new Thickness(prev.Margin.Left, 0, 0, 0);
+                    if (w == 0 && p == 0 && line is { Children.Count: > 0 } && char.IsPunctuation(word[0]) && line.Children[^1] is FrameworkElement { Margin: var m } prev and not TextBlock) prev.Margin = new Thickness(m.Left, 0, 0, 0);
                     Line().Children.Add(new TextBlock { Text = word + " ", FontFamily = font, FontSize = size, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center });
                 }
             }
@@ -78,7 +78,8 @@ public sealed class NotesView : StackPanel
             tex = tex.Replace(@"\dfrac", @"\frac").Replace(@"\tfrac", @"\frac").Replace(@"\displaystyle", "").Replace(@"\tag", @"\quad");
             var f = new FormulaControl { Formula = tex, Scale = size, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
             // The control stretches; a box sized to it is what centres a display formula.
-            if (!f.HasError) return new Border { Child = f, HorizontalAlignment = align, VerticalAlignment = VerticalAlignment.Center, Margin = margin };
+            // A formula wider than the notes shrinks to fit rather than running off the island.
+            if (!f.HasError) return new Viewbox { Child = f, Stretch = Stretch.Uniform, StretchDirection = StretchDirection.DownOnly, HorizontalAlignment = align, VerticalAlignment = VerticalAlignment.Center, Margin = margin };
         }
         catch { /* shown as written below */ }
         return new TextBlock { Text = tex, FontFamily = new FontFamily("Cascadia Mono, Consolas"), FontSize = size * 0.8, Foreground = Brushes.White, Margin = margin, HorizontalAlignment = align, TextWrapping = TextWrapping.Wrap };

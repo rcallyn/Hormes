@@ -92,7 +92,7 @@
           </ScrollViewer>
 
           <!-- 2b · notes the brain wrote to be read (show_notes), in place of the hero while shown -->
-          <ScrollViewer x:Name="NotesScroll" Grid.Row="1" Margin="0,10,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Focusable="False" Visibility="Collapsed">
+          <ScrollViewer x:Name="NotesScroll" Grid.Row="1" Margin="0,10,0,0" VerticalScrollBarVisibility="Hidden" HorizontalScrollBarVisibility="Disabled" Focusable="False" Visibility="Collapsed">
             <ContentControl x:Name="NotesHost" Focusable="False"/>
           </ScrollViewer>
 
