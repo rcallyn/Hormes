@@ -2,7 +2,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync
 import { homedir } from "node:os";
 import { basename, extname, join, relative, sep } from "node:path";
 import type { PlannerEvent, PlannerTodo } from "@hormes/protocol";
-import { DOC_EXTENSIONS, MAX_FILE_BYTES, extractUnits, type TextUnit } from "./extract.ts";
+import { DOC_EXTENSIONS, MAX_FILE_BYTES, extractUnits, pdftotextAvailable, type TextUnit } from "./extract.ts";
 import { defaultDownloadsDir, fileDownload, scanInbox, type InboxItem } from "./inbox.ts";
 import { saveCourseNote } from "./save.ts";
 
@@ -63,7 +63,7 @@ export function materialKind(path: string): MaterialKind {
   if (/\b(midterm|final|exams?|quiz(?:zes)?|practice test|review sheet|study guide)\b/.test(p)) return "exam";
   if (/\b(hw|homeworks?|assignments?|problem sets?|psets?|ps\d+|hw\d+|projects?|worksheets?)\b/.test(p) || /\b(?:hw|ps|pset|a)\d+\b/.test(p)) return "homework";
   if (/\b(labs?|lab\d+|recitations?|discussion|sections?)\b/.test(p)) return "lab";
-  if (/\b(lectures?|lec\d*|slides?|week \d+|class \d+|module \d+|chapter \d+ slides)\b/.test(p) || /\b(?:lec|l)\d+\b/.test(p)) return "lecture";
+  if (/\b(lectures?|lec\d*|slides?|handouts?|week \d+|class \d+|module \d+|chapter \d+ slides)\b/.test(p) || /\b(?:lec|l)\d+\b/.test(p)) return "lecture";
   if (/\b(readings?|papers?|chapters?|textbook|book|articles?)\b/.test(p)) return "reading";
   if (/\b(notes?|my notes|cheat ?sheet)\b/.test(p)) return "notes";
   return extname(path).toLowerCase() === ".pptx" ? "lecture" : "other";
@@ -180,7 +180,7 @@ export class CourseLibrary {
       let units: TextUnit[] = [], error: string | undefined;
       try { units = await extractUnits(join(this.root, item.path)); }
       catch (e) { error = (e as Error).message.slice(0, 200); }
-      if (!error && !units.length && item.path.toLowerCase().endsWith(".pdf")) error = "no text found (a scanned PDF, or fonts pdftotext is needed for: install Poppler)";
+      if (!error && !units.length && item.path.toLowerCase().endsWith(".pdf")) error = pdftotextAvailable() ? "no text found: a scanned PDF (images only; Hormes does not OCR)" : "no text found: a scanned PDF, or fonts that need pdftotext (install Poppler)";
       const file: MaterialFile = { ...item, kind: materialKind(item.path), units, ...(error ? { error } : {}) };
       seen.set(item.path, file);
       this.progress.done++;

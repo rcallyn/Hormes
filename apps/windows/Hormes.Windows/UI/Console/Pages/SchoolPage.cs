@@ -22,6 +22,8 @@ public sealed class SchoolPage : PageFrame, IConsolePage
     private DateOnly weekStart;
     private readonly Button record;
     private bool recordComputerAudio;
+    private readonly StackPanel courseList = new();
+    private DateTime coursesAskedAt;
     private readonly CheckBox nudges = new() { IsChecked = true };
     private readonly System.Windows.Threading.DispatcherTimer recordTimer = new() { Interval = TimeSpan.FromSeconds(1) };
 
@@ -32,6 +34,11 @@ public sealed class SchoolPage : PageFrame, IConsolePage
 
         Body.Children.Add(Ui.Header("This week's classes"));
         Body.Children.Add(Ui.Card(week, new Thickness(8, 10, 8, 10)));
+
+        Body.Children.Add(Ui.Header("Your classes"));
+        Body.Children.Add(Ui.Card(courseList, new Thickness(14, 10, 14, 10)));
+        courseList.Children.Add(Ui.Empty("Reading your course folder…"));
+        Services.Client.Message += (type, msg) => { if (type == "courses.state") Dispatcher.BeginInvoke(() => RenderCourses(msg)); };
 
         Body.Children.Add(Ui.Header("Study with Hormes"));
         var actions = new WrapPanel();
@@ -76,6 +83,46 @@ public sealed class SchoolPage : PageFrame, IConsolePage
     {
         Services.Ask(prompt);
         Window.ShowToast("Asked Hormes. The answer appears on Home and in the notch.");
+    }
+
+    /// <summary>One row per class: its name, what is in its folder by kind, the next thing due and any file Hormes could not read.</summary>
+    internal void RenderCourses(System.Text.Json.JsonElement msg)
+    {
+        courseList.Children.Clear();
+        if (!msg.TryGetProperty("courses", out var lib) || lib.ValueKind != System.Text.Json.JsonValueKind.Object) return;
+        string? Str(System.Text.Json.JsonElement e, string name) => e.TryGetProperty(name, out var v) && v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : null;
+        if (Str(lib, "error") is not null || !lib.TryGetProperty("courses", out var list) || list.GetArrayLength() == 0)
+        {
+            courseList.Children.Add(Ui.Empty("No classes yet. Open course folder, make one folder per class (\"CS 161 - Operating Systems\"), and put its slides, homework and notes inside."));
+            return;
+        }
+        if (Str(lib, "indexing") is { } busy) courseList.Children.Add(Ui.Text(busy, "Caption"));
+        foreach (var c in list.EnumerateArray())
+        {
+            var row = new StackPanel { Margin = new Thickness(0, 4, 0, 6) };
+            var name = Ui.Text(Str(c, "code") is { } code ? $"{code} · {Str(c, "title")}" : Str(c, "title") ?? "", "Body");
+            name.FontWeight = FontWeights.SemiBold;
+            row.Children.Add(name);
+            var kinds = c.TryGetProperty("byKind", out var bk) && bk.ValueKind == System.Text.Json.JsonValueKind.Object
+                ? string.Join(", ", bk.EnumerateObject().OrderByDescending(k => k.Value.GetInt32()).Select(k => $"{k.Value.GetInt32()} {k.Name}"))
+                : "";
+            var files = c.TryGetProperty("files", out var fc) ? fc.GetInt32() : 0;
+            var line = $"{files} file{(files == 1 ? "" : "s")}{(kinds.Length > 0 ? $" · {kinds}" : "")}";
+            if (c.TryGetProperty("due", out var due) && due.ValueKind == System.Text.Json.JsonValueKind.Array && due.GetArrayLength() > 0)
+                line += $" · next due: {Str(due[0], "title")}{(Str(due[0], "dueDate") is { } d ? $" ({d})" : "")}";
+            var detail = Ui.Text(line, "Caption");
+            detail.SetResourceReference(TextBlock.ForegroundProperty, "Secondary");
+            detail.TextWrapping = TextWrapping.Wrap;
+            row.Children.Add(detail);
+            if (c.TryGetProperty("unreadable", out var bad) && bad.ValueKind == System.Text.Json.JsonValueKind.Array && bad.GetArrayLength() > 0)
+            {
+                var warn = Ui.Text($"{bad.GetArrayLength()} file(s) Hormes could not read, e.g. {Str(bad[0], "file")}: {Str(bad[0], "error")}", "Caption");
+                warn.SetResourceReference(TextBlock.ForegroundProperty, "Red");
+                warn.TextWrapping = TextWrapping.Wrap;
+                row.Children.Add(warn);
+            }
+            courseList.Children.Add(row);
+        }
     }
 
     /// <summary>Start: choose the course (or a meeting). Stop: write the last chunk, then ask Hormes for notes from it.</summary>
@@ -140,6 +187,12 @@ public sealed class SchoolPage : PageFrame, IConsolePage
 
     public void Refresh()
     {
+        // The classes come from the daemon's course library; asked again at most every 20 s.
+        if (DateTime.Now - coursesAskedAt > TimeSpan.FromSeconds(20))
+        {
+            coursesAskedAt = DateTime.Now;
+            _ = Services.Client.SendJsonAsync(new { type = "courses.read" }).ContinueWith(_ => { }, System.Threading.Tasks.TaskScheduler.Default);
+        }
         if (Services.Snapshot is { } snap && snap.TryGetProperty("settings", out var st) && st.TryGetProperty("courseNudges", out var on) && (on.ValueKind == System.Text.Json.JsonValueKind.True || on.ValueKind == System.Text.Json.JsonValueKind.False))
             nudges.IsChecked = on.GetBoolean();
         var s = Services.Planner.State;

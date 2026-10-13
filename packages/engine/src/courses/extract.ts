@@ -204,6 +204,8 @@ export function pdfUnitsBuiltin(data: Buffer): TextUnit[] {
 }
 
 let pdftotextMissing = false;
+/** False once a pdftotext call found no binary (PDFs then go through the built-in reader). */
+export const pdftotextAvailable = (): boolean => !pdftotextMissing;
 function pdftotext(path: string): Promise<string | undefined> {
   if (pdftotextMissing) return Promise.resolve(undefined);
   return new Promise(resolve => {

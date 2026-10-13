@@ -79,6 +79,8 @@ export type DaemonMessage =
   | { readonly type: "planner.state"; readonly state: PlannerState }
   /** The answer to one `planner` command, to the client that sent it: ok, or why not; the id an add made. */
   | { readonly type: "planner.reply"; readonly id: string; readonly ok: boolean; readonly error?: string; readonly itemId?: string }
+  /** The course library as the brain's `courses list` sees it (classes, file counts by kind, due work, unreadable files), or its error: the answer to a `courses.read`. */
+  | { readonly type: "courses.state"; readonly courses: unknown }
   /**
    * `version` is the package's; `protocol` is PROTOCOL_VERSION (APP-3), which server.ts always sends. A surface whose
    * number differs, or that reads none (a daemon from before the field), raises `app.version` and refuses Go until it
@@ -181,6 +183,8 @@ export type ClientMessage =
   | { readonly type: "ping"; readonly id: string }
   /** The planner's state now (answered with planner.state). */
   | { readonly type: "planner.read" }
+  /** The course library's classes now (answered with courses.state). */
+  | { readonly type: "courses.read" }
   /** A planner change (a PlannerCommand: add, update, delete, the stits switch); answered with planner.reply, then broadcast. */
   | { readonly type: "planner"; readonly id: string; readonly command: unknown }
   /**

@@ -90,6 +90,8 @@ export const LEDGER_TOTALS_WARM_MS = 10_000;
 export interface EngineLike {
   readonly work?: PhoneWork;
   /** The planner (todos and calendar). Optional: a tool-only host and the older fakes have none. */
+  /** The course library, for courses.read (the brain's courses list, as JSON text). */
+  readonly courses?: { tool(operation: string, payload: Record<string, unknown>): Promise<string> };
   readonly planner?: { state(): PlannerState; run(cmd: PlannerCommand): Promise<{ readonly ok: boolean; readonly error?: string; readonly id?: string }> };
   on(event: "event", listener: (e: EngineEvent) => void): unknown;
   on(event: "audio", listener: (pcm: Buffer) => void): unknown;
@@ -645,6 +647,9 @@ export class DaemonServer extends EventEmitter<DaemonServerEvents> {
         this.send(client, { type: "ledger.rows", id: String(msg.id ?? ""), rows: r.rows, ...(r.truncated ? { truncated: true } : {}) });
         return;
       }
+      case "courses.read":
+        if (this.engine.courses) void this.engine.courses.tool("list", {}).then((text: string) => this.send(client, { type: "courses.state", courses: JSON.parse(text) as unknown }), () => undefined);
+        return;
       case "planner.read":
         if (this.engine.planner) this.send(client, { type: "planner.state", state: this.engine.planner.state() });
         return;

@@ -67,7 +67,7 @@ test("the built-in PDF reader takes text operators from Flate content streams", 
 });
 
 test("material kinds come from paths", () => {
-  for (const [path, kind] of [["Homework/hw3.pdf", "homework"], ["lec05.pptx", "lecture"], ["Midterm review.pdf", "exam"], ["HW3 solutions.pdf", "solution"], ["syllabus.docx", "syllabus"], ["Lab 2/readme.md", "lab"], ["Readings/ch4.pdf", "reading"], ["CS 161/Transcripts/2026-10-12 0900 lecture.md", "transcript"], ["misc.txt", "other"]] as const) assert.equal(materialKind(path), kind, path);
+  for (const [path, kind] of [["Homework/hw3.pdf", "homework"], ["lec05.pptx", "lecture"], ["Midterm review.pdf", "exam"], ["HW3 solutions.pdf", "solution"], ["syllabus.docx", "syllabus"], ["Lab 2/readme.md", "lab"], ["Readings/ch4.pdf", "reading"], ["handout/ch3.pdf", "lecture"], ["CS 161/Transcripts/2026-10-12 0900 lecture.md", "transcript"], ["misc.txt", "other"]] as const) assert.equal(materialKind(path), kind, path);
 });
 
 test("the library lists courses with materials and planner deadlines, and skips secrets and links", async () => {

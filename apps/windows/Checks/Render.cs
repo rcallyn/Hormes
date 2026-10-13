@@ -33,6 +33,14 @@ public static class Render
         thread.Join();
     }
 
+    /// <summary>A courses.state as the daemon sends it, for the School page's Your classes.</summary>
+    private const string SampleCourses = """
+        {"type":"courses.state","courses":{"root":"C:/Users/you/Hormes/Courses","courses":[
+          {"id":"econ-101","title":"Principles of Economics","code":"ECON 101","files":23,"byKind":{"lecture":12,"homework":5,"transcript":4,"syllabus":1,"exam":1},"due":[{"title":"ECON 101 problem set 4","dueDate":"2026-10-14"}],"unreadable":[]},
+          {"id":"chem-110","title":"General Chemistry","code":"CHEM 110","files":9,"byKind":{"lecture":6,"lab":3},"due":[],"unreadable":[{"file":"CHEM 110/Lectures/scan-week2.pdf","error":"no text found (a scanned PDF)"}]}
+        ]}}
+        """;
+
     private static void RenderAll(string dir)
     {
         _ = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
@@ -67,6 +75,11 @@ public static class Render
             {
                 window.Navigate(page);
                 Settle(window, 450);
+                if (window.CurrentPage is Hormes.Windows.UI.Console.Pages.SchoolPage school)
+                {
+                    school.RenderCourses(System.Text.Json.JsonDocument.Parse(SampleCourses).RootElement);
+                    Settle(window, 200);
+                }
                 Save(window, Path.Combine(dir, $"{page.ToLowerInvariant()}-{mode}.png"));
             }
             window.Navigate("Calendar");
