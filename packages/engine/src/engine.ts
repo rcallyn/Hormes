@@ -543,6 +543,8 @@ export class Engine extends EventEmitter<EngineEvents> {
   readonly courses: CourseLibrary;
   private readonly courseNudger: CourseNudger;
   private courseNudgeAt = 0;
+  /** A minute's nudge pass still running (a long first index): the next waits rather than piling up. */
+  private courseNudging = false;
   /** The main toolset's hands: reads on the reading helper, acts on the acting one — a look never queues behind a `type`. */
   readonly splitHands: SplitHands;
   /** What the screen is like right now, from the reading helper: the observer's `now:` line reads it, the composite look reads it, the AX tick feeds it. */
@@ -6514,7 +6516,12 @@ export class Engine extends EventEmitter<EngineEvents> {
   /** Course nudges (class soon, homework due, exam ahead) as plain notifications: no voice, no tool, no change. Only
    * once a course folder exists; never while User asked for quiet or the machine sleeps. */
   private async nudgeCourses(now: number): Promise<void> {
-    if (!this.settings.courseNudges || this.work.store.quiet() || this.proactiveSleeping) return;
+    if (!this.settings.courseNudges || this.work.store.quiet() || this.proactiveSleeping || this.courseNudging) return;
+    this.courseNudging = true;
+    try { await this.nudgeCoursesOnce(now); } finally { this.courseNudging = false; }
+  }
+
+  private async nudgeCoursesOnce(now: number): Promise<void> {
     try { await this.courses.refresh(5 * 60_000); } catch { return; }
     const courses = this.courses.list();
     if (!courses.length) return;

@@ -7,7 +7,7 @@ import type { Agenda, CourseInfo, SearchHit } from "./library.ts";
  * voice session, runs no tool and changes nothing; acting on it is User's next request. Each item is nudged once,
  * at most `MAX_PER_DAY` a day.
  */
-export interface CourseNudge { readonly key: string; readonly title: string; readonly body: string; readonly course?: string }
+export interface CourseNudge { readonly key: string; readonly title: string; readonly body: string; readonly course?: string; /** More keys this nudge covers (marked seen with it). */ readonly also?: readonly string[] }
 export interface NudgeInput {
   readonly now: number;
   readonly courses: readonly CourseInfo[];
@@ -93,11 +93,13 @@ export function courseNudges(input: NudgeInput): CourseNudge[] {
     const file = input.homeworkFor?.(t, course);
     add({ key: `due:${t.id}:${t.dueDate}:${when}`, title: `${short(t.title)} is due ${when}`, body: file ? `Hormes has ${short(file.file.split("/").pop()!, 50)} from your ${label(course, "course")} folder. Say "help me with ${short(t.title, 30)}" to start.` : `Say "help me with ${short(t.title, 30)}" and Hormes will pull up the slides that cover it.`, ...(course ? { course: course.id } : {}) });
   }
-  // New course files in Downloads: one nudge for the lot, once per file set.
-  const fresh = (input.downloads ?? []).filter(d => d.course && now - d.modified < 2 * 86_400_000);
+  // New course files in Downloads: one nudge for the files not announced yet; each file is announced once, so a
+  // later download or an import does not repeat the earlier ones.
+  const dlKey = (d: { name: string; modified: number }): string => `dl:${d.name}:${Math.round(d.modified)}`;
+  const fresh = (input.downloads ?? []).filter(d => d.course && now - d.modified < 2 * 86_400_000 && !seen.has(dlKey(d)));
   if (fresh.length) {
     const first = fresh[0]!, course = courses.find(c => c.id === first.course);
-    add({ key: `dl:${fresh.map(d => `${d.name}:${Math.round(d.modified)}`).sort().join("|")}`, title: fresh.length === 1 ? `${short(first.name, 40)} looks like ${label(course, "course")} material` : `${fresh.length} new course files in Downloads`, body: `Say "file my downloads" and Hormes copies ${fresh.length === 1 ? "it" : "them"} into the course folder${fresh.length === 1 ? "" : "s"}, where they become searchable.` });
+    add({ key: dlKey(first), also: fresh.slice(1).map(dlKey), title: fresh.length === 1 ? `${short(first.name, 40)} looks like ${label(course, "course")} material` : `${fresh.length} new course files in Downloads`, body: `Say "file my downloads" and Hormes copies ${fresh.length === 1 ? "it" : "them"} into the course folder${fresh.length === 1 ? "" : "s"}, where they become searchable.` });
   }
   return out;
 }
@@ -122,7 +124,7 @@ export class CourseNudger {
     const due = courseNudges({ ...input, seen: new Set(this.log.seen) }).slice(0, room);
     if (!due.length) return [];
     this.log.count += due.length;
-    this.log.seen = [...this.log.seen, ...due.map(n => n.key)].slice(-500);
+    this.log.seen = [...this.log.seen, ...due.flatMap(n => [n.key, ...(n.also ?? [])])].slice(-500);
     try { this.save(this.path, JSON.stringify(this.log)); } catch { /* in memory still stops repeats this run */ }
     return due;
   }

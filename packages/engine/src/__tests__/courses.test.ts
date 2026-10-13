@@ -178,3 +178,51 @@ test("save writes a new Markdown file into the course's folder for its kind, nev
   await lib.refresh(0);
   assert.equal(lib.search("quantum", { kind: "exam" })[0]?.file, "CS 161 - Operating Systems/Exams/Practice exam 2026-10-13.md");
 });
+
+test("hostile files: unbalanced PDF text operators parse in linear time; a zip bomb's shared or many entries stay within one archive budget", () => {
+  const brackets = deflateSync(Buffer.from(`BT ${"[".repeat(400_000)} ${"(".repeat(400_000)} ET`, "latin1"));
+  const evil = Buffer.concat([Buffer.from(`%PDF-1.4\n1 0 obj\n<< /Length ${brackets.length} /Filter /FlateDecode >>\nstream\n`, "latin1"), brackets, Buffer.from("\nendstream\nendobj\n", "latin1")]);
+  const t0 = Date.now();
+  pdfUnitsBuiltin(evil);
+  assert.ok(Date.now() - t0 < 2000, `unbalanced operators took ${Date.now() - t0} ms`);
+
+  // One local header named by 300 directory entries: read once.
+  const big = "<a:p><a:r><a:t>x</a:t></a:r></a:p>".repeat(400_000);
+  const one = zip({ "ppt/slides/slide1.xml": big });
+  const localLen = one.indexOf(Buffer.from([0x50, 0x4b, 0x01, 0x02]));
+  const central = one.subarray(localLen, one.length - 22);
+  const entries = Array.from({ length: 300 }, (_, i) => {
+    const name = Buffer.from(`ppt/slides/slide${i + 1}.xml`);
+    const c = Buffer.from(central.subarray(0, 46)); c.writeUInt16LE(name.length, 28);
+    return Buffer.concat([c, name]);
+  });
+  const cd = Buffer.concat(entries), end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(300, 8); end.writeUInt16LE(300, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(localLen, 16);
+  const shared = Buffer.concat([one.subarray(0, localLen), cd, end]);
+  assert.equal(unzip(shared, () => true).size, 1, "a shared local header is inflated once");
+
+  // Many distinct 14 MB entries: the archive's 64 MB budget stops them.
+  const fat = "a".repeat(14 * 1024 * 1024);
+  const many = zip(Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`ppt/slides/slide${i + 1}.xml`, fat])));
+  const read = unzip(many, () => true);
+  assert.ok([...read.values()].reduce((n, b) => n + b.length, 0) <= 64 * 1024 * 1024);
+  assert.ok(read.size <= 5);
+});
+
+test("save and import refuse the root-level pseudo-courses; a save during a refresh is searchable at the next one", async () => {
+  const base = mkdtempSync(join(tmpdir(), "hormes-courses-"));
+  const root = join(base, "Courses");
+  mkdirSync(join(root, "CS 161"), { recursive: true });
+  writeFileSync(join(root, "loose-notes.md"), "Some notes at the root.");
+  const lib = new CourseLibrary({ stateDir: join(base, "state"), root, captured: () => [{ title: "Advisor meeting", at: Date.now(), text: "Outline due Friday." }] });
+  await lib.refresh(0);
+  assert.match(await lib.tool("save", { course: "General", title: "x", text: "y" }), /not a class folder/);
+  assert.match(await lib.tool("save", { course: "captured", title: "x", text: "y" }), /not a class folder/);
+  assert.match(await lib.tool("import", { file: "a.pdf", course: "General" }), /not a class folder/);
+  const scanning = lib.refresh(0);
+  await lib.tool("save", { course: "CS 161", title: "Deadlock notes", text: "Coffman conditions: mutual exclusion, hold and wait." });
+  await scanning;
+  await lib.refresh(60_000);
+  assert.equal(lib.search("coffman")[0]?.file, "CS 161/Notes/Deadlock notes.md", "a save marks the library dirty, so even a young index walks again");
+  assert.deepEqual(readdirSync(root).sort(), ["CS 161", "loose-notes.md"], "no Notes or Lectures folder appears at the root");
+});

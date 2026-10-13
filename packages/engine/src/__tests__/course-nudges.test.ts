@@ -96,3 +96,15 @@ test("the evening brief names tomorrow's classes and what is due tomorrow, once,
   const evening = courseNudges({ now: local("2026-10-12T21:05:00"), courses, agenda, seen: new Set(["brief:2026-10-12"]) }).find(n => n.key === "evening:2026-10-12");
   assert.equal(evening?.body, "Classes: CS 161 lecture 09:00. Due: CS 161 HW2. Say \"prep me for tomorrow\" for a recap.");
 });
+
+test("download nudges announce each file once: a later download names only itself", () => {
+  const nudger = new CourseNudger("/dl.json", () => undefined, () => undefined);
+  const now = local("2026-10-12T14:00:00");
+  const a = { name: "cs161_hw3.pdf", modified: now - 3_600_000, course: "cs-161" }, b = { name: "cs161_lec7.pdf", modified: now - 60_000, course: "cs-161" };
+  const first = nudger.take({ now, courses, agenda: { todos: [], events: [] }, downloads: [a] });
+  assert.equal(first.length, 1);
+  const second = nudger.take({ now: now + 60_000, courses, agenda: { todos: [], events: [] }, downloads: [a, b] });
+  assert.equal(second.length, 1);
+  assert.equal(second[0]!.title, "cs161_lec7.pdf looks like CS 161 material");
+  assert.equal(nudger.take({ now: now + 120_000, courses, agenda: { todos: [], events: [] }, downloads: [b] }).length, 0, "an import that drops a file from the inbox repeats nothing");
+});

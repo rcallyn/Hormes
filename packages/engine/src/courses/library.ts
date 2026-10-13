@@ -108,6 +108,10 @@ export class CourseLibrary {
   private avgLength = 1;
   private scannedAt = 0;
   private refreshing: Promise<void> | undefined;
+  /** A save or an import changed the folders: the next refresh walks them whatever its age. */
+  private dirty = false;
+  /** The course a download's first page names, by name, size and time ("" for none): read once, not every minute. */
+  private readonly inboxSeen = new Map<string, string>();
   /** A walk in progress: files read so far of those that changed. */
   private progress: { done: number; total: number } | undefined;
 
@@ -125,12 +129,13 @@ export class CourseLibrary {
    * skipped within `maxAgeMs` of the last. */
   refresh(maxAgeMs = 15_000): Promise<void> {
     if (this.refreshing) return this.refreshing;
-    if (this.scannedAt && this.now() - this.scannedAt < maxAgeMs) return Promise.resolve();
+    if (this.scannedAt && !this.dirty && this.now() - this.scannedAt < maxAgeMs) return Promise.resolve();
     this.refreshing = this.scan().finally(() => { this.refreshing = undefined; this.scannedAt = this.now(); });
     return this.refreshing;
   }
 
   private async scan(): Promise<void> {
+    this.dirty = false;
     const courses = new Map<string, CourseInfo>();
     const seen = new Map<string, MaterialFile>();
     let changed = false;
@@ -233,7 +238,7 @@ export class CourseLibrary {
 
   /** Recent downloads that look like course material, with the course each names. */
   inbox(): Promise<InboxItem[]> {
-    return scanInbox(this.opts.downloads ?? defaultDownloadsDir(), this.list(), this.materials(), this.now());
+    return scanInbox(this.opts.downloads ?? defaultDownloadsDir(), this.list(), this.materials(), this.now(), this.inboxSeen);
   }
 
   /** While a walk is reading files, a line saying the results are partial. */
@@ -414,9 +419,10 @@ export class CourseLibrary {
         if (!courseName || !title || !text.trim()) return JSON.stringify({ error: "save needs {course, title, text, kind?: notes|exam|homework}." });
         const course = this.resolveCourse(courseName);
         if (!course) return JSON.stringify({ error: `No course matches ${JSON.stringify(courseName)}. Known: ${this.list().map(c => c.title).join(", ") || "none"}.` });
+        if (course.dir === this.root) return JSON.stringify({ error: `${course.title} is not a class folder. Make a folder for the class under ${this.root} first, or name another course.` });
         try {
           const path = saveCourseNote(course, (str("kind") as MaterialKind | undefined) ?? "notes", title, text);
-          this.scannedAt = 0;
+          this.dirty = true;
           return JSON.stringify({ saved: path, course: course.title, note: "A new file; nothing was overwritten. It is searchable after the next refresh (seconds)." });
         } catch (e) { return JSON.stringify({ error: (e as Error).message }); }
       }
@@ -427,9 +433,10 @@ export class CourseLibrary {
         const course = this.resolveCourse(courseName);
         if (!course) return JSON.stringify({ error: `No course matches ${JSON.stringify(courseName)}. Known: ${this.list().map(c => c.title).join(", ") || "none"}.` });
         const kind = str("kind") as MaterialKind | undefined;
+        if (course.dir === this.root) return JSON.stringify({ error: `${course.title} is not a class folder. Make a folder for the class under ${this.root} first, or name another course.` });
         try {
           const path = fileDownload(this.opts.downloads ?? defaultDownloadsDir(), name, course, kind);
-          this.scannedAt = 0;
+          this.dirty = true;
           return JSON.stringify({ filed: path, course: course.title, note: "Copied; the download is untouched. It is searchable after the next refresh (seconds)." });
         } catch (e) { return JSON.stringify({ error: (e as Error).message }); }
       }

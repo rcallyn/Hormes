@@ -70,8 +70,21 @@ public sealed class LectureRecorder : IDisposable
             Directory.CreateDirectory(dir);
             StartedAt = DateTime.Now;
             var safe = string.Concat(title.Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '-' : c)).Trim();
-            FilePath = Path.Combine(dir, $"{StartedAt:yyyy-MM-dd HHmm} {safe}.md");
-            File.WriteAllText(FilePath, $"# {title}\n\n{(course is null ? "Meeting" : course)} · recorded {StartedAt:dddd d MMMM yyyy, HH:mm} · {(computerAudio ? "computer audio" : "microphone")} · transcribed on this PC by Whisper; may contain mistakes.\n\n", new UTF8Encoding(false));
+            // A new file each time: a second recording with the same title in the same minute is "… (2).md", never the first.
+            var header = $"# {title}\n\n{(course is null ? "Meeting" : course)} · recorded {StartedAt:dddd d MMMM yyyy, HH:mm} · {(computerAudio ? "computer audio" : "microphone")} · transcribed on this PC by Whisper; may contain mistakes.\n\n";
+            FilePath = null;
+            for (var n = 1; FilePath is null; n++)
+            {
+                var candidate = Path.Combine(dir, n == 1 ? $"{StartedAt:yyyy-MM-dd HHmm} {safe}.md" : $"{StartedAt:yyyy-MM-dd HHmm} {safe} ({n}).md");
+                try
+                {
+                    using var file = new FileStream(candidate, FileMode.CreateNew, FileAccess.Write);
+                    var bytes = new UTF8Encoding(false).GetBytes(header);
+                    file.Write(bytes, 0, bytes.Length);
+                    FilePath = candidate;
+                }
+                catch (IOException) when (File.Exists(candidate) && n < 100) { }
+            }
             pending = new List<float>();
             chunkStart = 0;
             audioSeconds = 0;
@@ -90,20 +103,23 @@ public sealed class LectureRecorder : IDisposable
     /// <summary>Stop, transcribe what is left, and return the transcript's path once every chunk is written.</summary>
     public async Task<string?> StopAsync()
     {
-        float[] rest;
-        int rate;
+        MicCapture? device;
+        Task all;
         lock (gate)
         {
             if (!Recording) return null;
             Recording = false;
-            mic?.Dispose();
+            device = mic;
             mic = null;
-            rest = pending.ToArray();
-            rate = pendingRate;
+            // The rest is queued under the lock, after any chunk OnSamples cut: the transcript stays in order and the
+            // end line waits for every chunk.
+            Queue(pending.ToArray(), pendingRate, chunkStart);
             pending = new List<float>();
+            all = writes;
         }
-        Queue(rest, rate, chunkStart);
-        await writes.ConfigureAwait(false);
+        // Outside the lock: disposing the capture joins its thread, which may be waiting on the lock in OnSamples.
+        device?.Dispose();
+        await all.ConfigureAwait(false);
         if (FilePath is not null) File.AppendAllText(FilePath, $"\n_Recording ended {DateTime.Now:HH:mm}._\n", new UTF8Encoding(false));
         return FilePath;
     }
@@ -113,8 +129,6 @@ public sealed class LectureRecorder : IDisposable
 
     private void OnSamples(float[] samples, int rate, double at)
     {
-        float[]? cut = null;
-        double cutAt = 0;
         lock (gate)
         {
             if (!Recording) return;
@@ -129,13 +143,12 @@ public sealed class LectureRecorder : IDisposable
             var seconds = (double)pending.Count / rate;
             if ((seconds >= MinChunkSeconds && quietFor >= 0.4) || seconds >= MaxChunkSeconds)
             {
-                cut = pending.ToArray();
-                cutAt = chunkStart;
+                // Queued under the lock, so a Stop in between cannot put the rest ahead of this chunk.
+                Queue(pending.ToArray(), rate, chunkStart);
                 pending = new List<float>();
                 quietFor = 0;
             }
         }
-        if (cut is not null) Queue(cut, rate, cutAt);
     }
 
     /// <summary>Chunks are transcribed and appended strictly in order.</summary>
@@ -163,12 +176,14 @@ public sealed class LectureRecorder : IDisposable
 
     public void Dispose()
     {
+        MicCapture? device;
         lock (gate)
         {
             Recording = false;
-            mic?.Dispose();
+            device = mic;
             mic = null;
         }
+        device?.Dispose();
         cts?.Cancel();
     }
 }

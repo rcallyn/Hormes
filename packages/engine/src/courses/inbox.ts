@@ -29,7 +29,8 @@ export function courseIn(courses: readonly CourseInfo[], text: string): CourseIn
   return courses.find(c => c.code && squash(c.code).length >= 4 && s.includes(squash(c.code))) ?? courses.find(c => names(c).some(n => s.includes(n)));
 }
 
-export async function scanInbox(dir: string, courses: readonly CourseInfo[], filed: readonly MaterialFile[], now: number): Promise<InboxItem[]> {
+/** cache: what a file's first page named, by name, size and time, so a minute's scan does not read it again. */
+export async function scanInbox(dir: string, courses: readonly CourseInfo[], filed: readonly MaterialFile[], now: number, cache: Map<string, string> = new Map()): Promise<InboxItem[]> {
   if (!existsSync(dir)) return [];
   const have = new Set(filed.map(f => `${basename(f.path).toLowerCase()}:${f.size}`));
   const out: InboxItem[] = [];
@@ -42,12 +43,19 @@ export async function scanInbox(dir: string, courses: readonly CourseInfo[], fil
     if (!st.isFile() || st.isSymbolicLink() || now - st.mtimeMs > RECENT_MS || st.size > 80 * 1024 * 1024) continue;
     if (have.has(`${name.toLowerCase()}:${st.size}`)) continue;
     let course = courseIn(courses, name), why = course ? "its name" : undefined;
-    if (!course && extname(name).toLowerCase() !== ".zip") {
-      try {
-        const first = (await extractUnits(join(dir, name))).slice(0, 2).map(u => u.text).join("\n").slice(0, 4000);
-        course = courseIn(courses, first);
-        if (course) why = "its first page";
-      } catch { /* unreadable: listed without a course */ }
+    if (!course && extname(name).toLowerCase() !== ".zip" && st.size <= 20 * 1024 * 1024) {
+      const key = `${name}:${st.size}:${Math.round(st.mtimeMs)}:${courses.map(c => c.id).join(",")}`;
+      let id = cache.get(key);
+      if (id === undefined) {
+        try {
+          const first = (await extractUnits(join(dir, name))).slice(0, 2).map(u => u.text).join("\n").slice(0, 4000);
+          id = courseIn(courses, first)?.id ?? "";
+        } catch { id = ""; }
+        if (cache.size > 500) cache.clear();
+        cache.set(key, id);
+      }
+      course = courses.find(c => c.id === id);
+      if (course) why = "its first page";
     }
     out.push({ name, bytes: st.size, modified: st.mtimeMs, ...(course ? { course: course.id } : {}), kind: materialKind(name), ...(why ? { why } : {}) });
   }
