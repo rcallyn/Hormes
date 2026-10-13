@@ -83,5 +83,6 @@ course?}`: short paragraphs with `$inline$` and `$$display$$` TeX. The engine br
 notch opens, grows to fit (720 DIPs wide, up to 700 tall, scrolling past that) and shows the notes: handwritten (Ink
 Free) with typeset math (WpfMath) for math-heavy classes, plain otherwise, until Done, a click away or the next
 question. A course is marked for handwriting with `"handwriting": true` in its `course.json` (`courses list` reports it).
-The spoken answer is one line pointing at the notes. Long ordinary answers also widen and heighten the island to fit.
+The spoken answer is one line pointing at the notes. Notes for a course are also kept as `<course>/Notes/<day> <title>.md`
+(never overwriting), so they can be read again and turn up in search. Long ordinary answers also widen and heighten the island to fit.
 `Checks.exe --render` draws notes-handwriting.png, notes-plain.png and notch-notes.png (the real island with notes). The Mac ignores `notes` for now.

@@ -234,3 +234,13 @@ test("course.json can mark a class for handwritten explanations, and list says s
   assert.equal(courses.find(c => c.code === "ECON 201")?.handwriting, true);
   assert.equal(courses.find(c => c.code === "CS 161")?.handwriting, undefined);
 });
+
+test("keepNotes saves an explanation into the class's Notes folder, dated, and it becomes searchable; no class, nothing kept", async () => {
+  const { lib } = library();
+  await lib.refresh(0);
+  const path = lib.keepNotes("CS 161", "Round robin, worked", "With quantum $q = 4$, each process runs at most 4 ms before the next.");
+  assert.equal(path, "CS 161 - Operating Systems/Notes/2026-10-12 Round robin, worked.md");
+  assert.equal(lib.keepNotes("Biology", "x", "y"), undefined);
+  await lib.refresh(60_000);
+  assert.equal(lib.search("quantum each process runs", { kind: "notes" })[0]?.file, path);
+});

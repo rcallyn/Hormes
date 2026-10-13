@@ -238,6 +238,16 @@ export class CourseLibrary {
     } catch { /* the index is a cache; the next refresh reads the files again */ }
   }
 
+  /** An explanation Hormes wrote for a course (the explain tool), kept as `<course>/Notes/<day> <title>.md` so it can
+   * be read again and found by search. Undefined when no class folder matches; never overwrites. */
+  keepNotes(courseName: string, title: string, text: string): string | undefined {
+    const course = this.resolveCourse(courseName);
+    if (!course || course.dir === this.root) return undefined;
+    const path = saveCourseNote(course, "notes", `${localDay(this.now())} ${title}`, `# ${title}\n\n${text}\n`);
+    this.dirty = true;
+    return path;
+  }
+
   /** Recent downloads that look like course material, with the course each names. */
   inbox(): Promise<InboxItem[]> {
     return scanInbox(this.opts.downloads ?? defaultDownloadsDir(), this.list(), this.materials(), this.now(), this.inboxSeen);
